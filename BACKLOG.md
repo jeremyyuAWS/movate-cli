@@ -26,12 +26,11 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 
 ## 🎯 Top 10 highest-leverage shortlist
 
-**v0.4 OTel + Composite tracers shipped this session** — 26 new tests (234 unit + 3 smoke = 237 total). `OtelTracer` (OTLP-HTTP exporter) and `CompositeTracer` (fan-out) both opt-in via `MOVATE_TRACER` or env auto-detect. With both `LANGFUSE_SECRET_KEY` and `OTEL_EXPORTER_OTLP_ENDPOINT` set, `build_tracer()` returns a composite that writes every span to both backends. Each backend fails soft individually; the composite skips broken delegates without affecting siblings. (Also this session: v0.3 IR/runner/CLI, v0.3.1 patch tag, v0.4 stage 1 Langfuse.)
+**v0.4 trace replay shipped this session** — 19 new tests (253 unit + 3 smoke = 256 total). `movate trace replay <id>` auto-detects agent vs workflow run by id and renders Rich tables (status, agent/workflow, latency, cost, tokens, error) plus per-node breakdown + initial/final state for workflows. `-v` shows full input/output JSON, `-o json` is pipe-friendly. Storage gained `get_run(run_id)` + `get_workflow_run(id)` lookups. (Also this session: v0.4 OTel + composite tracers, v0.4 Langfuse, v0.3.1 patch tag, v0.3 IR/runner/CLI.)
 
-1. [ ] **Trace replay (`movate trace replay <run-id>`)** `[HIGH] [v0.4] [next] [2-3d]` — read sqlite + tracer events, render Rich timeline. Drops debug time on a real prod issue from hours to minutes.
-2. [ ] **Eval baseline diff (`movate eval --baseline <eval-id>`)** `[HIGH] [v0.4] [next] [2-3d]` — already half-built since `EvalRecord` is persisted.
-3. [ ] **`movate run --replay <run-id>`** `[HIGH] [v0.4] [≤1d]` — re-run an exact recorded input against the current agent; single best regression-debug tool.
-4. [ ] **Tag v0.4 release** `[MED] [v0.4] [≤1h]` — once trace replay + baseline diff land, cut the tag.
+1. [ ] **Eval baseline diff (`movate eval --baseline <eval-id>`)** `[HIGH] [v0.4] [next] [2-3d]` — already half-built since `EvalRecord` is persisted.
+2. [ ] **`movate run --replay <run-id>`** `[HIGH] [v0.4] [next] [≤1d]` — re-run an exact recorded input against the current agent; single best regression-debug tool.
+3. [ ] **Tag v0.4 release** `[MED] [v0.4] [≤1h]` — once baseline diff + run-replay land, cut the tag.
 5. [ ] **GH Actions eval-gate workflow** `[HIGH] [v1.0] [≤1d]` — closes the loop on "evals are mandatory."
 6. [ ] **PostgresProvider + FastAPI runtime** `[HIGH] [v0.5] [1w]` — turns movate from a CLI into a service.
 7. [ ] **API key issuance + tenant isolation audit** `[HIGH] [v0.5] [2-3d]` — security-critical for multi-tenant.
@@ -138,7 +137,7 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 - [x] **OTel tracer (OTLP exporter)** `[HIGH] [v0.4] [done]` — `OtelTracer` in [src/movate/tracing/otel.py](src/movate/tracing/otel.py); OTLP-HTTP exporter via `BatchSpanProcessor`. `OTEL_EXPORTER_OTLP_ENDPOINT` + optional `OTEL_SERVICE_NAME` env vars. Tracer + provider injectable for tests; SDK imported lazily so the module loads without `opentelemetry`. Attribute coercion via `_otel_value` so dict / tuple / list values become OTel-acceptable JSON strings.
 - [x] **Tracer auto-select via `MOVATE_TRACER`** `[MED] [v0.4] [done]` — `stdout | langfuse | otel | composite`. Auto-detects on env vars when unset.
 - [x] **Composite tracer (multi-fanout)** `[MED] [v0.4] [done]` — `CompositeTracer` in [src/movate/tracing/composite.py](src/movate/tracing/composite.py). Per-span mapping back to per-delegate `SpanCtx`s so end/event/attribute fan-out. Each delegate wrapped in try/except — one bad backend can't kill siblings. 26 tests in [tests/test_tracing_otel.py](tests/test_tracing_otel.py) covering OtelTracer + CompositeTracer + all dispatch paths.
-- [ ] **`movate trace replay <run-id>`** `[HIGH] [v0.4] [2-3d]` — reconstruct the workflow timeline from local DB + spans.
+- [x] **`movate trace replay <run-id>`** `[HIGH] [v0.4] [done]` — `core/replay.py` (engine) + `cli/trace.py` (rendering). Auto-detects agent vs workflow id, renders Rich tables + per-node breakdown for workflows, `--verbose` shows full input/output bodies, `--output json` is pipe-friendly. New `get_run(run_id)` + `get_workflow_run(id)` storage methods. 19 tests in [tests/test_replay.py](tests/test_replay.py) + [tests/test_cli_trace.py](tests/test_cli_trace.py).
 - [ ] **`movate logs <run-id> --tail`** `[MED] [v0.4] [≤1d]` — read sqlite + tracer events, render Rich timeline.
 - [ ] **Drift baseline (`movate eval --baseline <eval-id>`)** `[HIGH] [v0.4] [2-3d]` — diff today's scores vs a stored baseline; flags regressions per case.
 - [ ] **Span attributes — token-level cost breakdown** `[MED] [v0.4] [≤2h]` — `cost_usd`, `pricing_version`, `cached_input_tokens` per provider call.

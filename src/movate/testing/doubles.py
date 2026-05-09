@@ -53,6 +53,15 @@ class InMemoryStorage:
     async def save_workflow_run(self, w: WorkflowRunRecord) -> None:
         self.workflow_runs.append(w)
 
+    async def get_run(self, run_id: str) -> RunRecord | None:
+        return next((r for r in self.runs if r.run_id == run_id), None)
+
+    async def get_workflow_run(self, workflow_run_id: str) -> WorkflowRunRecord | None:
+        return next(
+            (w for w in self.workflow_runs if w.workflow_run_id == workflow_run_id),
+            None,
+        )
+
     async def list_runs(
         self,
         *,

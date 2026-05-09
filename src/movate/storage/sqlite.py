@@ -260,6 +260,21 @@ class SqliteProvider:
             rows = await cur.fetchall()
         return [_row_to_eval(r) for r in rows]
 
+    async def get_run(self, run_id: str) -> RunRecord | None:
+        async with self._db.execute(
+            "SELECT * FROM runs WHERE run_id = ? LIMIT 1", (run_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_run(row) if row else None
+
+    async def get_workflow_run(self, workflow_run_id: str) -> WorkflowRunRecord | None:
+        async with self._db.execute(
+            "SELECT * FROM workflow_runs WHERE workflow_run_id = ? LIMIT 1",
+            (workflow_run_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_workflow_run(row) if row else None
+
     async def save_workflow_run(self, w: WorkflowRunRecord) -> None:
         await self._db.execute(
             """
