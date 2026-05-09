@@ -47,8 +47,11 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_agent_created
     ON runs(agent, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_runs_workflow_run
-    ON runs(workflow_run_id) WHERE workflow_run_id IS NOT NULL;
+-- Note: idx_runs_workflow_run is created in _MIGRATIONS, not here, because
+-- upgraders from a pre-v0.3 schema lack the workflow_run_id column when
+-- this script runs. Sqlite errors on CREATE INDEX referencing a missing
+-- column even with IF NOT EXISTS. Putting the index after the ALTER TABLE
+-- migrations sidesteps the ordering trap.
 
 CREATE TABLE IF NOT EXISTS failures (
     failure_id   TEXT PRIMARY KEY,
@@ -97,11 +100,18 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_created
     ON workflow_runs(workflow, created_at DESC);
 """
 
-# Lightweight migrations applied after `executescript(_SCHEMA)`. Each is
-# wrapped in a try/except for the "duplicate column" error so reruns are safe.
+# Lightweight migrations applied after `executescript(_SCHEMA)`. ALTERs are
+# wrapped in a try/except for the "duplicate column" error so reruns are
+# safe. Indexes use IF NOT EXISTS so reruns are safe too — but they MUST
+# come after their corresponding ALTER TABLE so upgraders from a pre-v0.3
+# schema (no workflow_run_id column yet) don't fail on the column reference.
 _MIGRATIONS = [
     "ALTER TABLE runs ADD COLUMN workflow_run_id TEXT",
     "ALTER TABLE runs ADD COLUMN node_id TEXT",
+    (
+        "CREATE INDEX IF NOT EXISTS idx_runs_workflow_run "
+        "ON runs(workflow_run_id) WHERE workflow_run_id IS NOT NULL"
+    ),
 ]
 
 
