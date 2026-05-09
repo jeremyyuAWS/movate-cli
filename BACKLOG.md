@@ -26,15 +26,13 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 
 ## 🎯 Top 10 highest-leverage shortlist
 
-**v0.4 run-replay shipped this session** — 14 new tests (288 unit + 3 smoke = 291 total). `movate run <agent> --replay <run-id>` re-executes the recorded input through the current agent code (prompt + model + schemas all loaded fresh from disk; only the input is pinned). Surfaces output diff (`changed_keys`), status flip, cost/latency deltas in `-o text` (Rich) or `-o json`. Output changes are *not* failures (debug tool); only a current-run error trips exit 1. Mutually exclusive with positional INPUT/--input. Workflow replay deferred — single-agent regression covers the 80% debug case. (Also this session: v0.4 baseline diff, trace replay, OTel/composite/Langfuse tracers, v0.3.1 patch, v0.3 IR/runner/CLI.)
+**v0.4.0 tagged + GH Actions eval-gate shipped this session** — 6 new file-baseline tests (294 unit + 3 smoke = 297 total). `movate eval` gained `--baseline-file <path>` (load EvalRecord from JSON — works on ephemeral CI runners) and `--output-baseline <path>` (write current EvalRecord for committing). Example workflow at `.github/workflows/eval-gate.example.yml` (gate-pr + refresh-baseline jobs); docs at [docs/ci-eval-gate.md](docs/ci-eval-gate.md). Closes the "evals are mandatory" loop — consumers can now drop in 10 lines of YAML and get PR-blocking eval gates with auto-refresh on main merge.
 
-1. [ ] **Tag v0.4 release** `[MED] [v0.4] [≤1h]` — both regression-debug tools (baseline diff + run-replay) plus full tracing stack are in main; cut the tag.
-2. [ ] **GH Actions eval-gate workflow** `[HIGH] [v1.0] [≤1d]` — closes the loop on "evals are mandatory."
-3. [ ] **PostgresProvider + FastAPI runtime** `[HIGH] [v0.5] [1w]` — turns movate from a CLI into a service.
-4. [ ] **API key issuance + tenant isolation audit** `[HIGH] [v0.5] [2-3d]` — security-critical for multi-tenant.
-5. [ ] **Bicep + GH-Actions deploy.yml** `[HIGH] [v1.0] [4-6d]` — turn `git push release/*` into an ACA deploy.
-6. [ ] **Model policy enforcement** `[HIGH] [v1.0] [2-3d]` — `policies/model_policy.yaml` enforced at executor entry.
-7. [ ] **More templates as customer engagements demand** `[MED] [post-v0.4]` — extractor, RAG, function-caller; trivial to add now that the registry exists.
+1. [ ] **PostgresProvider + FastAPI runtime** `[HIGH] [v0.5] [1w]` — turns movate from a CLI into a service.
+2. [ ] **API key issuance + tenant isolation audit** `[HIGH] [v0.5] [2-3d]` — security-critical for multi-tenant.
+3. [ ] **Bicep + GH-Actions deploy.yml** `[HIGH] [v1.0] [4-6d]` — turn `git push release/*` into an ACA deploy.
+4. [ ] **Model policy enforcement** `[HIGH] [v1.0] [2-3d]` — `policies/model_policy.yaml` enforced at executor entry.
+5. [ ] **More templates as customer engagements demand** `[MED] [post-v0.4]` — extractor, RAG, function-caller; trivial to add now that the registry exists.
 
 ---
 
@@ -168,7 +166,7 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 - [ ] **Bicep: ACA + Postgres Flex + Key Vault + ACR + Log Analytics** `[HIGH] [v1.0] [1w]` — port from MDK; harden network rules.
 - [ ] **`movate deploy <env>`** `[HIGH] [v1.0] [2-3d]` — build → ACR push → ACA revision update.
 - [ ] **GH Actions `validate.yml`** `[HIGH] [v1.0] [≤1d]` — schema + topology validation on every PR.
-- [ ] **GH Actions `eval.yml` (block on regression)** `[HIGH] [v1.0] [≤1d]` — closes the "evals are mandatory" loop.
+- [x] **GH Actions `eval-gate.example.yml` (block on regression)** `[HIGH] [v1.0] [done]` — `cli/eval.py` gained `--baseline-file <path>` and `--output-baseline <path>` flags so baselines can be git-tracked instead of stuck in ephemeral runner sqlite. Example workflow at [.github/workflows/eval-gate.example.yml](.github/workflows/eval-gate.example.yml) ships a `gate-pr` job (PR runs `--baseline-file`, exits 1 on regression past tolerance) and a `refresh-baseline` job (main-merge re-runs eval with `--output-baseline` and auto-commits). Docs at [docs/ci-eval-gate.md](docs/ci-eval-gate.md). 6 tests covering load, write, mutual exclusion, malformed-JSON path.
 - [ ] **GH Actions `deploy.yml` (release branch → ACA)** `[HIGH] [v1.0] [2-3d]`.
 - [ ] **GH Actions `security.yml`** `[MED] [v1.0] [≤1d]` — dependency + secret scan.
 - [ ] **`policies/model_policy.yaml` enforcement** `[HIGH] [v1.0] [2-3d]` — `allowed_providers`, `deny_models`, `max_cost_per_run_usd`, `fallback_chain`. Enforced at executor entry; rejected by `movate validate`.

@@ -21,6 +21,7 @@ from movate.core.eval import EvalConfigError, EvalEngine, EvalSummary
 from movate.core.loader import AgentBundle, AgentLoadError, load_agent
 from movate.core.models import EvalRecord
 from movate.core.reporters import render_eval_markdown
+from movate.storage.base import StorageProvider
 
 console = Console()
 err_console = Console(stderr=True)
@@ -48,6 +49,22 @@ def eval_(
         "--baseline",
         help="Eval id of a stored EvalRecord to diff against. CLI exits 1 on regression.",
     ),
+    baseline_file: Path = typer.Option(
+        None,
+        "--baseline-file",
+        help=(
+            "Path to a JSON-serialized EvalRecord. CI-friendly alternative to --baseline "
+            "since CI runners have ephemeral sqlite. Mutually exclusive with --baseline."
+        ),
+    ),
+    output_baseline: Path = typer.Option(
+        None,
+        "--output-baseline",
+        help=(
+            "Write the current EvalRecord to this path as JSON. Use on main-branch "
+            "merges to refresh the committed baseline; CI then diffs PRs against it."
+        ),
+    ),
     regression_tolerance: float = typer.Option(
         0.0,
         "--regression-tolerance",
@@ -62,12 +79,22 @@ def eval_(
       [dim]# Exact-match scoring against the dataset[/dim]
       $ movate eval ./faq-agent --gate 0.7
 
-      [dim]# Compare against a stored baseline; CI gate on regressions[/dim]
+      [dim]# Compare against a stored (sqlite) baseline by id[/dim]
       $ movate eval ./faq-agent --baseline 4f8a-... --regression-tolerance 0.05
+
+      [dim]# CI flow: gate against a git-tracked baseline file[/dim]
+      $ movate eval ./faq-agent --mock --baseline-file .movate/baseline.json
+
+      [dim]# Refresh the committed baseline on main-branch merge[/dim]
+      $ movate eval ./faq-agent --mock --output-baseline .movate/baseline.json
 
       [dim]# Hermetic CI run (no API keys needed)[/dim]
       $ movate eval ./faq-agent --mock
     """
+    if baseline is not None and baseline_file is not None:
+        err_console.print("[red]✗[/red] --baseline and --baseline-file are mutually exclusive")
+        raise typer.Exit(code=2)
+
     try:
         bundle = load_agent(path)
     except AgentLoadError as exc:
@@ -82,6 +109,8 @@ def eval_(
             runs=runs,
             mock=mock,
             baseline_id=baseline,
+            baseline_file=baseline_file,
+            output_baseline=output_baseline,
             regression_tolerance=regression_tolerance,
             output_format=output_format,
         )
@@ -96,6 +125,8 @@ async def _run_eval(
     runs: int,
     mock: bool,
     baseline_id: str | None = None,
+    baseline_file: Path | None = None,
+    output_baseline: Path | None = None,
     regression_tolerance: float = 0.0,
     output_format: str = "table",
 ) -> None:
@@ -116,17 +147,20 @@ async def _run_eval(
 
         record = summary.to_record()
         await rt.storage.save_eval(record)
-
-        # Resolve baseline NOW while storage is still open.
-        if baseline_id is not None:
-            baseline_record = await rt.storage.get_eval(baseline_id)
-            if baseline_record is None:
-                err_console.print(
-                    f"[red]✗[/red] baseline eval id {baseline_id!r} not found in storage"
-                )
-                raise typer.Exit(code=2) from None
+        baseline_record = await _resolve_storage_baseline(rt.storage, baseline_id)
     finally:
         await shutdown_runtime(rt.storage, rt.tracer)
+
+    # Resolve a file-based baseline outside the storage block — pure I/O,
+    # no runtime needed. (`baseline_id` and `baseline_file` are mutually
+    # exclusive at the CLI entry point so only one branch fires.)
+    if baseline_file is not None:
+        baseline_record = _resolve_file_baseline(baseline_file)
+
+    # Write the current run's EvalRecord to disk if requested. Done after
+    # storage is closed so a write failure can't corrupt the DB.
+    if output_baseline is not None:
+        _write_baseline_file(output_baseline, record)
 
     # Apply CLI gate (overrides judge.threshold for "case passes").
     cases_passing = sum(1 for c in summary.cases if c.aggregated_score >= gate)
@@ -350,3 +384,54 @@ def _emit_json(
 
 def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+async def _resolve_storage_baseline(
+    storage: StorageProvider, baseline_id: str | None
+) -> EvalRecord | None:
+    """Look up a sqlite-stored baseline by id; ``None`` if no id passed.
+
+    Lives as a helper because the lookup must happen before the storage
+    layer closes — otherwise ``finally`` would shut storage down first.
+    """
+    if baseline_id is None:
+        return None
+    record = await storage.get_eval(baseline_id)
+    if record is None:
+        err_console.print(f"[red]✗[/red] baseline eval id {baseline_id!r} not found in storage")
+        raise typer.Exit(code=2) from None
+    return record
+
+
+def _resolve_file_baseline(baseline_file: Path) -> EvalRecord:
+    """Read a JSON-serialized EvalRecord from disk, with a friendly error path."""
+    try:
+        return _load_baseline_file(baseline_file)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        err_console.print(f"[red]✗[/red] baseline file load failed: {exc}")
+        raise typer.Exit(code=2) from None
+
+
+def _load_baseline_file(path: Path) -> EvalRecord:
+    """Read an :class:`EvalRecord` JSON dump back into a model instance.
+
+    Raises :class:`FileNotFoundError`, :class:`json.JSONDecodeError`, or
+    :class:`ValueError` (from Pydantic) — the caller turns these into
+    ``Exit(2)``.
+    """
+    raw = path.read_text()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError(f"baseline file must be a JSON object, got {type(payload).__name__}")
+    return EvalRecord.model_validate(payload)
+
+
+def _write_baseline_file(path: Path, record: EvalRecord) -> None:
+    """Persist ``record`` as pretty-printed JSON.
+
+    Creates parent directories so users can drop the baseline at
+    ``.movate/baseline.json`` without pre-creating the dir.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(record.model_dump_json(indent=2) + "\n")
+    err_console.print(f"[green]✓[/green] wrote baseline → {path}")

@@ -3,6 +3,30 @@
 All notable changes to movate. Format follows [Keep a Changelog](https://keepachangelog.com/);
 versioning follows [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added — File-based eval baselines (CI integration)
+
+- **`movate eval --baseline-file <path>`** — load an `EvalRecord` from a
+  JSON file instead of looking up an `eval_id` in sqlite. Unblocks CI
+  use: GitHub Actions runners are ephemeral, sqlite isn't. With this
+  flag, the baseline can be a git-tracked artifact in the consumer's
+  repo. Mutually exclusive with `--baseline`.
+- **`movate eval --output-baseline <path>`** — after running, write the
+  current run's `EvalRecord` to disk as JSON. Pair with the
+  `refresh-baseline` job in CI on main-branch merge to keep the
+  committed baseline current. Creates parent directories so users can
+  drop the file at `.movate/<agent>/baseline.json` without pre-creating
+  the dir.
+- Example workflow at
+  [.github/workflows/eval-gate.example.yml](.github/workflows/eval-gate.example.yml)
+  with `gate-pr` (PR-time regression check) and `refresh-baseline`
+  (main-branch refresh) jobs. Docs at
+  [docs/ci-eval-gate.md](docs/ci-eval-gate.md). Six new tests cover
+  load, write, mutual exclusion, missing/malformed JSON.
+
+[Unreleased]: https://github.com/movate/movate-cli/compare/v0.4.0...HEAD
+
 ## [0.4.0] — 2026-05-08
 
 Observability + regression-detection. Closes both halves of the

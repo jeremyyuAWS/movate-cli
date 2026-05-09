@@ -383,3 +383,216 @@ def test_cli_eval_baseline_with_tolerance_allows_drop(
     assert payload["baseline"]["mean_score_delta"] < 0
     assert payload["baseline"]["regression"] is False
     _ = baseline_mean  # context for the reader; not asserted
+
+
+# ---------------------------------------------------------------------------
+# File-based baseline — CI flow (--baseline-file / --output-baseline)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_cli_eval_writes_output_baseline_to_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--output-baseline writes a JSON-serialized EvalRecord."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MOVATE_MOCK_RESPONSE", '{"message": "Hello!"}')
+    agent_dir = _scaffold_default_agent(tmp_path)
+    baseline_path = tmp_path / "baselines" / "demo.json"  # nested dir created by writer
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            str(agent_dir),
+            "--mock",
+            "--gate",
+            "0.0",
+            "--output-baseline",
+            str(baseline_path),
+            "-o",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert baseline_path.exists()
+
+    # The file must round-trip through EvalRecord — Pydantic validates schema.
+    persisted = EvalRecord.model_validate_json(baseline_path.read_text())
+    payload = json.loads(result.stdout)
+    assert persisted.eval_id == payload["eval_id"]
+    assert persisted.mean_score == pytest.approx(payload["mean_score"])
+
+
+@pytest.mark.unit
+def test_cli_eval_baseline_file_diffs_correctly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end CI flow: write baseline file, then re-run eval against it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    agent_dir = _scaffold_default_agent(tmp_path)
+    baseline_path = tmp_path / "baseline.json"
+
+    # Step 1: pre-merge run, write baseline file.
+    monkeypatch.setenv("MOVATE_MOCK_RESPONSE", '{"message": "Hello!"}')
+    write = runner.invoke(
+        app,
+        [
+            "eval",
+            str(agent_dir),
+            "--mock",
+            "--gate",
+            "0.0",
+            "--output-baseline",
+            str(baseline_path),
+            "-o",
+            "json",
+        ],
+    )
+    assert write.exit_code == 0, write.stdout
+    assert baseline_path.exists()
+
+    # Step 2: PR-time run with degraded mock → file-based baseline catches drop.
+    monkeypatch.setenv("MOVATE_MOCK_RESPONSE", '{"message": "wrong"}')
+    pr = runner.invoke(
+        app,
+        [
+            "eval",
+            str(agent_dir),
+            "--mock",
+            "--gate",
+            "0.0",
+            "--baseline-file",
+            str(baseline_path),
+            "-o",
+            "json",
+        ],
+    )
+    assert pr.exit_code == 1, pr.stdout  # regression → exit 1
+    payload = json.loads(pr.stdout)
+    assert payload["baseline"]["regression"] is True
+    assert payload["baseline"]["mean_score_delta"] < 0
+
+
+@pytest.mark.unit
+def test_cli_eval_baseline_file_no_regression_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """File-based baseline with identical scores → exit 0."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MOVATE_MOCK_RESPONSE", '{"message": "Hello!"}')
+    agent_dir = _scaffold_default_agent(tmp_path)
+    baseline_path = tmp_path / "baseline.json"
+
+    write = runner.invoke(
+        app,
+        [
+            "eval",
+            str(agent_dir),
+            "--mock",
+            "--gate",
+            "0.0",
+            "--output-baseline",
+            str(baseline_path),
+        ],
+    )
+    assert write.exit_code == 0, write.stdout
+
+    # Re-run with same mock → no drop.
+    pr = runner.invoke(
+        app,
+        [
+            "eval",
+            str(agent_dir),
+            "--mock",
+            "--gate",
+            "0.0",
+            "--baseline-file",
+            str(baseline_path),
+            "-o",
+            "json",
+        ],
+    )
+    assert pr.exit_code == 0, pr.stdout
+    payload = json.loads(pr.stdout)
+    assert payload["baseline"]["regression"] is False
+    assert payload["baseline"]["mean_score_delta"] == 0.0
+
+
+@pytest.mark.unit
+def test_cli_eval_baseline_file_missing_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing baseline file is operator error → exit 2 (not 1)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MOVATE_MOCK_RESPONSE", '{"message": "Hello!"}')
+    agent_dir = _scaffold_default_agent(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            str(agent_dir),
+            "--mock",
+            "--gate",
+            "0.0",
+            "--baseline-file",
+            str(tmp_path / "nonexistent.json"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "baseline file load failed" in result.stderr
+
+
+@pytest.mark.unit
+def test_cli_eval_baseline_file_malformed_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A garbage JSON file fails fast with exit 2."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MOVATE_MOCK_RESPONSE", '{"message": "Hello!"}')
+    agent_dir = _scaffold_default_agent(tmp_path)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json")
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            str(agent_dir),
+            "--mock",
+            "--gate",
+            "0.0",
+            "--baseline-file",
+            str(bad),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "baseline file load failed" in result.stderr
+
+
+@pytest.mark.unit
+def test_cli_eval_rejects_baseline_and_baseline_file_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--baseline and --baseline-file are mutually exclusive."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MOVATE_MOCK_RESPONSE", '{"message": "Hello!"}')
+    agent_dir = _scaffold_default_agent(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            str(agent_dir),
+            "--mock",
+            "--gate",
+            "0.0",
+            "--baseline",
+            "some-id",
+            "--baseline-file",
+            str(tmp_path / "x.json"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.stderr
