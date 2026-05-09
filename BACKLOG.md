@@ -26,18 +26,18 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 
 ## 🎯 Top 10 highest-leverage shortlist
 
-**v0.3 workflow CLI — stage 3 shipped this session** — 9 new tests (196 unit + 3 smoke = 199 total). `movate run`, `movate validate`, `movate show` all auto-detect workflow vs agent by presence of `workflow.yaml`. Workflow `validate` exits 0/2 with topology summary; workflow `show` prints Rich tables + ASCII chain + a Mermaid `flowchart LR` block (paste into a PR for a live diagram); workflow `run` parses `initial_state` from JSON / file / stdin, runs through the executor, prints per-node summary + `final_state` JSON. End-to-end verified.
+**v0.4 Langfuse + v0.3.1 patch shipped this session** — 12 new tracer tests (208 unit + 3 smoke = 211 total). `LangfuseTracer` opt-in via `MOVATE_TRACER=langfuse` or `LANGFUSE_SECRET_KEY` env; `build_tracer()` falls back to stdout with a stderr warning if the optional dep is missing. v0.3.1 patch tag also cut, bundling the `WorkflowRunner` double-save fix surfaced by the LangGraph prototype. v0.3 workflow IR / runner / CLI shipped earlier in this session — see CHANGELOG.md.
 
-1. [ ] **Throwaway IR→LangGraph prototype** `[HIGH] [v0.3] [next] [≤1d]` — write it, prove the seam, **delete it** until v1.1. Mitigates the #1 risk in the implementation roadmap.
-2. [ ] **Tag v0.3 release** `[MED] [v0.3] [next] [≤1h]` — release notes from v0.3 "shipped" sections; bump to 0.3.0.
+1. [ ] **OTel tracer (OTLP exporter)** `[HIGH] [v0.4] [next] [2-3d]` — span hierarchy: workflow → node → provider call → retry attempts. Same env-driven dispatch (`MOVATE_TRACER=otel`); composite tracer (Langfuse + OTel together) right after.
+2. [ ] **Trace replay (`movate trace replay <run-id>`)** `[HIGH] [v0.4] [next] [2-3d]` — read sqlite + tracer events, render Rich timeline. Drops debug time on a real prod issue from hours to minutes.
 3. [ ] **Eval baseline diff (`movate eval --baseline <eval-id>`)** `[HIGH] [v0.4] [2-3d]` — already half-built since `EvalRecord` is persisted.
-4. [ ] **Langfuse tracer wired** `[HIGH] [v0.4] [≤1d]` — single biggest visibility win.
-5. [ ] **Trace replay (`movate trace replay`)** `[HIGH] [v0.4] [2-3d]` — drops debug time on a real prod issue from hours to minutes.
-6. [ ] **GH Actions eval-gate workflow** `[HIGH] [v1.0] [≤1d]` — closes the loop on "evals are mandatory."
-7. [ ] **`movate run --replay <run-id>`** `[HIGH] [v0.4] [≤1d]` — re-run an exact recorded input against the current agent; single best regression-debug tool.
-8. [ ] **OTel tracer (OTLP exporter)** `[HIGH] [v0.4] [2-3d]` — span hierarchy mirroring workflow IR; cross-service from day one.
-9. [ ] **PostgresProvider + FastAPI runtime** `[HIGH] [v0.5] [1w]` — turns movate from a CLI into a service.
-10. [ ] **More templates as customer engagements demand** `[MED] [post-v0.2]` — extractor, RAG, function-caller; trivial to add now that the registry exists.
+4. [ ] **`movate run --replay <run-id>`** `[HIGH] [v0.4] [≤1d]` — re-run an exact recorded input against the current agent; single best regression-debug tool.
+5. [ ] **GH Actions eval-gate workflow** `[HIGH] [v1.0] [≤1d]` — closes the loop on "evals are mandatory."
+6. [ ] **PostgresProvider + FastAPI runtime** `[HIGH] [v0.5] [1w]` — turns movate from a CLI into a service.
+7. [ ] **API key issuance + tenant isolation audit** `[HIGH] [v0.5] [2-3d]` — security-critical for multi-tenant.
+8. [ ] **Bicep + GH-Actions deploy.yml** `[HIGH] [v1.0] [4-6d]` — turn `git push release/*` into an ACA deploy.
+9. [ ] **Model policy enforcement** `[HIGH] [v1.0] [2-3d]` — `policies/model_policy.yaml` enforced at executor entry.
+10. [ ] **More templates as customer engagements demand** `[MED] [post-v0.4]` — extractor, RAG, function-caller; trivial to add now that the registry exists.
 
 ---
 
@@ -134,7 +134,7 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 
 ## 4. Observability (Phase 4 / v0.4)
 
-- [ ] **Langfuse tracer (port from MDK)** `[HIGH] [v0.4] [≤1d]` — gated by env vars; falls back to stdout cleanly.
+- [x] **Langfuse tracer** `[HIGH] [v0.4] [done]` — `LangfuseTracer` in [src/movate/tracing/langfuse.py](src/movate/tracing/langfuse.py); `build_tracer()` auto-selects via `MOVATE_TRACER=langfuse` or `LANGFUSE_SECRET_KEY` env. Falls back to stdout with a stderr warning if the package or keys are missing — never breaks a run. Client injectable so tests don't need the real SDK. `movate doctor` now surfaces resolved tracer + LANGFUSE_* env vars. 12 tests in [tests/test_tracing_langfuse.py](tests/test_tracing_langfuse.py).
 - [ ] **OTel tracer (OTLP exporter)** `[HIGH] [v0.4] [2-3d]` — span hierarchy: workflow → node → provider call → retry attempts.
 - [ ] **Tracer auto-select via `MOVATE_TRACER`** `[MED] [v0.4] [≤1h]` — `stdout|langfuse|otel|composite`.
 - [ ] **Composite tracer (multi-fanout)** `[MED] [v0.4] [≤1d]` — emit to Langfuse AND OTel without code change.

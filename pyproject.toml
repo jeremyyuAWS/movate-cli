@@ -97,7 +97,7 @@ strict = true
 files = ["src/movate"]
 
 [[tool.mypy.overrides]]
-module = ["jsonschema.*", "aiosqlite.*", "litellm.*"]
+module = ["jsonschema.*", "aiosqlite.*", "litellm.*", "langfuse.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

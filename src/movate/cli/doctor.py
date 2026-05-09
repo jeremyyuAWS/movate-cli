@@ -12,6 +12,7 @@ from rich.table import Table
 
 from movate import __version__
 from movate.providers.pricing import load_pricing
+from movate.tracing import build_tracer
 
 console = Console()
 
@@ -22,6 +23,11 @@ _PROVIDER_KEYS = (
     ("ANTHROPIC_API_KEY", "Anthropic"),
     ("AZURE_OPENAI_API_KEY", "Azure OpenAI"),
     ("GEMINI_API_KEY", "Gemini"),
+)
+_TRACING_KEYS = (
+    ("LANGFUSE_SECRET_KEY", "Langfuse secret"),
+    ("LANGFUSE_PUBLIC_KEY", "Langfuse public"),
+    ("LANGFUSE_HOST", "Langfuse host"),
 )
 
 
@@ -69,6 +75,20 @@ def doctor() -> None:
             "[yellow]hint[/yellow]",
             "[dim]no provider keys set; use --mock for offline runs[/dim]",
         )
+
+    table.add_row("", "")
+
+    # Tracing keys (separate from agent provider keys — easier to scan)
+    for env_var, label in _TRACING_KEYS:
+        present = bool(os.environ.get(env_var, "").strip())
+        table.add_row(env_var, _ok(label) if present else _missing(label))
+
+    # Resolved tracer — what `movate run` would actually use right now.
+    try:
+        tracer = build_tracer()
+        table.add_row("resolved tracer", f"[green]{tracer.name}[/green]")
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        table.add_row("resolved tracer", f"[red]error: {exc}[/red]")
 
     table.add_row("", "")
 
