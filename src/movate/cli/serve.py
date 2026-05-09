@@ -56,8 +56,35 @@ def serve(
       [dim]# Specific agents path[/dim]
       $ movate serve --agents-path /opt/movate/agents
     """
+    asyncio.run(
+        _run_serve(
+            host=host,
+            port=port,
+            agents_path=agents_path,
+            log_level=log_level,
+        )
+    )
+
+
+async def _run_serve(
+    *,
+    host: str,
+    port: int,
+    agents_path: Path,
+    log_level: str,
+) -> None:
+    """Async entry that owns the loop end-to-end.
+
+    Critical: ``storage.init()`` and ``server.serve()`` MUST run on
+    the **same** event loop. asyncpg connections are bound to the
+    loop they're created on; if init runs in ``asyncio.run()`` and
+    uvicorn then creates its own loop, the pool's connections
+    silently break with "another operation is in progress" on the
+    first request. Running uvicorn via ``Server.serve()`` inside
+    this async function keeps everything on one loop.
+    """
     storage = build_storage()
-    asyncio.run(storage.init())
+    await storage.init()
 
     agents = scan_agents(agents_path)
     if not agents:
@@ -72,4 +99,19 @@ def serve(
 
     app = build_app(storage, agents=agents)
     err.print(f"[bold]movate[/bold] serving on http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level=log_level.lower())
+
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level=log_level.lower(),
+        # Don't let uvicorn install its own signal handlers — typer's
+        # default Ctrl-C handling is fine and uvicorn's interferes
+        # with our existing CLI patterns.
+        lifespan="off",
+    )
+    server = uvicorn.Server(config)
+    try:
+        await server.serve()
+    finally:
+        await storage.close()

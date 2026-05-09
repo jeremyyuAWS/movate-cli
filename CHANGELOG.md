@@ -5,6 +5,57 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — PostgresProvider (v0.5 stage 5)
+
+**v0.5 capabilities are now feature-complete on both backends.**
+
+- **`storage/postgres.py`** — full Protocol parity with
+  `SqliteProvider`, against `asyncpg`. Schema uses `JSONB` (queryable,
+  indexable) instead of TEXT-with-JSON, `TIMESTAMPTZ` instead of ISO
+  strings, `BOOLEAN` instead of `INTEGER`. Per-connection pool init
+  registers a `json.dumps`/`json.loads` codec for `jsonb` so handlers
+  pass and receive plain dicts.
+- **`claim_next_job` uses `SELECT ... FOR UPDATE SKIP LOCKED`** —
+  superior to sqlite's `BEGIN IMMEDIATE`. Multiple workers truly
+  run in parallel: each takes a row-level lock on a different row,
+  no global serialization. New test
+  `test_postgres_claim_skip_locked_runs_concurrent` proves both
+  workers grab two distinct rows concurrently (sqlite would block
+  one of them).
+- **`build_storage()` switches on `MOVATE_DB_URL`** —
+  `postgres://` / `postgresql://` URLs route to `PostgresProvider`;
+  otherwise falls back to `SqliteProvider`. `asyncpg` is imported
+  lazily so sqlite-only deployments don't need it installed.
+- **`tests/conftest.py`** now provides a shared `storage` fixture
+  parametrized over `(memory, sqlite, postgres)`. PG params skip
+  automatically when `MOVATE_PG_TEST_URL` is unset, so devs without
+  a local PG see clean test runs and CI can wire a service-container
+  job to exercise that branch. Per-test truncation of the PG state
+  keeps tests hermetic without re-creating the schema.
+- 21 new test invocations: 16 conformance tests now run against
+  Postgres in addition to sqlite + memory; one new PG-specific
+  concurrent-claim test for SKIP LOCKED.
+
+### Fixed — Two real bugs surfaced by the PG smoke walk-through
+
+- **asyncpg pool was created on the wrong event loop.**
+  `cli/serve.py` was doing `asyncio.run(storage.init())` (creates
+  pool on a temporary loop, which then exits), then `uvicorn.run(app, ...)`
+  (creates a different loop). asyncpg connections are bound to
+  their creation loop; this manifested as "another operation is in
+  progress" 500s on the first request. Restructured to do
+  `asyncio.run(_run_serve(...))` where `_run_serve` is async and
+  uses `uvicorn.Server.serve()` so init + serve share one loop.
+- **Fire-and-forget `touch_api_key` raced asyncpg pool RESET.**
+  The auth middleware was scheduling `asyncio.create_task(_safe_touch(...))`
+  after a successful auth. Under asyncpg pool semantics, this could
+  re-acquire the same connection that was mid-RESET (called by pool
+  release after the previous `get_api_key`), triggering the same
+  "another operation is in progress" error. Moved to inline
+  `await _safe_touch(...)` — the latency cost is sub-millisecond
+  vs the cost of a flaky service. Also made the corresponding test
+  deterministic (no skip-on-race).
+
 ### Added — Worker claim loop + `movate worker` (v0.5 stage 4)
 
 **movate is now a runtime, not just a queue.** The full HTTP →

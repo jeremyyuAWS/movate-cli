@@ -287,38 +287,20 @@ async def test_get_job_404_when_cross_tenant(
 async def test_successful_request_touches_last_used_at(
     client: TestClient, minted_key, storage: InMemoryStorage
 ) -> None:
-    """The fire-and-forget touch happens after the request returns; we
-    can't directly await it, but a quick sleep + lookup proves the path
-    fires. The test is best-effort: even if the touch races, we just
-    log + skip the assertion (we'd see this fail consistently if the
-    code path were broken)."""
-    import asyncio  # noqa: PLC0415
-
+    """Touch is now awaited inline (was fire-and-forget in stage 3a;
+    moved inline in stage 5 to fix an asyncpg pool race). That makes
+    the assertion deterministic — no sleep, no skip-on-race."""
     minted, bearer = minted_key
     pre = await storage.get_api_key(minted.record.key_id)
     assert pre is not None
     assert pre.last_used_at is None
 
-    r = client.get("/healthz")  # auth not required; pick any endpoint with auth
-    # /healthz is unauthed — use /jobs/{any} to trigger auth even if it 404s.
-    _ = r
-    client.get(
-        "/jobs/whatever",
-        headers=_auth_headers(bearer),
-    )
-
-    # Yield to the event loop a few times; touch is dispatched via
-    # asyncio.create_task so it's queued, not awaited.
-    for _ in range(5):
-        await asyncio.sleep(0)
+    # /jobs/{any} requires auth even when the id is bogus, which is
+    # what we want — we're testing the side effect of successful auth.
+    client.get("/jobs/whatever", headers=_auth_headers(bearer))
 
     post = await storage.get_api_key(minted.record.key_id)
     assert post is not None
-    # last_used_at MAY still be None if the test loop didn't yield to
-    # the touch task. Treat the assertion as soft — if it's set we
-    # know the path works; if not, we don't fail the build over a race.
-    if post.last_used_at is None:
-        pytest.skip("touch_api_key task didn't drain in time; not a logic bug")
     assert post.last_used_at is not None
 
 

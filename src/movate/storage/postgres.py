@@ -1,0 +1,676 @@
+"""PostgreSQL-backed StorageProvider for production deployments.
+
+Same Protocol surface as :class:`SqliteProvider`, same conformance
+test suite. Differences are pure mechanics:
+
+* JSON columns use ``JSONB`` (indexed, queryable) instead of ``TEXT``.
+* Timestamps use ``TIMESTAMPTZ`` instead of ISO strings.
+* Booleans use ``BOOLEAN`` instead of ``INTEGER``.
+* The job-claim path uses ``SELECT ... FOR UPDATE SKIP LOCKED`` —
+  superior to sqlite's ``BEGIN IMMEDIATE`` because finer-grained row
+  locks let multiple workers truly run concurrently.
+
+The pool is configured once with a per-connection ``init`` callback
+that registers a ``json.dumps`` / ``json.loads`` codec for ``jsonb``,
+so callers pass and receive plain dicts.
+
+Connection string is read from ``MOVATE_DB_URL`` (e.g.
+``postgresql://user:pw@host:5432/movate``); see :func:`build_storage`
+in :mod:`movate.storage`.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from typing import Any
+
+import asyncpg
+
+from movate.core.models import (
+    ApiKeyEnv,
+    ApiKeyRecord,
+    ErrorInfo,
+    EvalRecord,
+    FailureRecord,
+    JobKind,
+    JobRecord,
+    JobStatus,
+    JudgeMethod,
+    Metrics,
+    RunRecord,
+    WorkflowRunRecord,
+    WorkflowStatus,
+)
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    run_id           TEXT PRIMARY KEY,
+    job_id           TEXT NOT NULL,
+    tenant_id        TEXT NOT NULL,
+    agent            TEXT NOT NULL,
+    agent_version   TEXT NOT NULL,
+    prompt_hash      TEXT NOT NULL,
+    provider         TEXT NOT NULL,
+    provider_version TEXT NOT NULL,
+    pricing_version  TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    input            JSONB NOT NULL,
+    output           JSONB,
+    metrics          JSONB NOT NULL,
+    error            JSONB,
+    created_at       TIMESTAMPTZ NOT NULL,
+    workflow_run_id  TEXT,
+    node_id          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runs_agent_created
+    ON runs(agent, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_workflow_run
+    ON runs(workflow_run_id) WHERE workflow_run_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS failures (
+    failure_id   TEXT PRIMARY KEY,
+    run_id       TEXT,
+    tenant_id    TEXT NOT NULL,
+    agent        TEXT NOT NULL,
+    failure_type TEXT NOT NULL,
+    message      TEXT NOT NULL,
+    retryable    BOOLEAN NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evals (
+    eval_id         TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL,
+    agent           TEXT NOT NULL,
+    agent_version   TEXT NOT NULL,
+    dataset_hash    TEXT NOT NULL,
+    judge_method    TEXT NOT NULL,
+    judge_provider  TEXT,
+    runs_per_case   INTEGER NOT NULL,
+    gate_mode       TEXT NOT NULL,
+    threshold       DOUBLE PRECISION NOT NULL,
+    mean_score      DOUBLE PRECISION NOT NULL,
+    pass_rate       DOUBLE PRECISION NOT NULL,
+    sample_count    INTEGER NOT NULL,
+    total_cost_usd  DOUBLE PRECISION NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evals_agent_created
+    ON evals(agent, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    workflow_run_id   TEXT PRIMARY KEY,
+    tenant_id         TEXT NOT NULL,
+    workflow          TEXT NOT NULL,
+    workflow_version  TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    initial_state     JSONB NOT NULL,
+    final_state       JSONB,
+    error_node_id     TEXT,
+    error             JSONB,
+    created_at        TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_created
+    ON workflow_runs(workflow, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id        TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    target        TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    input         JSONB NOT NULL,
+    result_run_id TEXT,
+    error         JSONB,
+    api_key_id    TEXT,
+    created_at    TIMESTAMPTZ NOT NULL,
+    claimed_at    TIMESTAMPTZ,
+    completed_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_queue_head
+    ON jobs(tenant_id, created_at) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_jobs_tenant_created
+    ON jobs(tenant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    key_id        TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL,
+    env           TEXT NOT NULL,
+    secret_hash   TEXT NOT NULL,
+    salt          TEXT NOT NULL,
+    label         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL,
+    last_used_at  TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_active
+    ON api_keys(tenant_id) WHERE revoked_at IS NULL;
+"""
+
+
+# ---------------------------------------------------------------------------
+# Pool init — register JSONB ↔ dict codec on every connection
+# ---------------------------------------------------------------------------
+
+
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Per-connection setup: tell asyncpg how to round-trip JSONB.
+
+    Without this, asyncpg returns JSONB columns as ``str`` (they were
+    inserted as ``str`` too). Registering the codec lets handlers pass
+    and receive plain Python dicts — same UX as the sqlite path
+    (which wraps json.dumps/loads inline).
+    """
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Provider
+# ---------------------------------------------------------------------------
+
+
+class PostgresProvider:
+    """Implements :class:`StorageProvider` against PostgreSQL via asyncpg.
+
+    Connections come from a pool. Single-statement methods acquire a
+    connection per call; the claim path takes a transaction so the
+    SELECT-then-UPDATE pair is atomic across concurrent workers.
+    """
+
+    name = "postgres"
+
+    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 10) -> None:
+        self._dsn = dsn
+        self._min_size = min_size
+        self._max_size = max_size
+        self._pool: asyncpg.Pool | None = None
+
+    async def init(self) -> None:
+        self._pool = await asyncpg.create_pool(
+            self._dsn,
+            min_size=self._min_size,
+            max_size=self._max_size,
+            init=_init_connection,
+        )
+        async with self._pool.acquire() as conn:
+            await conn.execute(_SCHEMA)
+
+    @property
+    def _db(self) -> asyncpg.Pool:
+        if self._pool is None:
+            raise RuntimeError("PostgresProvider.init() not called")
+        return self._pool
+
+    async def close(self) -> None:
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
+
+    # ------------------------------------------------------------------
+    # Runs
+    # ------------------------------------------------------------------
+
+    async def save_run(self, run: RunRecord) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO runs (
+                run_id, job_id, tenant_id, agent, agent_version, prompt_hash,
+                provider, provider_version, pricing_version, status,
+                input, output, metrics, error, created_at,
+                workflow_run_id, node_id
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17
+            )
+            """,
+            run.run_id,
+            run.job_id,
+            run.tenant_id,
+            run.agent,
+            run.agent_version,
+            run.prompt_hash,
+            run.provider,
+            run.provider_version,
+            run.pricing_version,
+            run.status.value,
+            run.input,
+            run.output,
+            run.metrics.model_dump(),
+            run.error.model_dump() if run.error else None,
+            run.created_at,
+            run.workflow_run_id,
+            run.node_id,
+        )
+
+    async def get_run(self, run_id: str) -> RunRecord | None:
+        row = await self._db.fetchrow("SELECT * FROM runs WHERE run_id = $1", run_id)
+        return _row_to_run(row) if row else None
+
+    async def list_runs(
+        self,
+        *,
+        agent: str | None = None,
+        tenant_id: str | None = None,
+        status: str | None = None,
+        workflow_run_id: str | None = None,
+        limit: int = 20,
+    ) -> list[RunRecord]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if agent is not None:
+            params.append(agent)
+            clauses.append(f"agent = ${len(params)}")
+        if tenant_id is not None:
+            params.append(tenant_id)
+            clauses.append(f"tenant_id = ${len(params)}")
+        if status is not None:
+            params.append(status)
+            clauses.append(f"status = ${len(params)}")
+        if workflow_run_id is not None:
+            params.append(workflow_run_id)
+            clauses.append(f"workflow_run_id = ${len(params)}")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        sql = f"SELECT * FROM runs {where} ORDER BY created_at DESC LIMIT ${len(params)}"
+        rows = await self._db.fetch(sql, *params)
+        return [_row_to_run(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Failures
+    # ------------------------------------------------------------------
+
+    async def save_failure(self, f: FailureRecord) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO failures (
+                failure_id, run_id, tenant_id, agent, failure_type,
+                message, retryable, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            f.failure_id,
+            f.run_id,
+            f.tenant_id,
+            f.agent,
+            f.failure_type,
+            f.message,
+            f.retryable,
+            f.created_at,
+        )
+
+    # ------------------------------------------------------------------
+    # Evals
+    # ------------------------------------------------------------------
+
+    async def save_eval(self, e: EvalRecord) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO evals (
+                eval_id, tenant_id, agent, agent_version, dataset_hash,
+                judge_method, judge_provider, runs_per_case, gate_mode,
+                threshold, mean_score, pass_rate, sample_count,
+                total_cost_usd, created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15
+            )
+            """,
+            e.eval_id,
+            e.tenant_id,
+            e.agent,
+            e.agent_version,
+            e.dataset_hash,
+            e.judge_method.value,
+            e.judge_provider,
+            e.runs_per_case,
+            e.gate_mode,
+            e.threshold,
+            e.mean_score,
+            e.pass_rate,
+            e.sample_count,
+            e.total_cost_usd,
+            e.created_at,
+        )
+
+    async def get_eval(self, eval_id: str) -> EvalRecord | None:
+        row = await self._db.fetchrow("SELECT * FROM evals WHERE eval_id = $1", eval_id)
+        return _row_to_eval(row) if row else None
+
+    async def list_evals(self, *, agent: str | None = None, limit: int = 20) -> list[EvalRecord]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if agent is not None:
+            params.append(agent)
+            clauses.append(f"agent = ${len(params)}")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        sql = f"SELECT * FROM evals {where} ORDER BY created_at DESC LIMIT ${len(params)}"
+        rows = await self._db.fetch(sql, *params)
+        return [_row_to_eval(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Workflow runs
+    # ------------------------------------------------------------------
+
+    async def save_workflow_run(self, w: WorkflowRunRecord) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO workflow_runs (
+                workflow_run_id, tenant_id, workflow, workflow_version,
+                status, initial_state, final_state, error_node_id, error,
+                created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """,
+            w.workflow_run_id,
+            w.tenant_id,
+            w.workflow,
+            w.workflow_version,
+            w.status.value,
+            w.initial_state,
+            w.final_state,
+            w.error_node_id,
+            w.error.model_dump() if w.error else None,
+            w.created_at,
+        )
+
+    async def get_workflow_run(self, workflow_run_id: str) -> WorkflowRunRecord | None:
+        row = await self._db.fetchrow(
+            "SELECT * FROM workflow_runs WHERE workflow_run_id = $1", workflow_run_id
+        )
+        return _row_to_workflow_run(row) if row else None
+
+    async def list_workflow_runs(
+        self, *, workflow: str | None = None, limit: int = 20
+    ) -> list[WorkflowRunRecord]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if workflow is not None:
+            params.append(workflow)
+            clauses.append(f"workflow = ${len(params)}")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        sql = f"SELECT * FROM workflow_runs {where} ORDER BY created_at DESC LIMIT ${len(params)}"
+        rows = await self._db.fetch(sql, *params)
+        return [_row_to_workflow_run(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Jobs
+    # ------------------------------------------------------------------
+
+    async def save_job(self, job: JobRecord) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO jobs (
+                job_id, tenant_id, kind, target, status, input,
+                result_run_id, error, api_key_id,
+                created_at, claimed_at, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            """,
+            job.job_id,
+            job.tenant_id,
+            job.kind.value,
+            job.target,
+            job.status.value,
+            job.input,
+            job.result_run_id,
+            job.error.model_dump() if job.error else None,
+            job.api_key_id,
+            job.created_at,
+            job.claimed_at,
+            job.completed_at,
+        )
+
+    async def get_job(self, job_id: str) -> JobRecord | None:
+        row = await self._db.fetchrow("SELECT * FROM jobs WHERE job_id = $1", job_id)
+        return _row_to_job(row) if row else None
+
+    async def list_jobs(
+        self,
+        *,
+        tenant_id: str | None = None,
+        status: JobStatus | None = None,
+        limit: int = 20,
+    ) -> list[JobRecord]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if tenant_id is not None:
+            params.append(tenant_id)
+            clauses.append(f"tenant_id = ${len(params)}")
+        if status is not None:
+            params.append(status.value)
+            clauses.append(f"status = ${len(params)}")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        sql = f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ${len(params)}"
+        rows = await self._db.fetch(sql, *params)
+        return [_row_to_job(r) for r in rows]
+
+    async def claim_next_job(self, *, tenant_id: str | None = None) -> JobRecord | None:
+        """Postgres claim path: ``SELECT ... FOR UPDATE SKIP LOCKED``.
+
+        Two workers hitting this concurrently take row-level locks on
+        DIFFERENT rows; whichever sees the oldest queued first wins
+        that row, the second sees no available rows (or moves on to
+        the next queued one). No global serialization, no retries.
+        """
+        async with self._db.acquire() as conn, conn.transaction():
+            tenant_clause = "AND tenant_id = $1" if tenant_id else ""
+            params = (tenant_id,) if tenant_id else ()
+            row = await conn.fetchrow(
+                f"""
+                SELECT * FROM jobs
+                WHERE status = 'queued' {tenant_clause}
+                ORDER BY created_at
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                *params,
+            )
+            if row is None:
+                return None
+
+            now = datetime.now(UTC)
+            await conn.execute(
+                """
+                UPDATE jobs SET status = 'running', claimed_at = $1
+                WHERE job_id = $2
+                """,
+                now,
+                row["job_id"],
+            )
+
+            # Re-fetch to return the post-update row. (asyncpg's
+            # transaction context closes on exit; we do this inside
+            # so the caller sees a consistent snapshot.)
+            updated = await conn.fetchrow("SELECT * FROM jobs WHERE job_id = $1", row["job_id"])
+            return _row_to_job(updated) if updated else None
+
+    async def update_job(
+        self,
+        job_id: str,
+        *,
+        status: JobStatus,
+        result_run_id: str | None = None,
+        error: dict[str, object] | None = None,
+    ) -> None:
+        if status not in (JobStatus.SUCCESS, JobStatus.ERROR, JobStatus.SAFETY_BLOCKED):
+            raise ValueError(
+                f"update_job only accepts terminal statuses; got {status!r}. "
+                f"Use save_job/claim_next_job for QUEUED/RUNNING transitions."
+            )
+        await self._db.execute(
+            """
+            UPDATE jobs
+            SET status = $1, result_run_id = $2, error = $3, completed_at = $4
+            WHERE job_id = $5
+            """,
+            status.value,
+            result_run_id,
+            error,
+            datetime.now(UTC),
+            job_id,
+        )
+
+    # ------------------------------------------------------------------
+    # API keys
+    # ------------------------------------------------------------------
+
+    async def save_api_key(self, key: ApiKeyRecord) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO api_keys (
+                key_id, tenant_id, env, secret_hash, salt, label,
+                created_at, last_used_at, revoked_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """,
+            key.key_id,
+            key.tenant_id,
+            key.env.value,
+            key.secret_hash,
+            key.salt,
+            key.label,
+            key.created_at,
+            key.last_used_at,
+            key.revoked_at,
+        )
+
+    async def get_api_key(self, key_id: str) -> ApiKeyRecord | None:
+        row = await self._db.fetchrow("SELECT * FROM api_keys WHERE key_id = $1", key_id)
+        return _row_to_api_key(row) if row else None
+
+    async def list_api_keys(
+        self,
+        *,
+        tenant_id: str | None = None,
+        include_revoked: bool = False,
+    ) -> list[ApiKeyRecord]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if tenant_id is not None:
+            params.append(tenant_id)
+            clauses.append(f"tenant_id = ${len(params)}")
+        if not include_revoked:
+            clauses.append("revoked_at IS NULL")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM api_keys {where} ORDER BY created_at DESC"
+        rows = await self._db.fetch(sql, *params)
+        return [_row_to_api_key(r) for r in rows]
+
+    async def revoke_api_key(self, key_id: str) -> None:
+        await self._db.execute(
+            """
+            UPDATE api_keys SET revoked_at = $1
+            WHERE key_id = $2 AND revoked_at IS NULL
+            """,
+            datetime.now(UTC),
+            key_id,
+        )
+
+    async def touch_api_key(self, key_id: str) -> None:
+        await self._db.execute(
+            "UPDATE api_keys SET last_used_at = $1 WHERE key_id = $2",
+            datetime.now(UTC),
+            key_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Row → model converters
+# ---------------------------------------------------------------------------
+
+
+def _row_to_run(row: asyncpg.Record) -> RunRecord:
+    metrics_data = dict(row["metrics"])
+    return RunRecord(
+        run_id=row["run_id"],
+        job_id=row["job_id"],
+        tenant_id=row["tenant_id"],
+        agent=row["agent"],
+        agent_version=row["agent_version"],
+        prompt_hash=row["prompt_hash"],
+        provider=row["provider"],
+        provider_version=row["provider_version"],
+        pricing_version=row["pricing_version"],
+        status=JobStatus(row["status"]),
+        input=dict(row["input"]),
+        output=dict(row["output"]) if row["output"] else None,
+        metrics=Metrics.model_validate(metrics_data),
+        error=ErrorInfo.model_validate(dict(row["error"])) if row["error"] else None,
+        created_at=row["created_at"],
+        workflow_run_id=row["workflow_run_id"],
+        node_id=row["node_id"],
+    )
+
+
+def _row_to_eval(row: asyncpg.Record) -> EvalRecord:
+    return EvalRecord(
+        eval_id=row["eval_id"],
+        tenant_id=row["tenant_id"],
+        agent=row["agent"],
+        agent_version=row["agent_version"],
+        dataset_hash=row["dataset_hash"],
+        judge_method=JudgeMethod(row["judge_method"]),
+        judge_provider=row["judge_provider"],
+        runs_per_case=row["runs_per_case"],
+        gate_mode=row["gate_mode"],
+        threshold=row["threshold"],
+        mean_score=row["mean_score"],
+        pass_rate=row["pass_rate"],
+        sample_count=row["sample_count"],
+        total_cost_usd=row["total_cost_usd"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_workflow_run(row: asyncpg.Record) -> WorkflowRunRecord:
+    return WorkflowRunRecord(
+        workflow_run_id=row["workflow_run_id"],
+        tenant_id=row["tenant_id"],
+        workflow=row["workflow"],
+        workflow_version=row["workflow_version"],
+        status=WorkflowStatus(row["status"]),
+        initial_state=dict(row["initial_state"]),
+        final_state=dict(row["final_state"]) if row["final_state"] else None,
+        error_node_id=row["error_node_id"],
+        error=ErrorInfo.model_validate(dict(row["error"])) if row["error"] else None,
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_job(row: asyncpg.Record) -> JobRecord:
+    return JobRecord(
+        job_id=row["job_id"],
+        tenant_id=row["tenant_id"],
+        kind=JobKind(row["kind"]),
+        target=row["target"],
+        status=JobStatus(row["status"]),
+        input=dict(row["input"]),
+        result_run_id=row["result_run_id"],
+        error=ErrorInfo.model_validate(dict(row["error"])) if row["error"] else None,
+        api_key_id=row["api_key_id"],
+        created_at=row["created_at"],
+        claimed_at=row["claimed_at"],
+        completed_at=row["completed_at"],
+    )
+
+
+def _row_to_api_key(row: asyncpg.Record) -> ApiKeyRecord:
+    return ApiKeyRecord(
+        key_id=row["key_id"],
+        tenant_id=row["tenant_id"],
+        env=ApiKeyEnv(row["env"]),
+        secret_hash=row["secret_hash"],
+        salt=row["salt"],
+        label=row["label"],
+        created_at=row["created_at"],
+        last_used_at=row["last_used_at"],
+        revoked_at=row["revoked_at"],
+    )
+
+
+__all__ = ["PostgresProvider"]

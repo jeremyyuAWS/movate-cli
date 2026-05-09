@@ -1,11 +1,11 @@
 """Job queue storage — CRUD round-trip + claim semantics + tenant isolation.
 
-Two storage backends in scope: ``InMemoryStorage`` (test double) and
-``SqliteProvider`` (real disk). The Postgres backend lands later in
-v0.5; same conformance suite will cover it then.
+Three storage backends in scope (parametrized via the shared ``storage``
+fixture in conftest.py): ``InMemoryStorage``, ``SqliteProvider``, and
+``PostgresProvider`` (skipped when ``MOVATE_PG_TEST_URL`` is unset).
 
-Claim semantics under contention are exercised against ``SqliteProvider``
-specifically — the in-memory version's "atomic by single event loop"
+Claim-under-contention semantics are exercised explicitly against the
+real backends — the in-memory version's "atomic by single event loop"
 story is correct but doesn't tell us anything about the actual lock
 behavior we ship.
 """
@@ -26,7 +26,6 @@ from movate.core.models import (
     JobStatus,
 )
 from movate.storage.sqlite import SqliteProvider
-from movate.testing import InMemoryStorage
 
 # ---------------------------------------------------------------------------
 # Builders
@@ -54,28 +53,8 @@ def _make_job(
 
 
 # ---------------------------------------------------------------------------
-# Parametrized over both backends so the conformance suite is one file.
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(params=["memory", "sqlite"])
-async def storage(request, tmp_path: Path):
-    """Yield a freshly-init'd storage backend.
-
-    Both backends pass through the same Protocol; the Postgres provider
-    will join this fixture once it lands.
-    """
-    if request.param == "memory":
-        s = InMemoryStorage()
-    else:
-        s = SqliteProvider(db_path=tmp_path / "jobs.db")
-    await s.init()
-    yield s
-    await s.close()
-
-
-# ---------------------------------------------------------------------------
-# CRUD round-trip
+# CRUD round-trip — uses the shared ``storage`` fixture from conftest.py
+# (parametrized over memory + sqlite + postgres)
 # ---------------------------------------------------------------------------
 
 
@@ -278,6 +257,60 @@ async def test_sqlite_claim_no_double_dispatch(tmp_path: Path) -> None:
         claimed = [r for r in results if r is not None]
         assert len(claimed) == 1, f"expected exactly one claim, got {len(claimed)}"
         assert claimed[0].job_id == job.job_id
+    finally:
+        await worker_a.close()
+        await worker_b.close()
+
+
+@pytest.mark.unit
+@pytest.mark.postgres
+async def test_postgres_claim_skip_locked_runs_concurrent() -> None:
+    """Postgres ``FOR UPDATE SKIP LOCKED`` lets two workers grab two
+    DIFFERENT queued jobs simultaneously — superior to sqlite, which
+    serializes the SELECT-then-UPDATE pair across all workers.
+
+    Setup: two queued jobs. Two workers concurrent-claim. Expected:
+    each worker gets one (different) job; no contention, no double-
+    dispatch.
+    """
+    import os  # noqa: PLC0415
+
+    url = os.environ.get("MOVATE_PG_TEST_URL")
+    if url is None:
+        pytest.skip("MOVATE_PG_TEST_URL not set")
+
+    from movate.storage.postgres import PostgresProvider  # noqa: PLC0415
+
+    setup = PostgresProvider(dsn=url)
+    await setup.init()
+    # Hermetic — wipe before this test so we don't inherit prior state.
+    pool = setup._db
+    await pool.execute("TRUNCATE TABLE jobs RESTART IDENTITY CASCADE")
+    j1 = _make_job(created_at=datetime.now(UTC) - timedelta(seconds=1))
+    j2 = _make_job(created_at=datetime.now(UTC))
+    await setup.save_job(j1)
+    await setup.save_job(j2)
+    await setup.close()
+
+    worker_a = PostgresProvider(dsn=url)
+    worker_b = PostgresProvider(dsn=url)
+    await worker_a.init()
+    await worker_b.init()
+    try:
+        # Run two claims concurrently. SKIP LOCKED means neither
+        # worker should block; each picks a different row.
+        results = await asyncio.gather(
+            worker_a.claim_next_job(),
+            worker_b.claim_next_job(),
+        )
+        claimed_ids = {r.job_id for r in results if r is not None}
+        # Both got something AND they're different — that's the
+        # SKIP LOCKED win over sqlite.
+        assert len(claimed_ids) == 2, (
+            f"expected two distinct claims under SKIP LOCKED; got {len(claimed_ids)} "
+            f"({claimed_ids!r})"
+        )
+        assert claimed_ids == {j1.job_id, j2.job_id}
     finally:
         await worker_a.close()
         await worker_b.close()

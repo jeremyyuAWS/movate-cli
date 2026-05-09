@@ -33,8 +33,6 @@ from movate.core.auth import (
     verify_secret,
 )
 from movate.core.models import ApiKeyEnv, ApiKeyRecord
-from movate.storage.sqlite import SqliteProvider
-from movate.testing import InMemoryStorage
 
 runner = CliRunner(mix_stderr=False)
 
@@ -193,19 +191,9 @@ def test_check_record_rejects_wrong_secret() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Storage round-trip — parametrized over (memory, sqlite)
+# Storage round-trip — uses the shared ``storage`` fixture from conftest.py
+# (parametrized over memory + sqlite + postgres)
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(params=["memory", "sqlite"])
-async def storage(request, tmp_path: Path):
-    if request.param == "memory":
-        s = InMemoryStorage()
-    else:
-        s = SqliteProvider(db_path=tmp_path / "auth.db")
-    await s.init()
-    yield s
-    await s.close()
 
 
 @pytest.mark.unit

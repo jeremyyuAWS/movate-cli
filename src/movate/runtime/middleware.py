@@ -19,7 +19,6 @@ to the caller (timing-oracle defense).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -93,14 +92,16 @@ def make_auth_dependency(
             logger.info("auth_failure reason=%s", failure.reason)
             raise auth_required()
 
-        # Fire-and-forget touch. We never await this — the request
-        # has to return promptly even if the touch UPDATE is slow.
-        # ``record`` is non-None here (check_record guarantees it).
-        # RUF006 (store reference) doesn't apply: we deliberately drop
-        # the task; ``_safe_touch`` swallows its own exceptions so the
-        # asyncio default-handler-on-GC behavior is fine.
+        # Touch ``last_used_at`` inline. Originally this was a
+        # fire-and-forget ``asyncio.create_task``, which races
+        # against asyncpg's pool RESET path: the create_task can
+        # acquire the same connection mid-reset and trigger
+        # "another operation is in progress" 500s on the next
+        # request. A single indexed UPDATE is sub-millisecond, so
+        # the latency cost of awaiting is negligible vs the cost
+        # of a flaky service.
         assert record is not None
-        asyncio.create_task(_safe_touch(storage, record.key_id))  # noqa: RUF006
+        await _safe_touch(storage, record.key_id)
 
         return AuthContext(
             tenant_id=record.tenant_id,
