@@ -79,12 +79,19 @@ class Executor:
         *,
         job_id: str | None = None,
         model_override: ModelConfig | None = None,
+        workflow_run_id: str | None = None,
+        node_id: str | None = None,
     ) -> RunResponse:
         """Execute one agent against one input.
 
         ``model_override`` swaps provider/params for a single run (used by
         ``movate bench`` in v0.2). Override disables the configured fallback
         chain so each comparison row tests exactly one model.
+
+        ``workflow_run_id`` + ``node_id`` are stamped onto the persisted
+        :class:`RunRecord` when the executor is invoked from a
+        :class:`movate.core.workflow.WorkflowRunner` — keeps the runner from
+        having to re-save the same run with a workflow link patched on.
         """
         job_id = job_id or str(uuid4())
         run_id = str(uuid4())
@@ -197,6 +204,8 @@ class Executor:
                 request=request,
                 response=response,
                 chosen_provider=chosen_provider,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
             )
             self._tracer.end_span(span, status="ok")
             return response
@@ -257,6 +266,8 @@ class Executor:
         request: RunRequest,
         response: RunResponse,
         chosen_provider: str,
+        workflow_run_id: str | None = None,
+        node_id: str | None = None,
     ) -> None:
         record = RunRecord(
             run_id=run_id,
@@ -272,6 +283,8 @@ class Executor:
             input=request.input,
             output=response.data,
             metrics=response.metrics,
+            workflow_run_id=workflow_run_id,
+            node_id=node_id,
         )
         await self._storage.save_run(record)
 

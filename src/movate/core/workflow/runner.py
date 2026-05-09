@@ -141,20 +141,32 @@ class WorkflowRunner:
             # Build the agent's input by projecting state onto its schema.
             agent_input = _project_state(state, bundle)
 
-            # Run through the executor — single-agent semantics on each node.
+            # Run through the executor with the workflow context so the
+            # persisted RunRecord carries workflow_run_id + node_id without
+            # the runner needing a second save.
             response: RunResponse = await self._executor.execute(
                 bundle,
                 RunRequest(agent=bundle.spec.name, input=agent_input),
+                workflow_run_id=wf_id,
+                node_id=node_id,
             )
 
-            # Pull back the run that the executor just persisted, stamp the
-            # workflow link onto it, and re-save. The executor doesn't know
-            # about workflows, so we patch the freshest run in-place — the
-            # generated run_id is unique per call so this is safe.
-            stamped = await self._stamp_workflow_link(
-                response, wf_id=wf_id, node_id=node_id, agent=bundle
+            # Python-level summary for the WorkflowResult.runs view.
+            # NOT persisted on success — the executor already wrote a row
+            # with workflow_run_id+node_id stamped on it. On failure the
+            # executor only writes a FailureRecord, so we save one
+            # ERROR-status RunRecord here so per-node failures show up in
+            # ``list_runs(workflow_run_id=…)`` joins.
+            summary = _summarize_run(
+                response,
+                tenant_id=self._tenant_id,
+                bundle=bundle,
+                wf_id=wf_id,
+                node_id=node_id,
             )
-            runs.append(stamped)
+            runs.append(summary)
+            if response.status != "success":
+                await self._storage.save_run(summary)
 
             if response.status != "success":
                 # Stop — partial state retained. The user sees what node N saw
@@ -209,53 +221,44 @@ class WorkflowRunner:
             finished_at=finished,
         )
 
-    async def _stamp_workflow_link(
-        self,
-        response: RunResponse,
-        *,
-        wf_id: str,
-        node_id: str,
-        agent: AgentBundle,
-    ) -> RunRecord:
-        """Re-fetch the executor's freshest run record and stamp the workflow link.
-
-        The executor saves a :class:`RunRecord` with no workflow context. We
-        amend that record with ``workflow_run_id`` + ``node_id`` so a join
-        on either lights up the per-node timeline. Returns the stamped record.
-
-        If the executor failed to persist (or the run was an error path that
-        bypassed normal recording), we synthesize a record from the response
-        — the storage `runs` table stays the source of truth.
-        """
-        # We don't have direct access to the run_id chosen inside the
-        # executor (no return value), so synthesize from the response trace
-        # + a fresh uuid for the link record. This keeps the runner cohesive
-        # without leaking executor internals.
-        record = RunRecord(
-            run_id=str(uuid4()),
-            job_id=str(uuid4()),
-            tenant_id=self._tenant_id,
-            agent=agent.spec.name,
-            agent_version=agent.spec.version,
-            prompt_hash=agent.prompt_hash,
-            provider=response.metrics.provider or agent.spec.model.provider,
-            provider_version="0.0.1",
-            pricing_version=response.metrics.pricing_version,
-            status=_response_status_to_job(response),
-            input={},  # placeholder; the executor's own record holds the real input
-            output=response.data if response.status == "success" else None,
-            metrics=response.metrics,
-            error=response.error,
-            workflow_run_id=wf_id,
-            node_id=node_id,
-        )
-        await self._storage.save_run(record)
-        return record
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _summarize_run(
+    response: RunResponse,
+    *,
+    tenant_id: str,
+    bundle: AgentBundle,
+    wf_id: str,
+    node_id: str,
+) -> RunRecord:
+    """Build a per-node :class:`RunRecord` for the runner's in-memory view.
+
+    Caller decides whether to persist. ``provider_version`` is "" because the
+    executor's own persisted row holds the canonical value; the executor also
+    holds the canonical input dict, so this synthesis leaves ``input`` empty.
+    """
+    return RunRecord(
+        run_id=str(uuid4()),
+        job_id=str(uuid4()),
+        tenant_id=tenant_id,
+        agent=bundle.spec.name,
+        agent_version=bundle.spec.version,
+        prompt_hash=bundle.prompt_hash,
+        provider=response.metrics.provider or bundle.spec.model.provider,
+        provider_version="",
+        pricing_version=response.metrics.pricing_version,
+        status=_response_status_to_job(response),
+        input={},
+        output=response.data if response.status == "success" else None,
+        metrics=response.metrics,
+        error=response.error,
+        workflow_run_id=wf_id,
+        node_id=node_id,
+    )
 
 
 def _project_state(state: dict[str, Any], bundle: AgentBundle) -> dict[str, Any]:
