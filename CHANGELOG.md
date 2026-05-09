@@ -5,6 +5,42 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — FastAPI runtime (v0.5 stage 3a)
+
+- **`runtime/`** package — thin HTTP layer over the storage Protocol
+  and `core/auth`. Wire schemas (`runtime/schemas.py`) live separately
+  from `core/models.py` so API and DB can evolve independently.
+- **`build_app(storage)`** factory — `runtime/app.py` returns a
+  FastAPI app bound to a given storage backend. Tests pass an
+  `InMemoryStorage`; `movate serve` (lands stage 3b) will pass a
+  `SqliteProvider`. The factory pattern means there's no global
+  app object and no env-var gymnastics.
+- **Endpoints:** `GET /healthz` (unauthed liveness), `POST /run`
+  (queue a job → 202 with `job_id`), `GET /jobs/{id}` (poll; returns
+  the current JobRecord state minus `api_key_id`).
+- **Auth middleware** (`runtime/middleware.py`) composes the stage-2
+  primitives: `parse_api_key` → `storage.get_api_key` →
+  `check_record`. Every failure mode collapses to a uniform `401`
+  with `{"error": {"code": "auth_required", "message": "..."}}` —
+  the discriminator is logged but never echoed (timing-oracle
+  defense). Successful auth fires-and-forgets `touch_api_key` so
+  `last_used_at` reflects calls without blocking responses.
+- **`AuthContext`** dataclass — what handlers receive after a
+  successful auth. Carries `tenant_id`, `api_key_id`, `env`. Handlers
+  MUST NOT reach back to the underlying `ApiKeyRecord` (no plaintext
+  secret on the wire ever).
+- **Tenant scoping:** `GET /jobs/{id}` returns 404 (not 403) for
+  cross-tenant lookups. 403 would let an attacker probe whether a
+  `job_id` exists in another tenant.
+- **`runtime/errors.py`** — single error envelope shape; codes are
+  stable enums (`AUTH_REQUIRED`, `NOT_FOUND`, `BAD_REQUEST`,
+  `INTERNAL`); messages may change between releases but codes are
+  contract.
+- 14 tests via `fastapi.TestClient` + `InMemoryStorage`: every auth
+  failure mode → 401, /run persists tenant + key attribution onto
+  the JobRecord, /jobs/{id} cross-tenant safety, request validation
+  (422 on missing fields / unknown JobKind / empty target).
+
 ### Added — API key auth (v0.5 stage 2)
 
 - **`core/auth.py`** — pure crypto, no I/O. `mint_api_key` produces a

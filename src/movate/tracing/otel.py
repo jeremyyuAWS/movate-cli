@@ -48,7 +48,7 @@ try:
 
     _OTEL_AVAILABLE = True
 except ImportError:  # pragma: no cover - covered by env tests
-    _otel_trace = None
+    _otel_trace = None  # type: ignore[assignment]
     _OTEL_AVAILABLE = False
 
 

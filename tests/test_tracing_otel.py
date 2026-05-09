@@ -359,13 +359,36 @@ def test_build_tracer_composite_falls_back_when_nothing_configured(
     assert "no usable backends" in capsys.readouterr().err
 
 
+def _otel_installed() -> bool:
+    """Are the OTel SDK packages importable in this env? Switch behavior
+    of the fallback tests below: in dev (`uv sync --all-extras`) they're
+    installed and we exercise the real path; in minimal CI builds they
+    aren't and we exercise the fallback warning."""
+    try:
+        import opentelemetry.sdk.trace  # noqa: F401, PLC0415
+
+        return True
+    except ImportError:
+        return False
+
+
+def _langfuse_installed() -> bool:
+    try:
+        import langfuse  # noqa: F401, PLC0415
+
+        return True
+    except ImportError:
+        return False
+
+
 @pytest.mark.unit
-def test_build_tracer_otel_implicit_via_endpoint(
+@pytest.mark.skipif(_otel_installed(), reason="fallback path; SDK present")
+def test_build_tracer_otel_implicit_via_endpoint_falls_back(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """Setting only OTEL_EXPORTER_OTLP_ENDPOINT (no MOVATE_TRACER) selects OTel.
-    Since the SDK isn't installed, the runtime path falls back to stdout
-    with a stderr warning — exactly what we want for misconfigured prod."""
+    """When OTel SDK is missing, OTEL_EXPORTER_OTLP_ENDPOINT alone falls
+    back to stdout with a stderr warning. This guards the misconfigured-prod
+    path: env vars set, package not actually installed."""
     _clear_tracer_env(monkeypatch)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
     tracer = build_tracer()
@@ -374,11 +397,32 @@ def test_build_tracer_otel_implicit_via_endpoint(
 
 
 @pytest.mark.unit
-def test_build_tracer_composite_implicit_when_both_configured(
+@pytest.mark.skipif(not _otel_installed(), reason="needs OTel SDK")
+def test_build_tracer_otel_implicit_via_endpoint_returns_otel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When OTel SDK IS installed, the same env var selects OtelTracer. This
+    is the production happy-path; the fallback test above covers the
+    misconfigured case."""
+    from movate.tracing.otel import OtelTracer  # noqa: PLC0415
+
+    _clear_tracer_env(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+    tracer = build_tracer()
+    assert isinstance(tracer, OtelTracer)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(
+    _otel_installed() or _langfuse_installed(),
+    reason="fallback path; one or both SDKs present",
+)
+def test_build_tracer_composite_implicit_when_both_configured_falls_back(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """Both Langfuse and OTel env vars set → composite path. Without their
-    SDKs installed, both fall back, and composite resolves to stdout."""
+    """Both Langfuse and OTel env vars set, but neither SDK installed →
+    composite path attempts both, both fall back, end result is stdout
+    plus two warnings on stderr."""
     _clear_tracer_env(monkeypatch)
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
