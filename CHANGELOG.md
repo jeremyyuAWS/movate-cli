@@ -40,6 +40,24 @@ to `main`; v0.4 will be tagged once `movate run --replay <run-id>` lands.
 - Per-case diff deferred to v0.4.1+ when datasets are big enough that
   aggregate isn't enough.
 
+### Added — Run replay
+
+- **`movate run <agent> --replay <run-id>`** (`core/run_replay.py` +
+  `cli/run.py`) — single best regression-debug tool. Re-executes a
+  recorded `RunRecord` through the *current* agent bundle (prompt, model,
+  schemas, pricing all reload from disk; only the input is pinned).
+  `AgentReplayDiff` surfaces `output_changed`, `status_changed`,
+  `changed_keys` (top-level keys whose values diverge), cost delta, and
+  latency delta. `-o json` for piping; `-o text` renders a Rich summary
+  table to stderr with a slim diff JSON on stdout.
+- Output changes are *not* failures — surfacing the diff IS the goal,
+  exit 0 even when the agent now produces different output. Only a
+  current-run error trips exit 1. Mismatch (run-id missing, agent name
+  doesn't match the bundle) → exit 2.
+- `--replay` is mutually exclusive with positional INPUT / `--input`.
+  Workflow replay deferred; single-agent debug covers the 80% case.
+  14 tests in `tests/test_run_replay.py`.
+
 [Unreleased]: https://github.com/movate/movate-cli/compare/v0.3.1...HEAD
 
 ## [0.3.1] — 2026-05-09

@@ -24,6 +24,12 @@ from movate.cli._runtime import build_local_runtime, shutdown_runtime
 from movate.cli._workflow_path import is_workflow_path
 from movate.core.loader import AgentBundle, AgentLoadError, load_agent
 from movate.core.models import RunRequest, WorkflowStatus
+from movate.core.run_replay import (
+    AgentReplayDiff,
+    ReplayMismatchError,
+    render_replay_json,
+    replay_agent_run,
+)
 from movate.core.workflow import (
     WorkflowCompileError,
     WorkflowGraph,
@@ -52,6 +58,15 @@ def run(
     input_flag: str = typer.Option(
         None, "--input", "-i", help="Alternative way to pass input (preferred for explicit JSON)."
     ),
+    replay_id: str = typer.Option(
+        None,
+        "--replay",
+        help=(
+            "Re-run a recorded RunRecord by id against the current agent code. "
+            "Pins the original input; everything else (prompt, model, schemas) "
+            "comes from disk. Mutually exclusive with positional INPUT/--input."
+        ),
+    ),
     mock: bool = typer.Option(
         False, "--mock", help="Use the deterministic MockProvider (no API keys; for smoke tests)."
     ),
@@ -67,6 +82,9 @@ def run(
       [dim]# Mock mode (no API calls)[/dim]
       $ movate run ./faq-agent "hello" --mock
 
+      [dim]# Replay a stored run against current code (regression debug)[/dim]
+      $ movate run ./faq-agent --replay 4f8a-...
+
     [bold]Workflow examples:[/bold]
 
       [dim]# Initial state as JSON[/dim]
@@ -75,6 +93,21 @@ def run(
       [dim]# Initial state from a file[/dim]
       $ movate run ./returns-workflow --input initial_state.json
     """
+    if replay_id is not None:
+        if input_arg is not None or input_flag is not None:
+            console.print(
+                "[red]✗[/red] --replay is mutually exclusive with positional INPUT / --input"
+            )
+            raise typer.Exit(code=2)
+        if is_workflow_path(path):
+            console.print(
+                "[red]✗[/red] --replay supports agents only in v0.4; "
+                "workflow replay lands in a follow-up"
+            )
+            raise typer.Exit(code=2)
+        _dispatch_replay(path, replay_id, mock=mock, output_format=output_format)
+        return
+
     if is_workflow_path(path):
         _dispatch_workflow(path, input_flag or input_arg, mock=mock, output_format=output_format)
     else:
@@ -301,6 +334,104 @@ def _status_badge(result: WorkflowResult) -> str:
     if result.status is WorkflowStatus.SUCCESS:
         return "[green]SUCCESS[/green]"
     return "[red]ERROR[/red]"
+
+
+# ---------------------------------------------------------------------------
+# Replay dispatch
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_replay(path: Path, run_id: str, *, mock: bool, output_format: str) -> None:
+    try:
+        bundle = load_agent(path)
+    except AgentLoadError as exc:
+        console.print(f"[red]✗ load failed:[/red] {exc}")
+        raise typer.Exit(code=2) from None
+
+    asyncio.run(_run_replay(bundle, run_id, output_format=output_format, mock=mock))
+
+
+async def _run_replay(
+    bundle: AgentBundle,
+    run_id: str,
+    *,
+    output_format: str,
+    mock: bool,
+) -> None:
+    rt = await build_local_runtime(mock=mock)
+    try:
+        try:
+            diff = await replay_agent_run(
+                storage=rt.storage,
+                executor=rt.executor,
+                bundle=bundle,
+                run_id=run_id,
+            )
+        except ReplayMismatchError as exc:
+            console.print(f"[red]✗ replay failed:[/red] {exc}")
+            raise typer.Exit(code=2) from None
+    finally:
+        await shutdown_runtime(rt.storage, rt.tracer)
+
+    if output_format == "text":
+        _emit_replay_text(diff)
+    else:
+        sys.stdout.write(json.dumps(render_replay_json(diff), indent=2, default=str) + "\n")
+
+    # Output changes are normal — surfacing them IS the goal. Only fail
+    # the gate when the replay itself errored (regression in the agent).
+    if diff.current.status == "error":
+        raise typer.Exit(code=1)
+
+
+def _emit_replay_text(diff: AgentReplayDiff) -> None:
+    head = Table(
+        title=f"agent replay vs run {diff.original.run_id[:8]}…",
+        show_header=False,
+    )
+    head.add_column("field", style="dim")
+    head.add_column("value")
+    head.add_row("agent", diff.original.agent)
+    head.add_row(
+        "agent_version",
+        f"{diff.original.agent_version} (recorded)",
+    )
+    head.add_row("recorded_at", diff.original.created_at.isoformat())
+    head.add_row(
+        "status",
+        f"{diff.original.status.value} → {diff.current.status}"
+        + ("  [yellow](changed)[/yellow]" if diff.status_changed else ""),
+    )
+    head.add_row(
+        "output_changed",
+        "[yellow]YES[/yellow]" if diff.output_changed else "[green]no[/green]",
+    )
+    if diff.changed_keys:
+        head.add_row("changed_keys", ", ".join(diff.changed_keys))
+    head.add_row(
+        "cost_delta",
+        f"${diff.original.metrics.cost_usd:.6f} → ${diff.current.metrics.cost_usd:.6f}  "
+        f"({diff.cost_delta_usd:+.6f})",
+    )
+    head.add_row(
+        "latency_delta",
+        f"{diff.original.metrics.latency_ms} → {diff.current.metrics.latency_ms} ms  "
+        f"({diff.latency_delta_ms:+d})",
+    )
+    console.print(head)
+
+    sys.stdout.write(
+        json.dumps(
+            {
+                "input": diff.original.input,
+                "recorded_output": diff.original.output,
+                "current_output": diff.current.data,
+            },
+            indent=2,
+            default=str,
+        )
+        + "\n"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -26,16 +26,15 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 
 ## 🎯 Top 10 highest-leverage shortlist
 
-**v0.4 baseline diff shipped this session** — 21 new tests (274 unit + 3 smoke = 277 total). `movate eval --baseline <eval-id>` diffs current scores vs a stored `EvalRecord` (mean_score, pass_rate, sample_count, cost), renders a Rich diff table after the eval output, includes a `baseline` block in `-o json`, and exits 1 on regression past `--regression-tolerance` (default 0.0). Closes the regression-detection loop alongside trace replay. Storage gained `get_eval(eval_id)`. (Also this session: v0.4 trace replay + OTel/composite/Langfuse tracers, v0.3.1 patch, v0.3 IR/runner/CLI.)
+**v0.4 run-replay shipped this session** — 14 new tests (288 unit + 3 smoke = 291 total). `movate run <agent> --replay <run-id>` re-executes the recorded input through the current agent code (prompt + model + schemas all loaded fresh from disk; only the input is pinned). Surfaces output diff (`changed_keys`), status flip, cost/latency deltas in `-o text` (Rich) or `-o json`. Output changes are *not* failures (debug tool); only a current-run error trips exit 1. Mutually exclusive with positional INPUT/--input. Workflow replay deferred — single-agent regression covers the 80% debug case. (Also this session: v0.4 baseline diff, trace replay, OTel/composite/Langfuse tracers, v0.3.1 patch, v0.3 IR/runner/CLI.)
 
-1. [ ] **`movate run --replay <run-id>`** `[HIGH] [v0.4] [next] [≤1d]` — re-run an exact recorded input against the current agent; single best regression-debug tool.
-2. [ ] **Tag v0.4 release** `[MED] [v0.4] [≤1h]` — once run-replay lands, cut the tag.
-3. [ ] **GH Actions eval-gate workflow** `[HIGH] [v1.0] [≤1d]` — closes the loop on "evals are mandatory."
-4. [ ] **PostgresProvider + FastAPI runtime** `[HIGH] [v0.5] [1w]` — turns movate from a CLI into a service.
-5. [ ] **API key issuance + tenant isolation audit** `[HIGH] [v0.5] [2-3d]` — security-critical for multi-tenant.
-6. [ ] **Bicep + GH-Actions deploy.yml** `[HIGH] [v1.0] [4-6d]` — turn `git push release/*` into an ACA deploy.
-7. [ ] **Model policy enforcement** `[HIGH] [v1.0] [2-3d]` — `policies/model_policy.yaml` enforced at executor entry.
-8. [ ] **More templates as customer engagements demand** `[MED] [post-v0.4]` — extractor, RAG, function-caller; trivial to add now that the registry exists.
+1. [ ] **Tag v0.4 release** `[MED] [v0.4] [≤1h]` — both regression-debug tools (baseline diff + run-replay) plus full tracing stack are in main; cut the tag.
+2. [ ] **GH Actions eval-gate workflow** `[HIGH] [v1.0] [≤1d]` — closes the loop on "evals are mandatory."
+3. [ ] **PostgresProvider + FastAPI runtime** `[HIGH] [v0.5] [1w]` — turns movate from a CLI into a service.
+4. [ ] **API key issuance + tenant isolation audit** `[HIGH] [v0.5] [2-3d]` — security-critical for multi-tenant.
+5. [ ] **Bicep + GH-Actions deploy.yml** `[HIGH] [v1.0] [4-6d]` — turn `git push release/*` into an ACA deploy.
+6. [ ] **Model policy enforcement** `[HIGH] [v1.0] [2-3d]` — `policies/model_policy.yaml` enforced at executor entry.
+7. [ ] **More templates as customer engagements demand** `[MED] [post-v0.4]` — extractor, RAG, function-caller; trivial to add now that the registry exists.
 
 ---
 
@@ -214,7 +213,7 @@ These pay back across every phase. Don't queue them after v1.0 — interleave th
 - [x] **Live-API smoke tests (env-gated)** `[HIGH] [v0.2] [done]` — [tests/test_smoke_litellm.py](tests/test_smoke_litellm.py) + [scripts/smoke.sh](scripts/smoke.sh). 3 tests covering OpenAI direct, Anthropic direct, and full executor against real OpenAI. Module-level `pytestmark = pytest.mark.smoke`; CI filters with `-m "not smoke"`. Each test independently gated on the relevant API key.
 - [ ] **Workflow templates — `returns-processing`, `triage-then-respond`** `[MED] [v0.3] [≤1d]`.
 - [ ] **VS Code launch configs (debug a single agent run)** `[MED] [v0.2] [≤2h]` — port from MDK if useful.
-- [ ] **`movate run --replay <run-id>`** `[HIGH] [v0.4] [≤1d]` — re-execute with the exact recorded input + render the diff. Single best regression-debug tool you can build.
+- [x] **`movate run --replay <run-id>`** `[HIGH] [v0.4] [done]` — `core/run_replay.py` + `cli/run.py` flag. Re-executes a recorded `RunRecord` against the current agent bundle (prompt/model/schemas reload from disk). Surfaces `output_changed`, `status_changed`, `changed_keys`, cost + latency deltas. Output changes are not failures (debug tool); only a current-run error trips exit 1. Mutually exclusive with positional INPUT. Workflow replay deferred. 14 tests in [tests/test_run_replay.py](tests/test_run_replay.py).
 - [ ] **`movate diff <agent-a> <agent-b>`** `[MED] [v0.2] [≤1d]` — show prompt-hash, model, schema deltas; great for PR review.
 - [ ] **Prompt linter** `[MED] [v0.2] [≤1d]` — flag missing JSON-only instruction, undeclared `{{ input.* }}` refs, no output schema example.
 - [ ] **Cost forecast on `validate`** `[MED] [v0.2] [≤1d]` — print expected cost based on dataset + average tokens.
