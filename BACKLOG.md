@@ -26,6 +26,8 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 
 ## 🎯 Top 10 highest-leverage shortlist
 
+**Progress UI shipped this session.** 7 new tests (398 unit + 3 smoke = 401 total). `cli/_progress.py` with `progress_bar()`, `spinner()`, `print_event()` helpers — all stderr-only, auto-degrade on non-TTY. `EvalEngine` / `BenchEngine` / `Worker` gained optional progress callbacks that wrap user callbacks in `contextlib.suppress(Exception)` so buggy UI can never sink a run. `movate eval` shows case-by-case bar with running mean score; `movate bench` shows model-by-model bar; `movate worker` shows streaming feed (`07:59:09 ✓ agent/alpha (2ms · 5fdb30de)`). Suppressed for `-o json` / `-o markdown` / `--mock` so automation paths stay clean — JSON output validity verified by tests.
+
 **v0.5.0 tagged + released this session.** [GitHub Release](https://github.com/jeremyyuAWS/movate-cli/releases/tag/v0.5.0) with wheel + sdist attached (per RELEASING.md Option A). README capability matrix flipped from staged → shipped for HTTP runtime / worker / Postgres. Service-mode quickstart added to README so the v0.5 surface is discoverable. CI gained a `postgres` job using GHA's `services:` block (Postgres 16 container) — the parametrized storage conformance suite now runs against PG on every PR, closing the "regression only caught when a dev sets MOVATE_PG_TEST_URL locally" gap.
 
 1. [ ] **v1.0 stage 1: Bicep IaC for Azure** `[HIGH] [v1.0] [next] [3-4d]` — ACA + Postgres Flex + ACR + Key Vault + Log Analytics. Port + harden [src/mdk/infra/](https://github.com/jeremyyuAWS/movate-cli) scaffold.

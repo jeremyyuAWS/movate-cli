@@ -24,6 +24,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from movate.core.models import (
@@ -60,10 +62,16 @@ class Worker:
         storage: StorageProvider,
         dispatch: WorkerDispatch,
         config: WorkerConfig | None = None,
+        on_job_complete: Callable[[JobRecord, DispatchOutcome, int], None] | None = None,
     ) -> None:
         self._storage = storage
         self._dispatch = dispatch
         self._config = config or WorkerConfig()
+        self._on_job_complete = on_job_complete
+        """Optional progress hook: ``(job, outcome, duration_ms)``.
+        Fires after each job completes (including ERROR / SAFETY_BLOCKED
+        terminals); CLI uses it to render a per-job line in the live
+        worker feed without coupling Worker to UI."""
 
     async def run_one_cycle(self) -> JobRecord | None:
         """Claim one job (if any), dispatch, update. Returns the
@@ -79,6 +87,7 @@ class Worker:
         if job is None:
             return None
 
+        started = time.monotonic()
         try:
             outcome = await self._dispatch.execute_job(job)
         except Exception as exc:
@@ -112,13 +121,21 @@ class Worker:
                 outcome.status.value,
             )
 
+        duration_ms = int((time.monotonic() - started) * 1000)
         logger.info(
-            "worker_completed job_id=%s kind=%s target=%s status=%s",
+            "worker_completed job_id=%s kind=%s target=%s status=%s duration_ms=%d",
             job.job_id,
             job.kind.value,
             job.target,
             outcome.status.value,
+            duration_ms,
         )
+        if self._on_job_complete is not None:
+            # Decorative; never sink the worker on a buggy callback.
+            try:
+                self._on_job_complete(job, outcome, duration_ms)
+            except Exception:
+                logger.warning("on_job_complete callback raised", exc_info=True)
         return job
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:

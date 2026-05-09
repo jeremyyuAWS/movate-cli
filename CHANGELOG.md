@@ -3,6 +3,44 @@
 All notable changes to movate. Format follows [Keep a Changelog](https://keepachangelog.com/);
 versioning follows [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added — Progress UI for long-running CLI ops
+
+The dev team's intuition for "is this still working?" is now backed
+by visible feedback. Three commands that used to run silently for 30s
+to several minutes now show what's happening.
+
+- **`cli/_progress.py`** — three reusable helpers, all writing to
+  **stderr** so stdout JSON pipes stay clean:
+  * `progress_bar(description, total)` — known-length loop with
+    moving bar, mof-N count, elapsed time, and side-suffix support
+    (e.g. running mean score)
+  * `spinner(message)` — indeterminate-duration single operation
+  * `print_event(message, style)` — one-line stderr print for
+    streaming feeds
+  All auto-degrade on non-TTY (CI logs, redirected output, captured
+  test runs). Rich does this natively; the helpers verify the
+  contract via `Console.is_terminal`.
+- **`movate eval`** — case-by-case progress bar with running mean
+  score in the side-suffix. Suppressed for `-o json` / `-o markdown`
+  / `--mock` so automation paths and quick tests stay clean.
+- **`movate bench`** — model-by-model progress bar showing the
+  just-finished model name in the suffix.
+- **`movate worker`** — streaming feed: one line per completed job
+  with status icon (✓ / ⊘ / ✗), kind/target, duration, short job_id.
+  At-a-glance throughput + failure visibility for operators tailing
+  the worker process.
+- Engine hooks (`EvalEngine.on_case_complete`,
+  `BenchEngine.on_model_complete`, `Worker.on_job_complete`) are
+  optional callbacks; engines call them in a `contextlib.suppress`
+  block so a buggy UI callback can never sink the run. Tests
+  explicitly assert this contract.
+- Seven new tests covering JSON-output stays clean, markdown stays
+  clean, callback exceptions are swallowed, non-TTY produces no ANSI
+  escapes. Real-binary smoke validated the worker live feed against
+  three queued jobs.
+
 ## [0.5.0] — 2026-05-09
 
 **movate is now a service.** v0.5 takes the framework from "library +

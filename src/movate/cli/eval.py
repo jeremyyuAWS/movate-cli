@@ -9,15 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._progress import progress_bar
 from movate.cli._runtime import build_local_runtime, shutdown_runtime
 from movate.core.baseline import BaselineDiff, compute_baseline_diff, format_delta
-from movate.core.eval import EvalConfigError, EvalEngine, EvalSummary
+from movate.core.eval import CaseSummary, EvalConfigError, EvalEngine, EvalSummary
 from movate.core.loader import AgentBundle, AgentLoadError, load_agent
 from movate.core.models import EvalRecord
 from movate.core.reporters import render_eval_markdown
@@ -133,17 +136,25 @@ async def _run_eval(
     rt = await build_local_runtime(mock=mock)
     baseline_record: EvalRecord | None = None
     try:
-        engine = EvalEngine(
-            executor=rt.executor,
-            provider=rt.provider,
-            runs_per_case=runs,
-            gate_mode=gate_mode,
-        )
-        try:
-            summary = await engine.run(bundle)
-        except EvalConfigError as exc:
-            err_console.print(f"[red]✗ eval config error:[/red] {exc}")
-            raise typer.Exit(code=2) from None
+        # Progress UI is on for human-facing output (table); off for
+        # machine-readable formats so JSON / Markdown stay clean if a
+        # user accidentally redirects stderr too. Mock mode is fast
+        # enough that progress just adds noise — also off.
+        show_progress = output_format == "table" and not mock
+
+        with _maybe_eval_progress(show_progress) as on_case:
+            engine = EvalEngine(
+                executor=rt.executor,
+                provider=rt.provider,
+                runs_per_case=runs,
+                gate_mode=gate_mode,
+                on_case_complete=on_case,
+            )
+            try:
+                summary = await engine.run(bundle)
+            except EvalConfigError as exc:
+                err_console.print(f"[red]✗ eval config error:[/red] {exc}")
+                raise typer.Exit(code=2) from None
 
         record = summary.to_record()
         await rt.storage.save_eval(record)
@@ -435,3 +446,34 @@ def _write_baseline_file(path: Path, record: EvalRecord) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(record.model_dump_json(indent=2) + "\n")
     err_console.print(f"[green]✓[/green] wrote baseline → {path}")
+
+
+@contextmanager
+def _maybe_eval_progress(
+    enabled: bool,
+) -> Iterator[Callable[[int, int, CaseSummary], None] | None]:
+    """Yield a callback suitable for ``EvalEngine.on_case_complete``.
+
+    When ``enabled``, drives a stderr progress bar that updates after
+    each case with running mean score. When disabled, yields ``None``
+    so the engine sees no progress hook (clean JSON / Markdown output).
+
+    The bar's total isn't known until the engine starts iterating
+    (``load_dataset`` runs inside ``EvalEngine.run``), so we set total
+    on the first callback via ``advance(total=...)``.
+    """
+    if not enabled:
+        yield None
+        return
+
+    running_total = 0.0
+
+    with progress_bar(description="cases", total=None) as advance:
+
+        def on_case(done: int, total: int, summary: CaseSummary) -> None:
+            nonlocal running_total
+            running_total += summary.aggregated_score
+            mean = running_total / done if done else 0.0
+            advance(total=total, suffix=f" (mean={mean:.2f})")
+
+        yield on_case

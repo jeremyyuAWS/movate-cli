@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from datetime import datetime
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from movate.cli._runtime import build_local_runtime, shutdown_runtime
-from movate.runtime.dispatch import WorkerDispatch
+from movate.core.models import JobRecord, JobStatus
+from movate.runtime.dispatch import DispatchOutcome, WorkerDispatch
 from movate.runtime.registry import scan_agents, scan_workflows
 from movate.runtime.worker import Worker, WorkerConfig
 
@@ -122,7 +124,31 @@ async def _run_worker(
         poll_interval_seconds=poll_interval,
         tenant_id=tenant_id,
     )
-    worker_obj = Worker(storage=rt.storage, dispatch=dispatch, config=config)
+
+    def on_job_complete(job: JobRecord, outcome: DispatchOutcome, duration_ms: int) -> None:
+        """Print one line per finished job — a streaming feed beats a
+        progress bar here because the worker runs indefinitely with
+        unknown total. Status icon + color + duration so the operator
+        can eyeball throughput and failures at a glance."""
+        ts = datetime.now().strftime("%H:%M:%S")
+        if outcome.status == JobStatus.SUCCESS:
+            icon, color = "✓", "green"
+        elif outcome.status == JobStatus.SAFETY_BLOCKED:
+            icon, color = "⊘", "yellow"
+        else:  # ERROR
+            icon, color = "✗", "red"
+        err.print(
+            f"[dim]{ts}[/dim] [{color}]{icon}[/{color}] "
+            f"{job.kind.value}/{job.target} "
+            f"[dim]({duration_ms}ms · {job.job_id[:8]})[/dim]"
+        )
+
+    worker_obj = Worker(
+        storage=rt.storage,
+        dispatch=dispatch,
+        config=config,
+        on_job_complete=on_job_complete,
+    )
 
     stop_event = asyncio.Event()
 

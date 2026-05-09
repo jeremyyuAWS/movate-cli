@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._progress import progress_bar
 from movate.cli._runtime import build_local_runtime, shutdown_runtime
 from movate.core.bench import BenchEngine, BenchSummary, ModelBenchResult
 from movate.core.config import load_project_config
@@ -235,17 +238,20 @@ async def _run_bench(
     output_format: str,
 ) -> None:
     rt = await build_local_runtime(mock=mock)
+    show_progress = output_format == "table" and not mock
     try:
         try:
-            engine = BenchEngine(
-                executor=rt.executor,
-                provider=rt.provider,
-                runs_per_model=runs,
-                gate_mode=gate_mode,
-                judge=judge,
-                rubric=rubric,
-            )
-            summary = await engine.run(bundle, input_payload=payload, providers=providers)
+            with _maybe_bench_progress(show_progress, total=len(providers)) as on_model:
+                engine = BenchEngine(
+                    executor=rt.executor,
+                    provider=rt.provider,
+                    runs_per_model=runs,
+                    gate_mode=gate_mode,
+                    judge=judge,
+                    rubric=rubric,
+                    on_model_complete=on_model,
+                )
+                summary = await engine.run(bundle, input_payload=payload, providers=providers)
         except EvalConfigError as exc:
             err_console.print(f"[red]✗ bench config error:[/red] {exc}")
             raise typer.Exit(code=2) from None
@@ -342,3 +348,28 @@ def _model_to_json(m: ModelBenchResult, gate_mode: str) -> dict[str, Any]:
 
 def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+@contextmanager
+def _maybe_bench_progress(
+    enabled: bool, *, total: int
+) -> Iterator[Callable[[int, int, ModelBenchResult], None] | None]:
+    """Yield a callback for ``BenchEngine.on_model_complete``.
+
+    Suppressed when not rendering for humans (json/markdown) or in
+    mock mode (where the per-model loop is fast enough that a bar is
+    just noise).
+    """
+    if not enabled:
+        yield None
+        return
+
+    with progress_bar(description="models", total=total) as advance:
+
+        def on_model(done: int, total_in_cb: int, result: ModelBenchResult) -> None:
+            _ = (done, total_in_cb)
+            # Append the just-finished model name so the bar shows
+            # progress + which model was last evaluated.
+            advance(suffix=f" — {result.provider}")
+
+        yield on_model

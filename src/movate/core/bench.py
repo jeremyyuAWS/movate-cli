@@ -17,8 +17,10 @@ fallback's blended output).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import statistics
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -147,6 +149,7 @@ class BenchEngine:
         gate_mode: str = "mean",
         judge: JudgeConfig | None = None,
         rubric: str | None = None,
+        on_model_complete: Callable[[int, int, ModelBenchResult], None] | None = None,
     ) -> None:
         if runs_per_model < 1:
             raise EvalConfigError("runs_per_model must be >= 1")
@@ -161,6 +164,10 @@ class BenchEngine:
         self._gate_mode = gate_mode
         self._judge = judge
         self._rubric = rubric or (judge.rubric if judge else None)
+        self._on_model_complete = on_model_complete
+        """Optional progress hook: ``(done, total, result)``. Fires
+        after each model finishes; CLI uses it to drive a Rich
+        progress bar without coupling the engine to UI."""
 
     async def run(
         self,
@@ -212,13 +219,16 @@ class BenchEngine:
                     score, rationale = await self._score_freeform(input_payload, response.data)
                 runs.append(BenchRun(response=response, score=score, rationale=rationale))
 
-            results.append(
-                ModelBenchResult(
-                    provider=prov,
-                    runs=runs,
-                    skipped_score=judge_skipped,
-                )
+            result = ModelBenchResult(
+                provider=prov,
+                runs=runs,
+                skipped_score=judge_skipped,
             )
+            results.append(result)
+            if self._on_model_complete is not None:
+                # Decorative; never sink the bench on a buggy callback.
+                with contextlib.suppress(Exception):
+                    self._on_model_complete(len(results), len(providers), result)
 
         judge_provider = (
             self._judge.model.provider

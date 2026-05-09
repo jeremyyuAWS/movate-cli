@@ -12,9 +12,11 @@ Locked rules:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import statistics
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -275,6 +277,7 @@ class EvalEngine:
         provider: BaseLLMProvider,
         runs_per_case: int = 1,
         gate_mode: str = "mean",
+        on_case_complete: Callable[[int, int, CaseSummary], None] | None = None,
     ) -> None:
         if runs_per_case < 1:
             raise EvalConfigError("runs_per_case must be >= 1")
@@ -284,6 +287,10 @@ class EvalEngine:
         self._provider = provider
         self._runs_per_case = runs_per_case
         self._gate_mode = gate_mode
+        self._on_case_complete = on_case_complete
+        """Optional progress hook: ``(done, total, summary)``. Fires
+        after each case finishes; CLI uses it to drive a Rich progress
+        bar without coupling the engine to UI."""
 
     async def run(self, bundle: AgentBundle) -> EvalSummary:
         judge = load_judge_config(bundle)
@@ -291,6 +298,7 @@ class EvalEngine:
         cases, dataset_hash = load_dataset(bundle)
 
         case_summaries: list[CaseSummary] = []
+        total = len(cases)
         for case in cases:
             runs: list[CaseRun] = []
             for _ in range(self._runs_per_case):
@@ -312,14 +320,18 @@ class EvalEngine:
                 runs.append(CaseRun(response=response, score=score, rationale=rationale))
 
             agg = aggregate_scores([r.score for r in runs], self._gate_mode)
-            case_summaries.append(
-                CaseSummary(
-                    case=case,
-                    runs=runs,
-                    aggregated_score=agg,
-                    passed=agg >= judge.threshold,
-                )
+            summary = CaseSummary(
+                case=case,
+                runs=runs,
+                aggregated_score=agg,
+                passed=agg >= judge.threshold,
             )
+            case_summaries.append(summary)
+            if self._on_case_complete is not None:
+                # Decorative; can't kill the run. UI is best-effort,
+                # the eval result is the source of truth.
+                with contextlib.suppress(Exception):
+                    self._on_case_complete(len(case_summaries), total, summary)
 
         judge_provider = (
             judge.model.provider if judge.method == JudgeMethod.LLM_JUDGE and judge.model else None
