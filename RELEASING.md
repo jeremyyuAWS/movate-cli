@@ -1,0 +1,131 @@
+# Releasing movate-cli
+
+`movate-cli` is **proprietary software**. Don't publish to public PyPI.
+This doc captures the private-distribution paths so future-you doesn't
+have to re-derive them under deadline pressure.
+
+## Pre-flight checklist
+
+Every release:
+
+1. `ruff format src tests && ruff check src tests` — must be clean
+2. `mypy src` — strict mode, must be clean
+3. `pytest -m "not smoke"` — full unit + integration suite green
+4. `pytest -m smoke` with `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` set —
+   smoke against real providers (nightly is fine; release blocker only
+   if changing provider code paths)
+5. **End-to-end smoke against the real binary** — `CliRunner` tests
+   miss bugs in the runtime / storage init. Walk through:
+   ```bash
+   tmp=$(mktemp -d) && export MOVATE_DB="$tmp/local.db"
+   movate init faq --target "$tmp"
+   MOVATE_MOCK_RESPONSE='{"message":"Hello!"}' \
+     movate eval "$tmp/faq" --mock --gate 0.0 \
+       --output-baseline "$tmp/baseline.json" -o json | jq .eval_id
+   run_id=$(sqlite3 "$tmp/local.db" \
+     "SELECT run_id FROM runs ORDER BY created_at DESC LIMIT 1")
+   movate run "$tmp/faq" --replay "$run_id" --mock | jq .diff
+   MOVATE_MOCK_RESPONSE='{"message":"WRONG"}' \
+     movate eval "$tmp/faq" --mock --gate 0.0 \
+       --baseline-file "$tmp/baseline.json" -o json | jq .baseline.regression
+   ```
+   The last command must exit 1 with `regression: true`.
+6. Bump version in `pyproject.toml` AND `src/movate/__init__.py` (these
+   must match — no auto-sync today).
+7. Move `[Unreleased]` content in `CHANGELOG.md` under a new
+   `[X.Y.Z] — YYYY-MM-DD` heading; update the link refs at the bottom
+   of the file.
+8. `git tag -a vX.Y.Z -m "vX.Y.Z: <one-line summary>"` (annotated, not
+   lightweight — annotated tags carry author, date, and message and
+   show up in GitHub Releases).
+
+## Distribution targets (pick one)
+
+### Option A — GitHub Release artifacts (recommended for v0.4)
+
+Lowest friction. Build wheel + sdist, attach to a GitHub Release on the
+private repo. Consumers `pip install` the wheel URL directly:
+
+```bash
+# build
+uv build  # writes dist/movate_cli-X.Y.Z-py3-none-any.whl + .tar.gz
+
+# create the release (auto-generates release notes from PRs since the
+# previous tag; --notes-file CHANGELOG.md works too)
+gh release create vX.Y.Z dist/movate_cli-X.Y.Z-py3-none-any.whl \
+  dist/movate_cli-X.Y.Z.tar.gz \
+  --title "vX.Y.Z" \
+  --notes-from-tag
+
+# consumers install with:
+#   pip install https://github.com/jeremyyuAWS/movate-cli/releases/download/vX.Y.Z/movate_cli-X.Y.Z-py3-none-any.whl
+```
+
+GitHub serves these to anyone with read access to the private repo. No
+extra credentials per-consumer beyond their existing GitHub auth.
+
+### Option B — GitHub Packages (PyPI feed)
+
+Slightly more setup, more PyPI-native UX (`pip install movate-cli`
+without a URL). Needs:
+
+1. A PAT with `write:packages` scope (the current token only has
+   `repo`, `workflow`, `gist`, `read:org`). Mint at
+   <https://github.com/settings/tokens>.
+2. `~/.pypirc` configured for the GitHub Packages index:
+   ```ini
+   [distutils]
+   index-servers = github
+
+   [github]
+   repository = https://maven.pkg.github.com/jeremyyuAWS/movate-cli
+   username = jeremyyuAWS
+   password = ghp_<PAT_with_write:packages>
+   ```
+3. Publish:
+   ```bash
+   uv build
+   twine upload --repository github dist/*
+   ```
+
+GH Packages PyPI is still preview as of writing — verify it works for
+your use case before committing to it. Option A is the safer default.
+
+### Option C — Azure Artifacts (when Movate's Azure tenancy is wired up)
+
+Aligns with the v1.0 deploy path. Setup:
+
+1. Create an Azure Artifacts feed in your Movate Azure subscription.
+2. `pip` config or `uv` `[publish]` config to point at the feed.
+3. `twine upload --repository-url <feed-url> dist/*` with an Azure PAT.
+
+This becomes the right answer once v0.5/v0.6 lands and other Movate
+services start consuming `movate-cli` from CI. Until then, Option A
+covers the developer-installs-from-laptop case.
+
+## What NOT to do
+
+- **Don't `twine upload dist/*` without `--repository`** — the default
+  is public PyPI. The current `pyproject.toml` declares `license =
+  "Proprietary"`, but PyPI's metadata field doesn't enforce that;
+  uploading is an exfiltration risk.
+- **Don't push tags before the release artifact lands.** Tag-then-build
+  is fine; tag-and-push-and-CI-triggers-something is brittle. There's
+  no automated release workflow yet — releases are manual and
+  intentional.
+- **Don't bump version in only one of `pyproject.toml` /
+  `__init__.py`.** Drift between them silently creates a release where
+  `pip show` and `import movate; movate.__version__` disagree. Fix is
+  to sync them in the same commit; long-term answer is a single source
+  of truth (e.g. `hatch-vcs` or reading `__version__` from
+  `importlib.metadata`).
+
+## Current state (v0.4.0, 2026-05-09)
+
+- ✓ Tagged: `v0.4.0` (local; pushed to `origin` once remote exists)
+- ✗ Built: no `dist/` artifacts produced yet
+- ✗ Published: nowhere — pick Option A/B/C above before next release
+
+The first push of this repo creates the GitHub remote at
+<https://github.com/jeremyyuAWS/movate-cli>. After that, switch to
+Option A for the v0.4.0 artifact.
