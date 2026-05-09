@@ -10,16 +10,17 @@ not used.
 
 | version | tag | what landed |
 |---|---|---|
+| 0.5.0 | [`v0.5.0`](https://github.com/jeremyyuAWS/movate-cli/releases/tag/v0.5.0) | HTTP runtime + worker + Postgres — movate is now a service |
 | 0.4.0 | [`v0.4.0`](https://github.com/jeremyyuAWS/movate-cli/releases/tag/v0.4.0) | Observability + regression-detection (Langfuse, OTel, trace replay, eval baseline diff, run replay, CI eval-gate) |
 | 0.3.1 | [`v0.3.1`](https://github.com/jeremyyuAWS/movate-cli/releases/tag/v0.3.1) | Workflow runner double-save fix |
 | 0.3.0 | [`v0.3.0`](https://github.com/jeremyyuAWS/movate-cli/releases/tag/v0.3.0) | Sequential workflows (forward-aware IR + compiler + runner) |
 | 0.2.0 | [`v0.2.0`](https://github.com/jeremyyuAWS/movate-cli/releases/tag/v0.2.0) | Eval engine (exact-match + LLM-as-judge with cross-family enforcement) |
 
-**v0.5 in progress (`main`)** — service mode. Stages 1-3a shipped:
-job-queue data layer, API key auth, FastAPI runtime with `/healthz`,
-`POST /run`, `GET /jobs/{id}`. Stages 3b/4/5 (`/agents`, worker,
-PostgresProvider) coming next. Design decisions locked in
-[docs/v0.5-design.md](docs/v0.5-design.md).
+**v1.0 next (`main`)** — Azure deploy + production hardening: Bicep IaC
+(ACA + Postgres Flex + ACR + Key Vault), `movate deploy`, model policy
+enforcement, tenant isolation audit. See
+[docs/v0.5-design.md](docs/v0.5-design.md) for the v0.5 architecture
+that v1.0 builds on.
 
 ## What works today
 
@@ -36,9 +37,9 @@ PostgresProvider) coming next. Design decisions locked in
 | Regression detection vs baseline | `movate eval --baseline <id>` <br> `movate eval --baseline-file <path>` | ✓ v0.4 |
 | Re-run a stored input against current code | `movate run <path> --replay <run-id>` | ✓ v0.4 |
 | API key issuance / revocation | `movate auth create-key | list-keys | revoke-key` | ✓ v0.5 |
-| HTTP runtime | `movate serve` | ⚠️ stage 3a wired, stage 3b ships CLI binding |
-| Background worker | `movate worker` | ⚠️ stub; lands stage 4 |
-| Postgres backend | (auto via env) | ⚠️ lands stage 5 |
+| HTTP runtime | `movate serve` | ✓ v0.5 |
+| Background worker | `movate worker` | ✓ v0.5 |
+| Postgres backend | `MOVATE_DB_URL=postgresql://...` | ✓ v0.5 |
 | Azure deploy | `movate deploy` | ⚠️ stub; v1.0 |
 
 ## Prerequisites
@@ -127,6 +128,52 @@ For a full timeline of an agent or workflow:
 
 ```bash
 movate trace replay <run-id-or-workflow-run-id>
+```
+
+## Quickstart — service mode (v0.5)
+
+Run movate as a real service: HTTP runtime + worker pool, sqlite or
+Postgres-backed.
+
+### Sqlite (zero infra)
+
+```bash
+# Terminal 1: scaffold an agent + start the HTTP runtime
+movate init alpha --target ./agents
+movate serve --port 8000 --agents-path ./agents
+
+# Terminal 2: run a worker (mock mode = no API keys)
+MOVATE_MOCK_RESPONSE='{"message":"hi"}' movate worker --mock
+
+# Terminal 3: mint a key + queue a job
+KEY=$(movate auth create-key --tenant-id "$(uuidgen | tr -d -)" --env live --quiet 2>&1 \
+        | grep -o 'mvt_[a-zA-Z0-9_-]*' | head -1)
+
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"kind":"agent","target":"alpha","input":{"text":"hello"}}' \
+  http://127.0.0.1:8000/run
+# → {"job_id": "...", "status": "queued"}
+
+# Poll until terminal:
+curl -H "Authorization: Bearer $KEY" http://127.0.0.1:8000/jobs/<job_id>
+# → {"status": "success", "result_run_id": "...", ...}
+```
+
+### Postgres (production)
+
+Same commands; just point `MOVATE_DB_URL` at a Postgres instance:
+
+```bash
+export MOVATE_DB_URL="postgresql://user:pw@host:5432/movate"
+movate serve --port 8000 --agents-path ./agents
+movate worker  # in another process; multiple workers run in parallel via SKIP LOCKED
+```
+
+API key + job + run state all land in Postgres. JSONB columns are
+queryable directly:
+
+```sql
+SELECT job_id, status, output->>'message' FROM runs WHERE agent = 'alpha';
 ```
 
 ## Available templates

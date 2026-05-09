@@ -34,6 +34,49 @@ jobs:
       - name: Tests
         run: uv run pytest -m "not smoke"
 
+  # Postgres conformance — runs the same parametrized storage suite
+  # against a real Postgres 16, exercising what the default ``lint-and-test``
+  # job skips. Without this, a regression in storage/postgres.py would
+  # only be caught when a developer happens to set MOVATE_PG_TEST_URL
+  # locally. ~30s overhead vs the savings on regression triage time.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: movate
+          POSTGRES_PASSWORD: movate
+          POSTGRES_DB: movate_test
+        ports:
+          - 5432:5432
+        # GHA needs an explicit health-check or the job races startup.
+        options: >-
+          --health-cmd "pg_isready -U movate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync deps
+        run: uv sync --all-extras --dev
+
+      - name: Run storage conformance suite + PG-specific tests
+        env:
+          MOVATE_PG_TEST_URL: postgresql://movate:movate@127.0.0.1:5432/movate_test
+        # Only the storage suites need PG; rest of the suite ran in
+        # the lint-and-test job already.
+        run: uv run pytest tests/test_jobs_storage.py tests/test_auth.py tests/test_sqlite.py -v
+
   # Lint every .yml under .github/workflows/ — including the example
   # workflow we ship for downstream consumers (eval-gate.example.yml).
   # Catches breakage from GitHub Actions deprecations / typos before
