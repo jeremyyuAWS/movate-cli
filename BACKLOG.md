@@ -26,10 +26,12 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 
 ## 🎯 Top 10 highest-leverage shortlist
 
-**v0.4.0 tagged + GH Actions eval-gate shipped this session** — 6 new file-baseline tests (294 unit + 3 smoke = 297 total). `movate eval` gained `--baseline-file <path>` (load EvalRecord from JSON — works on ephemeral CI runners) and `--output-baseline <path>` (write current EvalRecord for committing). Example workflow at `.github/workflows/eval-gate.example.yml` (gate-pr + refresh-baseline jobs); docs at [docs/ci-eval-gate.md](docs/ci-eval-gate.md). Closes the "evals are mandatory" loop — consumers can now drop in 10 lines of YAML and get PR-blocking eval gates with auto-refresh on main merge.
+**v0.5 stage 1 shipped this session** — 25 new tests (321 unit + 3 smoke = 324 total). Job queue data layer: `JobKind` enum, `JobRecord` Pydantic model, `jobs` table on SQLite with partial index over the queue head, plus `save_job`/`get_job`/`list_jobs`/`claim_next_job`/`update_job` on the `StorageProvider` Protocol with implementations in both `SqliteProvider` and `InMemoryStorage`. Claim semantics: FIFO oldest-first, status guard (only QUEUED rows ever claimed), tenant scoping, atomic `BEGIN IMMEDIATE` so two worker connections can't double-dispatch a job. Design decisions locked in [docs/v0.5-design.md](docs/v0.5-design.md). Foundation for FastAPI runtime + worker which land next.
 
-1. [ ] **PostgresProvider + FastAPI runtime** `[HIGH] [v0.5] [1w]` — turns movate from a CLI into a service.
-2. [ ] **API key issuance + tenant isolation audit** `[HIGH] [v0.5] [2-3d]` — security-critical for multi-tenant.
+1. [ ] **v0.5 stage 2: API keys + auth crypto** `[HIGH] [v0.5] [next] [≤2d]` — `core/auth.py` (mint/verify/revoke), `api_keys` schema, tenant-scoped storage methods. Pure data layer; HTTP middleware lands with FastAPI in stage 3.
+2. [ ] **v0.5 stage 3: FastAPI runtime + `movate serve`** `[HIGH] [v0.5] [≤3d]` — `/healthz`, `/agents`, `/run`, `/jobs/{id}` with auth middleware in front.
+3. [ ] **v0.5 stage 4: worker claim loop + `movate worker`** `[HIGH] [v0.5] [≤2d]` — drain the queue, dispatch agent vs workflow by `JobKind`.
+4. [ ] **v0.5 stage 5: PostgresProvider port** `[HIGH] [v0.5] [≤2d]` — same conformance suite, switches to `SELECT ... FOR UPDATE SKIP LOCKED` for the claim path.
 3. [ ] **Bicep + GH-Actions deploy.yml** `[HIGH] [v1.0] [4-6d]` — turn `git push release/*` into an ACA deploy.
 4. [ ] **Model policy enforcement** `[HIGH] [v1.0] [2-3d]` — `policies/model_policy.yaml` enforced at executor entry.
 5. [ ] **More templates as customer engagements demand** `[MED] [post-v0.4]` — extractor, RAG, function-caller; trivial to add now that the registry exists.

@@ -325,5 +325,62 @@ class EvalRecord(BaseModel):
     created_at: datetime = Field(default_factory=_now)
 
 
+# ---------------------------------------------------------------------------
+# Job queue (v0.5+)
+#
+# A ``JobRecord`` is a queue entry — created on ``POST /run``, claimed by a
+# worker, then transitioned to a terminal state. The actual execution
+# produces a ``RunRecord`` (or ``WorkflowRunRecord``) that is the source of
+# truth for *what happened*; the job table is the source of truth for *what
+# was asked for and is it done yet*. They link via ``RunRecord.job_id`` →
+# ``JobRecord.job_id`` and ``JobRecord.result_run_id`` →
+# ``RunRecord.run_id`` (or ``WorkflowRunRecord.workflow_run_id``).
+# ---------------------------------------------------------------------------
+
+
+class JobKind(StrEnum):
+    """What a queued job will execute when claimed."""
+
+    AGENT = "agent"
+    WORKFLOW = "workflow"
+
+
+class JobRecord(BaseModel):
+    """Queue entry for an async run.
+
+    Lifecycle:
+
+    * ``QUEUED`` (just inserted, waiting for a worker)
+    * ``RUNNING`` (claimed by a worker, ``claimed_at`` set)
+    * ``SUCCESS`` / ``ERROR`` / ``SAFETY_BLOCKED`` (terminal,
+      ``completed_at`` and (for success) ``result_run_id`` set)
+
+    Re-uses :class:`JobStatus` (defined for ``RunRecord``) so the queue
+    and the produced run share a single status vocabulary.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    tenant_id: str
+    kind: JobKind
+    target: str
+    """Agent name or workflow name. Discriminator pairs with ``kind``."""
+    status: JobStatus = JobStatus.QUEUED
+    input: dict[str, Any]
+    """For agent kind: the ``RunRequest.input`` payload. For workflow kind:
+    the initial state dict (matches ``WorkflowRunRecord.initial_state``)."""
+    result_run_id: str | None = None
+    """``run_id`` for agent jobs, ``workflow_run_id`` for workflow jobs.
+    Set when the job transitions to a terminal status."""
+    error: ErrorInfo | None = None
+    api_key_id: str | None = None
+    """Which API key submitted the job. Useful for audit + per-key
+    rate limiting (which lands later)."""
+    created_at: datetime = Field(default_factory=_now)
+    claimed_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
 # Forward ref resolution
 ModelConfig.model_rebuild()

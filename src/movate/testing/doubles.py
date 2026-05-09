@@ -7,11 +7,14 @@ satisfy mypy strict against ``StorageProvider`` / ``Tracer`` /
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from movate.core.models import (
     EvalRecord,
     FailureRecord,
+    JobRecord,
+    JobStatus,
     RunRecord,
     WorkflowRunRecord,
 )
@@ -37,6 +40,7 @@ class InMemoryStorage:
         self.failures: list[FailureRecord] = []
         self.evals: list[EvalRecord] = []
         self.workflow_runs: list[WorkflowRunRecord] = []
+        self.jobs: list[JobRecord] = []
 
     async def init(self) -> None:
         return None
@@ -101,6 +105,82 @@ class InMemoryStorage:
         if workflow:
             rows = [w for w in rows if w.workflow == workflow]
         return list(rows)[:limit]
+
+    # ------------------------------------------------------------------
+    # Jobs (v0.5)
+    # ------------------------------------------------------------------
+
+    async def save_job(self, job: JobRecord) -> None:
+        if any(j.job_id == job.job_id for j in self.jobs):
+            raise ValueError(f"duplicate job_id {job.job_id!r}")
+        self.jobs.append(job)
+
+    async def get_job(self, job_id: str) -> JobRecord | None:
+        return next((j for j in self.jobs if j.job_id == job_id), None)
+
+    async def list_jobs(
+        self,
+        *,
+        tenant_id: str | None = None,
+        status: JobStatus | None = None,
+        limit: int = 20,
+    ) -> list[JobRecord]:
+        rows = self.jobs
+        if tenant_id:
+            rows = [j for j in rows if j.tenant_id == tenant_id]
+        if status:
+            rows = [j for j in rows if j.status == status]
+        # Newest-first to match SqliteProvider's ORDER BY.
+        return sorted(rows, key=lambda j: j.created_at, reverse=True)[:limit]
+
+    async def claim_next_job(self, *, tenant_id: str | None = None) -> JobRecord | None:
+        """In-memory claim: oldest queued, optionally tenant-scoped.
+
+        Async coroutines on a single event loop don't preempt mid-method,
+        so the SELECT-then-UPDATE pair here is atomic by construction —
+        no lock needed. The Sqlite/Postgres providers carry the actual
+        concurrency story; this double exists to test calling code.
+        """
+        candidates = [
+            j
+            for j in self.jobs
+            if j.status == JobStatus.QUEUED and (tenant_id is None or j.tenant_id == tenant_id)
+        ]
+        if not candidates:
+            return None
+        oldest = min(candidates, key=lambda j: j.created_at)
+        # Mutate via Pydantic.copy so we don't lose `extra="forbid"` enforcement.
+        idx = self.jobs.index(oldest)
+        claimed = oldest.model_copy(
+            update={"status": JobStatus.RUNNING, "claimed_at": datetime.now(UTC)}
+        )
+        self.jobs[idx] = claimed
+        return claimed
+
+    async def update_job(
+        self,
+        job_id: str,
+        *,
+        status: JobStatus,
+        result_run_id: str | None = None,
+        error: dict[str, object] | None = None,
+    ) -> None:
+        if status not in (JobStatus.SUCCESS, JobStatus.ERROR, JobStatus.SAFETY_BLOCKED):
+            raise ValueError(f"update_job only accepts terminal statuses; got {status!r}")
+        for i, j in enumerate(self.jobs):
+            if j.job_id == job_id:
+                from movate.core.models import ErrorInfo  # noqa: PLC0415
+
+                self.jobs[i] = j.model_copy(
+                    update={
+                        "status": status,
+                        "result_run_id": result_run_id,
+                        "error": ErrorInfo.model_validate(error) if error else None,
+                        "completed_at": datetime.now(UTC),
+                    }
+                )
+                return
+        raise ValueError(f"no job found for id {job_id!r}")
 
     async def close(self) -> None:
         return None

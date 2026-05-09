@@ -5,6 +5,36 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Job queue data layer (v0.5 stage 1)
+
+- **`JobRecord` + `JobKind`** in `core/models.py` — queue entry with
+  agent/workflow discriminator, lifecycle status, optional
+  `result_run_id` mirror back to the produced run, and `api_key_id`
+  for audit. Re-uses the existing `JobStatus` enum so queue and run
+  share one status vocabulary.
+- **`jobs` table** added to the SQLite schema via `_MIGRATIONS` (so
+  upgraders pick it up cleanly). Two indexes: `idx_jobs_queue_head`
+  (partial, `WHERE status = 'queued'`) keeps `claim_next_job` O(queued);
+  `idx_jobs_tenant_created` covers the `/jobs` listing path.
+- **`save_job` / `get_job` / `list_jobs` / `claim_next_job` /
+  `update_job`** on `StorageProvider` Protocol; implemented in
+  `SqliteProvider` and `InMemoryStorage`.
+- **Claim semantics:** FIFO oldest-first, status-guard (only
+  `QUEUED` rows ever claimed), tenant-scoped, atomic via sqlite
+  `BEGIN IMMEDIATE`. The Postgres provider (stage 5) uses
+  `SELECT ... FOR UPDATE SKIP LOCKED` instead. 25 conformance tests
+  (parametrized over both backends) cover CRUD round-trip, FIFO,
+  status guard, tenant isolation, terminal-only `update_job`, and
+  concurrent-claim no-double-dispatch on sqlite with two
+  connections.
+- **`update_job`** rejects non-terminal status transitions —
+  `QUEUED`/`RUNNING` are owned by `save_job`/`claim_next_job`, so
+  passing them is a programming error.
+- Design decisions locked in
+  [docs/v0.5-design.md](docs/v0.5-design.md) (queue claim model,
+  multi-tenant isolation, API key format, workflow-in-queue
+  dispatch, job→run linkage).
+
 ### Added — File-based eval baselines (CI integration)
 
 - **`movate eval --baseline-file <path>`** — load an `EvalRecord` from a

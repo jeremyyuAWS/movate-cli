@@ -12,6 +12,8 @@ from typing import Protocol
 from movate.core.models import (
     EvalRecord,
     FailureRecord,
+    JobRecord,
+    JobStatus,
     RunRecord,
     WorkflowRunRecord,
 )
@@ -61,5 +63,57 @@ class StorageProvider(Protocol):
         workflow: str | None = None,
         limit: int = 20,
     ) -> list[WorkflowRunRecord]: ...
+
+    # ------------------------------------------------------------------
+    # Job queue (v0.5)
+    # ------------------------------------------------------------------
+
+    async def save_job(self, job: JobRecord) -> None:
+        """Insert a brand-new ``QUEUED`` job. Errors on duplicate ``job_id``."""
+
+    async def get_job(self, job_id: str) -> JobRecord | None:
+        """Exact lookup by job_id. Returns ``None`` if no match."""
+
+    async def list_jobs(
+        self,
+        *,
+        tenant_id: str | None = None,
+        status: JobStatus | None = None,
+        limit: int = 20,
+    ) -> list[JobRecord]:
+        """List jobs newest-first, optionally filtered.
+
+        Tenants must filter by ``tenant_id`` for the multi-tenant audit
+        path. Listing across tenants (``tenant_id=None``) is reserved for
+        operator tooling (``movate worker --all-tenants``) — never exposed
+        on the HTTP API.
+        """
+
+    async def claim_next_job(self, *, tenant_id: str | None = None) -> JobRecord | None:
+        """Atomically claim the oldest ``QUEUED`` job and flip it to ``RUNNING``.
+
+        Returns the now-claimed :class:`JobRecord` (with ``claimed_at`` set)
+        or ``None`` if the queue is empty for this tenant.
+
+        Implementations must guarantee no two callers ever return the same
+        job — Postgres uses ``SELECT ... FOR UPDATE SKIP LOCKED``;
+        sqlite uses ``BEGIN IMMEDIATE`` + atomic UPDATE.
+        """
+
+    async def update_job(
+        self,
+        job_id: str,
+        *,
+        status: JobStatus,
+        result_run_id: str | None = None,
+        error: dict[str, object] | None = None,
+    ) -> None:
+        """Transition a claimed job to a terminal status.
+
+        ``status`` must be one of ``SUCCESS`` / ``ERROR`` / ``SAFETY_BLOCKED``;
+        ``QUEUED`` and ``RUNNING`` are reserved for the lifecycle helpers
+        (``save_job``, ``claim_next_job``). Sets ``completed_at = now()``
+        as a side effect.
+        """
 
     async def close(self) -> None: ...

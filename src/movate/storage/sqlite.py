@@ -8,7 +8,7 @@ will be added in their respective phases.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -17,6 +17,8 @@ from movate.core.models import (
     ErrorInfo,
     EvalRecord,
     FailureRecord,
+    JobKind,
+    JobRecord,
     JobStatus,
     JudgeMethod,
     Metrics,
@@ -105,6 +107,10 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_created
 # safe. Indexes use IF NOT EXISTS so reruns are safe too — but they MUST
 # come after their corresponding ALTER TABLE so upgraders from a pre-v0.3
 # schema (no workflow_run_id column yet) don't fail on the column reference.
+#
+# The jobs table (v0.5) lives here too rather than in _SCHEMA — keeps all
+# additive schema changes in one ordered list so the upgrade path is
+# obvious. Same idempotency story (CREATE TABLE IF NOT EXISTS).
 _MIGRATIONS = [
     "ALTER TABLE runs ADD COLUMN workflow_run_id TEXT",
     "ALTER TABLE runs ADD COLUMN node_id TEXT",
@@ -112,6 +118,33 @@ _MIGRATIONS = [
         "CREATE INDEX IF NOT EXISTS idx_runs_workflow_run "
         "ON runs(workflow_run_id) WHERE workflow_run_id IS NOT NULL"
     ),
+    # v0.5: jobs queue.
+    """
+    CREATE TABLE IF NOT EXISTS jobs (
+        job_id        TEXT PRIMARY KEY,
+        tenant_id     TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        target        TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        input         TEXT NOT NULL,
+        result_run_id TEXT,
+        error         TEXT,
+        api_key_id    TEXT,
+        created_at    TEXT NOT NULL,
+        claimed_at    TEXT,
+        completed_at  TEXT
+    )
+    """,
+    # Partial index over the queue head — `claim_next_job` reads the
+    # oldest queued row, so this keeps that O(queued) regardless of
+    # historical queue depth.
+    (
+        "CREATE INDEX IF NOT EXISTS idx_jobs_queue_head "
+        "ON jobs(tenant_id, created_at) WHERE status = 'queued'"
+    ),
+    # Tenant-scoped listing for the `/jobs` endpoint and `movate worker`
+    # filtering.
+    ("CREATE INDEX IF NOT EXISTS idx_jobs_tenant_created ON jobs(tenant_id, created_at DESC)"),
 ]
 
 
@@ -336,6 +369,141 @@ class SqliteProvider:
             rows = await cur.fetchall()
         return [_row_to_workflow_run(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Jobs (v0.5)
+    # ------------------------------------------------------------------
+
+    async def save_job(self, job: JobRecord) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO jobs (
+                job_id, tenant_id, kind, target, status, input,
+                result_run_id, error, api_key_id,
+                created_at, claimed_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job.job_id,
+                job.tenant_id,
+                job.kind.value,
+                job.target,
+                job.status.value,
+                json.dumps(job.input),
+                job.result_run_id,
+                json.dumps(job.error.model_dump()) if job.error else None,
+                job.api_key_id,
+                job.created_at.isoformat(),
+                job.claimed_at.isoformat() if job.claimed_at else None,
+                job.completed_at.isoformat() if job.completed_at else None,
+            ),
+        )
+        await self._db.commit()
+
+    async def get_job(self, job_id: str) -> JobRecord | None:
+        async with self._db.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)) as cur:
+            row = await cur.fetchone()
+        return _row_to_job(row) if row else None
+
+    async def list_jobs(
+        self,
+        *,
+        tenant_id: str | None = None,
+        status: JobStatus | None = None,
+        limit: int = 20,
+    ) -> list[JobRecord]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if tenant_id is not None:
+            clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status.value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        async with self._db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_job(r) for r in rows]
+
+    async def claim_next_job(self, *, tenant_id: str | None = None) -> JobRecord | None:
+        """Atomic claim: pick the oldest queued row, flip to RUNNING, return it.
+
+        sqlite implementation uses ``BEGIN IMMEDIATE`` to take the
+        reserved write lock up front so the SELECT-then-UPDATE pair is
+        serialized across concurrent claimers. Postgres provider will
+        use ``SELECT ... FOR UPDATE SKIP LOCKED`` (no IMMEDIATE needed
+        — the row lock is finer-grained).
+
+        ``tenant_id`` is optional so a single shared worker can drain
+        all tenants. The HTTP layer never accepts a tenant-less claim;
+        it's reserved for ``movate worker --all-tenants``.
+        """
+        # `aiosqlite` queues writes per connection so this whole block runs
+        # serialized against other writers anyway, but BEGIN IMMEDIATE makes
+        # the intent explicit (and works correctly under multi-process
+        # access too, where aiosqlite's queue offers nothing).
+        await self._db.execute("BEGIN IMMEDIATE")
+        try:
+            tenant_clause = "AND tenant_id = ?" if tenant_id is not None else ""
+            params: tuple[object, ...] = (tenant_id,) if tenant_id is not None else ()
+            async with self._db.execute(
+                f"""
+                SELECT * FROM jobs
+                WHERE status = 'queued' {tenant_clause}
+                ORDER BY created_at
+                LIMIT 1
+                """,
+                params,
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                await self._db.commit()
+                return None
+
+            now = datetime.now(UTC).isoformat()
+            await self._db.execute(
+                "UPDATE jobs SET status = 'running', claimed_at = ? WHERE job_id = ?",
+                (now, row["job_id"]),
+            )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
+
+        # Re-fetch so the returned record reflects the updated columns.
+        return await self.get_job(row["job_id"])
+
+    async def update_job(
+        self,
+        job_id: str,
+        *,
+        status: JobStatus,
+        result_run_id: str | None = None,
+        error: dict[str, object] | None = None,
+    ) -> None:
+        if status not in (JobStatus.SUCCESS, JobStatus.ERROR, JobStatus.SAFETY_BLOCKED):
+            raise ValueError(
+                f"update_job only accepts terminal statuses; got {status!r}. "
+                f"Use save_job/claim_next_job for QUEUED/RUNNING transitions."
+            )
+        now = datetime.now(UTC).isoformat()
+        await self._db.execute(
+            """
+            UPDATE jobs
+            SET status = ?, result_run_id = ?, error = ?, completed_at = ?
+            WHERE job_id = ?
+            """,
+            (
+                status.value,
+                result_run_id,
+                json.dumps(error) if error else None,
+                now,
+                job_id,
+            ),
+        )
+        await self._db.commit()
+
     async def close(self) -> None:
         if self._conn is not None:
             await self._conn.close()
@@ -397,4 +565,21 @@ def _row_to_workflow_run(row: aiosqlite.Row) -> WorkflowRunRecord:
         error_node_id=row["error_node_id"],
         error=ErrorInfo.model_validate_json(row["error"]) if row["error"] else None,
         created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _row_to_job(row: aiosqlite.Row) -> JobRecord:
+    return JobRecord(
+        job_id=row["job_id"],
+        tenant_id=row["tenant_id"],
+        kind=JobKind(row["kind"]),
+        target=row["target"],
+        status=JobStatus(row["status"]),
+        input=json.loads(row["input"]),
+        result_run_id=row["result_run_id"],
+        error=ErrorInfo.model_validate_json(row["error"]) if row["error"] else None,
+        api_key_id=row["api_key_id"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        claimed_at=datetime.fromisoformat(row["claimed_at"]) if row["claimed_at"] else None,
+        completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
     )
