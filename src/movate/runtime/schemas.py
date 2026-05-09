@@ -95,7 +95,32 @@ class HealthView(BaseModel):
     version: str
 
 
+class AgentView(BaseModel):
+    """One entry in the registry response.
+
+    Returns metadata only — never prompt content or schemas. The
+    full agent definition lives on disk; ``GET /agents`` is for
+    discovery, not migration.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: str
+    description: str = ""
+
+
+class AgentListView(BaseModel):
+    """``GET /agents`` response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agents: list[AgentView]
+
+
 __all__ = [
+    "AgentListView",
+    "AgentView",
     "HealthView",
     "JobView",
     "RunAccepted",

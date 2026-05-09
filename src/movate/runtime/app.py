@@ -24,20 +24,37 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Request
 
 import movate
+from movate.core.loader import AgentBundle
 from movate.core.models import JobRecord, JobStatus
 from movate.runtime.errors import auth_required, not_found
 from movate.runtime.middleware import AuthContext, make_auth_dependency
-from movate.runtime.schemas import HealthView, JobView, RunAccepted, RunSubmission
+from movate.runtime.schemas import (
+    AgentListView,
+    AgentView,
+    HealthView,
+    JobView,
+    RunAccepted,
+    RunSubmission,
+)
 from movate.storage.base import StorageProvider
 
 
-def build_app(storage: StorageProvider) -> FastAPI:
-    """Build the FastAPI app bound to ``storage``.
+def build_app(
+    storage: StorageProvider,
+    *,
+    agents: list[AgentBundle] | None = None,
+) -> FastAPI:
+    """Build the FastAPI app bound to ``storage`` + ``agents``.
 
-    The app's ``state`` carries the storage so handlers can read it
+    ``agents`` is the registry returned by :func:`scan_agents`. Scan
+    happens once at app build time so each ``GET /agents`` is a
+    constant-time list lookup, not a fresh disk walk. Pass ``None``
+    (the default) for tests that don't care about the registry.
+
+    The app's ``state`` carries both so handlers can read them
     without closing over the factory's locals — keeps testability
-    clean (override ``app.state.storage`` to swap backends mid-test
-    if you really need to).
+    clean (override ``app.state.storage`` / ``state.agents`` to
+    swap mid-test if you really need to).
     """
     app = FastAPI(
         title="movate",
@@ -45,6 +62,7 @@ def build_app(storage: StorageProvider) -> FastAPI:
         description="Declarative platform for building and running AI agents.",
     )
     app.state.storage = storage
+    app.state.agents = agents or []
 
     auth_dep = make_auth_dependency(storage)
 
@@ -55,6 +73,38 @@ def build_app(storage: StorageProvider) -> FastAPI:
     async def healthz() -> HealthView:
         """Liveness probe. Cheap on purpose — never hits storage."""
         return HealthView(status="ok", version=movate.__version__)
+
+    # ------------------------------------------------------------------
+    # GET /agents — registry discovery
+    # ------------------------------------------------------------------
+    @app.get("/agents", response_model=AgentListView, tags=["meta"])
+    async def list_agents(
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> AgentListView:
+        """List agents available on this runtime.
+
+        Auth-required for consistency (every non-healthz endpoint
+        gates on a key); discovery is per-runtime, not per-tenant in
+        v0.5 — every authenticated tenant sees the same catalog.
+        Per-tenant agent visibility lands when a customer asks for it.
+
+        Returns metadata only (name, version, description). The full
+        agent definition lives on disk; this endpoint is for ``what
+        can I call?``, not for fetching prompts or schemas.
+        """
+        _ = ctx  # auth gate; tenant attribution lives in logs/spans
+        agents: list[AgentBundle] = request.app.state.agents
+        return AgentListView(
+            agents=[
+                AgentView(
+                    name=b.spec.name,
+                    version=b.spec.version,
+                    description=b.spec.description,
+                )
+                for b in agents
+            ]
+        )
 
     # ------------------------------------------------------------------
     # POST /run — queue a job

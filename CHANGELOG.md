@@ -5,6 +5,35 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Agent registry + `movate serve` (v0.5 stage 3b)
+
+- **`runtime/registry.py`** — `scan_agents(root)` walks one level
+  deep for directories containing `agent.yaml`, loads each via the
+  existing `load_agent`, sorts by spec name. Invalid agents (broken
+  YAML, unknown api_version, etc.) are skipped with a warning log
+  rather than crashing — one bad agent shouldn't blackhole the
+  catalog at runtime startup.
+- **`GET /agents`** endpoint returns name/version/description
+  metadata only. Auth-required for consistency. Per-tenant agent
+  visibility is post-v0.5 — every authenticated tenant currently
+  sees the same catalog (sufficient for a single-team deployment).
+- **`movate serve`** replaces the v0.5 stub with a real uvicorn
+  binding. Flags: `--host` (default `127.0.0.1`), `--port` (default
+  `8000`), `--agents-path` (env: `MOVATE_AGENTS_PATH`, default
+  `./agents`), `--log-level`. Storage is pre-init'd on the parent
+  loop so aiosqlite connections aren't bound to a dead loop;
+  registry is scanned once at startup so each `/agents` request is
+  a constant-time list lookup.
+- 11 new tests: 8 registry edge cases (missing/file/empty roots,
+  one-level walk, sibling-skip, partial-failure tolerance),
+  3 `/agents` endpoint cases (empty registry, metadata-only
+  response, auth required).
+- **End-to-end binary smoke** validated against the real `movate`
+  binary: `serve` boots → `/healthz` returns 200 → `auth
+  create-key` mints a key → `/agents` lists scaffolded agents →
+  `POST /run` returns 202 with job_id → `GET /jobs/{id}` returns
+  the queued state. The full HTTP→storage→auth chain works.
+
 ### Added — FastAPI runtime (v0.5 stage 3a)
 
 - **`runtime/`** package — thin HTTP layer over the storage Protocol

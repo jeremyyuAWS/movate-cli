@@ -19,11 +19,16 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from typer.testing import CliRunner
 
+from movate.cli.main import app as cli_app
 from movate.core.auth import mint_api_key
 from movate.core.models import ApiKeyEnv, JobKind, JobStatus
 from movate.runtime import build_app
+from movate.runtime.registry import scan_agents
 from movate.testing import InMemoryStorage
+
+cli_runner = CliRunner(mix_stderr=False)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -315,3 +320,55 @@ async def test_successful_request_touches_last_used_at(
     if post.last_used_at is None:
         pytest.skip("touch_api_key task didn't drain in time; not a logic bug")
     assert post.last_used_at is not None
+
+
+# ---------------------------------------------------------------------------
+# GET /agents
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_agents_returns_empty_when_registry_unset(
+    minted_key, storage: InMemoryStorage
+) -> None:
+    """``build_app(storage)`` without ``agents=`` yields an empty catalog."""
+    app = build_app(storage)
+    client = TestClient(app)
+    _, bearer = minted_key
+    r = client.get("/agents", headers=_auth_headers(bearer))
+    assert r.status_code == 200
+    assert r.json() == {"agents": []}
+
+
+@pytest.mark.unit
+async def test_agents_returns_metadata_only(minted_key, storage: InMemoryStorage, tmp_path) -> None:
+    """Registry returns name/version/description — never schemas or prompts."""
+    # Scaffold a real agent to get a real AgentBundle.
+    cli_runner.invoke(
+        cli_app,
+        ["init", "alpha", "-t", "default", "--target", str(tmp_path)],
+        catch_exceptions=False,
+    )
+    bundles = scan_agents(tmp_path)
+
+    test_app = build_app(storage, agents=bundles)
+    test_client = TestClient(test_app)
+    _, bearer = minted_key
+    r = test_client.get("/agents", headers=_auth_headers(bearer))
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["agents"]) == 1
+    entry = body["agents"][0]
+    # Surface metadata only.
+    assert set(entry.keys()) == {"name", "version", "description"}
+    assert entry["name"] == "alpha"
+
+
+@pytest.mark.unit
+async def test_agents_requires_auth(storage: InMemoryStorage) -> None:
+    """Discovery is gated on auth — same envelope as every other endpoint."""
+    app_under_test = build_app(storage)
+    test_client = TestClient(app_under_test)
+    r = test_client.get("/agents")
+    assert r.status_code == 401
+    assert r.json()["detail"]["error"]["code"] == "auth_required"
