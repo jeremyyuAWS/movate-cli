@@ -26,12 +26,12 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 
 ## 🎯 Top 10 highest-leverage shortlist
 
-**v0.4 Langfuse + v0.3.1 patch shipped this session** — 12 new tracer tests (208 unit + 3 smoke = 211 total). `LangfuseTracer` opt-in via `MOVATE_TRACER=langfuse` or `LANGFUSE_SECRET_KEY` env; `build_tracer()` falls back to stdout with a stderr warning if the optional dep is missing. v0.3.1 patch tag also cut, bundling the `WorkflowRunner` double-save fix surfaced by the LangGraph prototype. v0.3 workflow IR / runner / CLI shipped earlier in this session — see CHANGELOG.md.
+**v0.4 OTel + Composite tracers shipped this session** — 26 new tests (234 unit + 3 smoke = 237 total). `OtelTracer` (OTLP-HTTP exporter) and `CompositeTracer` (fan-out) both opt-in via `MOVATE_TRACER` or env auto-detect. With both `LANGFUSE_SECRET_KEY` and `OTEL_EXPORTER_OTLP_ENDPOINT` set, `build_tracer()` returns a composite that writes every span to both backends. Each backend fails soft individually; the composite skips broken delegates without affecting siblings. (Also this session: v0.3 IR/runner/CLI, v0.3.1 patch tag, v0.4 stage 1 Langfuse.)
 
-1. [ ] **OTel tracer (OTLP exporter)** `[HIGH] [v0.4] [next] [2-3d]` — span hierarchy: workflow → node → provider call → retry attempts. Same env-driven dispatch (`MOVATE_TRACER=otel`); composite tracer (Langfuse + OTel together) right after.
-2. [ ] **Trace replay (`movate trace replay <run-id>`)** `[HIGH] [v0.4] [next] [2-3d]` — read sqlite + tracer events, render Rich timeline. Drops debug time on a real prod issue from hours to minutes.
-3. [ ] **Eval baseline diff (`movate eval --baseline <eval-id>`)** `[HIGH] [v0.4] [2-3d]` — already half-built since `EvalRecord` is persisted.
-4. [ ] **`movate run --replay <run-id>`** `[HIGH] [v0.4] [≤1d]` — re-run an exact recorded input against the current agent; single best regression-debug tool.
+1. [ ] **Trace replay (`movate trace replay <run-id>`)** `[HIGH] [v0.4] [next] [2-3d]` — read sqlite + tracer events, render Rich timeline. Drops debug time on a real prod issue from hours to minutes.
+2. [ ] **Eval baseline diff (`movate eval --baseline <eval-id>`)** `[HIGH] [v0.4] [next] [2-3d]` — already half-built since `EvalRecord` is persisted.
+3. [ ] **`movate run --replay <run-id>`** `[HIGH] [v0.4] [≤1d]` — re-run an exact recorded input against the current agent; single best regression-debug tool.
+4. [ ] **Tag v0.4 release** `[MED] [v0.4] [≤1h]` — once trace replay + baseline diff land, cut the tag.
 5. [ ] **GH Actions eval-gate workflow** `[HIGH] [v1.0] [≤1d]` — closes the loop on "evals are mandatory."
 6. [ ] **PostgresProvider + FastAPI runtime** `[HIGH] [v0.5] [1w]` — turns movate from a CLI into a service.
 7. [ ] **API key issuance + tenant isolation audit** `[HIGH] [v0.5] [2-3d]` — security-critical for multi-tenant.
@@ -135,9 +135,9 @@ A ranked, checkable list of features for movate. Each item is sized to "thing a 
 ## 4. Observability (Phase 4 / v0.4)
 
 - [x] **Langfuse tracer** `[HIGH] [v0.4] [done]` — `LangfuseTracer` in [src/movate/tracing/langfuse.py](src/movate/tracing/langfuse.py); `build_tracer()` auto-selects via `MOVATE_TRACER=langfuse` or `LANGFUSE_SECRET_KEY` env. Falls back to stdout with a stderr warning if the package or keys are missing — never breaks a run. Client injectable so tests don't need the real SDK. `movate doctor` now surfaces resolved tracer + LANGFUSE_* env vars. 12 tests in [tests/test_tracing_langfuse.py](tests/test_tracing_langfuse.py).
-- [ ] **OTel tracer (OTLP exporter)** `[HIGH] [v0.4] [2-3d]` — span hierarchy: workflow → node → provider call → retry attempts.
-- [ ] **Tracer auto-select via `MOVATE_TRACER`** `[MED] [v0.4] [≤1h]` — `stdout|langfuse|otel|composite`.
-- [ ] **Composite tracer (multi-fanout)** `[MED] [v0.4] [≤1d]` — emit to Langfuse AND OTel without code change.
+- [x] **OTel tracer (OTLP exporter)** `[HIGH] [v0.4] [done]` — `OtelTracer` in [src/movate/tracing/otel.py](src/movate/tracing/otel.py); OTLP-HTTP exporter via `BatchSpanProcessor`. `OTEL_EXPORTER_OTLP_ENDPOINT` + optional `OTEL_SERVICE_NAME` env vars. Tracer + provider injectable for tests; SDK imported lazily so the module loads without `opentelemetry`. Attribute coercion via `_otel_value` so dict / tuple / list values become OTel-acceptable JSON strings.
+- [x] **Tracer auto-select via `MOVATE_TRACER`** `[MED] [v0.4] [done]` — `stdout | langfuse | otel | composite`. Auto-detects on env vars when unset.
+- [x] **Composite tracer (multi-fanout)** `[MED] [v0.4] [done]` — `CompositeTracer` in [src/movate/tracing/composite.py](src/movate/tracing/composite.py). Per-span mapping back to per-delegate `SpanCtx`s so end/event/attribute fan-out. Each delegate wrapped in try/except — one bad backend can't kill siblings. 26 tests in [tests/test_tracing_otel.py](tests/test_tracing_otel.py) covering OtelTracer + CompositeTracer + all dispatch paths.
 - [ ] **`movate trace replay <run-id>`** `[HIGH] [v0.4] [2-3d]` — reconstruct the workflow timeline from local DB + spans.
 - [ ] **`movate logs <run-id> --tail`** `[MED] [v0.4] [≤1d]` — read sqlite + tracer events, render Rich timeline.
 - [ ] **Drift baseline (`movate eval --baseline <eval-id>`)** `[HIGH] [v0.4] [2-3d]` — diff today's scores vs a stored baseline; flags regressions per case.

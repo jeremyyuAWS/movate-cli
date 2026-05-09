@@ -80,7 +80,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "RUF", "PL", "SIM"]
-ignore = ["PLR0913", "PLR0915"]
+ignore = ["PLR0913", "PLR0915", "PLR0911"]
 
 [tool.ruff.lint.per-file-ignores]
 # Typer's idiomatic pattern uses function-call defaults (`typer.Option(...)`); B008 misfires there.
@@ -97,7 +97,13 @@ strict = true
 files = ["src/movate"]
 
 [[tool.mypy.overrides]]
-module = ["jsonschema.*", "aiosqlite.*", "litellm.*", "langfuse.*"]
+module = [
+    "jsonschema.*",
+    "aiosqlite.*",
+    "litellm.*",
+    "langfuse.*",
+    "opentelemetry.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

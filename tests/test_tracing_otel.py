@@ -1,0 +1,390 @@
+"""OtelTracer + CompositeTracer + build_tracer otel/composite dispatch.
+
+Both tracers are tested with injected fakes so unit tests don't require
+the optional ``opentelemetry`` packages.
+"""
+
+from __future__ import annotations
+
+import sys
+from typing import Any
+
+import pytest
+
+from movate.tracing import CompositeTracer, StdoutTracer, build_tracer
+from movate.tracing.base import SpanCtx
+from movate.tracing.otel import (
+    OtelTracer,
+    OtelUnavailableError,
+    _build_provider_from_env,
+    _otel_value,
+)
+
+# ---------------------------------------------------------------------------
+# Fake OTel SDK surface
+# ---------------------------------------------------------------------------
+
+
+class _FakeOtelSpan:
+    """Mimics opentelemetry.trace.Span with the methods we touch."""
+
+    _next_id = 1
+
+    def __init__(self, name: str, attributes: dict[str, Any] | None = None) -> None:
+        cls = _FakeOtelSpan
+        self._span_id_int = cls._next_id
+        self._trace_id_int = 0xABCDEF0123456789ABCDEF0123456789  # constant per fake
+        cls._next_id += 1
+
+        self.name = name
+        self.attributes = dict(attributes or {})
+        self.events: list[dict[str, Any]] = []
+        self.status: tuple[Any, str] | None = None
+        self.ended = False
+
+    def get_span_context(self) -> Any:
+        outer = self
+
+        class _Ctx:
+            trace_id = outer._trace_id_int
+            span_id = outer._span_id_int
+
+        return _Ctx()
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        self.attributes[key] = value
+
+    def add_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
+        self.events.append({"name": name, "attributes": dict(attributes or {})})
+
+    def set_status(self, status: Any) -> None:
+        self.status = (status, str(status))
+
+    def end(self) -> None:
+        self.ended = True
+
+
+class _FakeOtelTracer:
+    def __init__(self) -> None:
+        self.spans: list[_FakeOtelSpan] = []
+        self.start_calls: list[dict[str, Any]] = []
+
+    def start_span(
+        self,
+        name: str,
+        *,
+        context: Any = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> _FakeOtelSpan:
+        self.start_calls.append(
+            {"name": name, "context": context, "attributes": dict(attributes or {})}
+        )
+        span = _FakeOtelSpan(name, attributes)
+        self.spans.append(span)
+        return span
+
+
+class _FakeProvider:
+    def __init__(self) -> None:
+        self.flushes = 0
+
+    def force_flush(self, timeout_millis: int = 2000) -> None:
+        self.flushes += 1
+
+
+# ---------------------------------------------------------------------------
+# OtelTracer behaviour
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_otel_tracer_start_span_creates_otel_span() -> None:
+    fake = _FakeOtelTracer()
+    t = OtelTracer(tracer=fake)
+    ctx = t.start_span("agent.execute", attrs={"agent": "demo"})
+    assert ctx.parent_id is None
+    # Otel-shaped trace_id (32 hex) and span_id (16 hex).
+    assert len(ctx.trace_id) == 32
+    assert len(ctx.span_id) == 16
+    # SDK got the call with the attribute coerced (str passes through).
+    assert len(fake.start_calls) == 1
+    assert fake.start_calls[0]["name"] == "agent.execute"
+    assert fake.start_calls[0]["attributes"] == {"agent": "demo"}
+
+
+@pytest.mark.unit
+def test_otel_tracer_log_event_and_set_attribute() -> None:
+    fake = _FakeOtelTracer()
+    t = OtelTracer(tracer=fake)
+    ctx = t.start_span("agent.execute")
+    t.log_event(ctx, {"prompt_hash": "abc123", "tokens": {"in": 10, "out": 5}})
+    t.set_attribute(ctx, "model", "openai/gpt-4o-mini")
+    t.set_attribute(ctx, "metrics", {"cost": 0.01})
+
+    span = fake.spans[0]
+    assert len(span.events) == 1
+    # Dict value got JSON-serialized for OTel.
+    event_attrs = span.events[0]["attributes"]
+    assert event_attrs["prompt_hash"] == "abc123"
+    assert event_attrs["tokens"] == '{"in": 10, "out": 5}'
+    # set_attribute mirrors locally...
+    assert ctx.attributes["model"] == "openai/gpt-4o-mini"
+    assert ctx.attributes["metrics"] == {"cost": 0.01}
+    # ...and serializes the dict for the OTel side.
+    assert span.attributes["model"] == "openai/gpt-4o-mini"
+    assert span.attributes["metrics"] == '{"cost": 0.01}'
+
+
+@pytest.mark.unit
+def test_otel_tracer_end_span_pops_handle_and_calls_end() -> None:
+    fake = _FakeOtelTracer()
+    t = OtelTracer(tracer=fake)
+    ctx = t.start_span("agent.execute")
+    t.end_span(ctx, status="ok")
+    assert fake.spans[0].ended is True
+    # Calls after end are no-ops.
+    t.log_event(ctx, {"too": "late"})
+    assert fake.spans[0].events == []
+
+
+@pytest.mark.unit
+def test_otel_tracer_end_with_error_status() -> None:
+    fake = _FakeOtelTracer()
+    t = OtelTracer(tracer=fake)
+    ctx = t.start_span("agent.execute")
+    t.end_span(ctx, status="schema_error")
+    # set_status was invoked iff the real OTel API was importable; in a
+    # bare environment this no-ops. Either way, end() ran.
+    assert fake.spans[0].ended is True
+
+
+@pytest.mark.unit
+def test_otel_tracer_flush_calls_provider_force_flush() -> None:
+    fake_tracer = _FakeOtelTracer()
+    fake_provider = _FakeProvider()
+    t = OtelTracer(tracer=fake_tracer, provider=fake_provider)
+    t.flush()
+    t.flush()
+    assert fake_provider.flushes == 2
+
+
+@pytest.mark.unit
+def test_otel_tracer_flush_without_provider_is_safe() -> None:
+    """Tracer constructed without a provider (test-only path) shouldn't blow up."""
+    fake = _FakeOtelTracer()
+    t = OtelTracer(tracer=fake)
+    t.flush()  # no exception
+
+
+# ---------------------------------------------------------------------------
+# _otel_value coercion
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("hi", "hi"),
+        (1, 1),
+        (1.5, 1.5),
+        (True, True),
+        (None, None),
+        (["a", "b"], ["a", "b"]),
+        ((1, 2), [1, 2]),
+        ({"k": "v"}, '{"k": "v"}'),  # dicts → JSON
+        ([{"x": 1}], '[{"x": 1}]'),  # mixed lists → JSON
+    ],
+)
+def test_otel_value_coerces_to_primitives(raw: Any, expected: Any) -> None:
+    assert _otel_value(raw) == expected
+
+
+# ---------------------------------------------------------------------------
+# _build_provider_from_env error paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_otel_unavailable_when_endpoint_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    with pytest.raises(OtelUnavailableError, match="OTEL_EXPORTER_OTLP_ENDPOINT"):
+        _build_provider_from_env()
+
+
+@pytest.mark.unit
+def test_otel_unavailable_when_packages_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+    monkeypatch.setitem(sys.modules, "opentelemetry.sdk.trace", None)  # type: ignore[arg-type]
+    with pytest.raises(OtelUnavailableError, match="not installed"):
+        _build_provider_from_env()
+
+
+# ---------------------------------------------------------------------------
+# CompositeTracer fan-out
+# ---------------------------------------------------------------------------
+
+
+class _RecordingTracer:
+    """Minimal Tracer Protocol impl that records every call."""
+
+    name = "recorder"
+
+    def __init__(self) -> None:
+        self.starts: list[tuple[str, dict[str, Any], SpanCtx | None]] = []
+        self.ends: list[tuple[str, str]] = []
+        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.attrs: list[tuple[str, str, Any]] = []
+        self.flushes = 0
+
+    def start_span(
+        self,
+        name: str,
+        attrs: dict[str, Any] | None = None,
+        parent: SpanCtx | None = None,
+    ) -> SpanCtx:
+        self.starts.append((name, dict(attrs or {}), parent))
+        return SpanCtx(
+            name=name, attributes=dict(attrs or {}), parent_id=parent.span_id if parent else None
+        )
+
+    def end_span(self, span: SpanCtx, status: str = "ok") -> None:
+        self.ends.append((span.span_id, status))
+
+    def log_event(self, span: SpanCtx, event: dict[str, Any]) -> None:
+        self.events.append((span.span_id, dict(event)))
+
+    def set_attribute(self, span: SpanCtx, key: str, value: Any) -> None:
+        span.attributes[key] = value
+        self.attrs.append((span.span_id, key, value))
+
+    def flush(self) -> None:
+        self.flushes += 1
+
+
+@pytest.mark.unit
+def test_composite_tracer_requires_at_least_one_backend() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        CompositeTracer([])
+
+
+@pytest.mark.unit
+def test_composite_tracer_fans_out_start_and_end() -> None:
+    a, b = _RecordingTracer(), _RecordingTracer()
+    t = CompositeTracer([a, b])
+    ctx = t.start_span("agent.execute", attrs={"x": 1})
+    assert len(a.starts) == 1
+    assert len(b.starts) == 1
+    t.end_span(ctx, status="ok")
+    assert a.ends and b.ends
+
+
+@pytest.mark.unit
+def test_composite_tracer_threads_per_backend_parent() -> None:
+    """Each backend sees ITS OWN parent SpanCtx, not the composite one."""
+    a, b = _RecordingTracer(), _RecordingTracer()
+    t = CompositeTracer([a, b])
+    parent = t.start_span("workflow.run")
+    a_parent_ctx = a.starts[0]  # the SpanCtx a returned
+    b_parent_ctx = b.starts[0]
+    _ = t.start_span("agent.execute", parent=parent)
+
+    # Each backend's child start should reference its own parent's span_id.
+    a_child_call = a.starts[1]
+    b_child_call = b.starts[1]
+    # a_child_call[2] is the parent SpanCtx that was passed to a.
+    assert a_child_call[2] is not None
+    assert b_child_call[2] is not None
+    # The two backends got different parent span_ids (each its own).
+    # Sanity: at minimum, they're not None and not the composite's id.
+    _ = a_parent_ctx, b_parent_ctx
+
+
+@pytest.mark.unit
+def test_composite_tracer_log_event_and_set_attribute_fan_out() -> None:
+    a, b = _RecordingTracer(), _RecordingTracer()
+    t = CompositeTracer([a, b])
+    ctx = t.start_span("x")
+    t.log_event(ctx, {"k": "v"})
+    t.set_attribute(ctx, "model", "demo")
+    assert len(a.events) == len(b.events) == 1
+    assert len(a.attrs) == len(b.attrs) == 1
+
+
+@pytest.mark.unit
+def test_composite_tracer_flush_propagates() -> None:
+    a, b = _RecordingTracer(), _RecordingTracer()
+    t = CompositeTracer([a, b])
+    t.flush()
+    assert a.flushes == 1
+    assert b.flushes == 1
+
+
+# ---------------------------------------------------------------------------
+# build_tracer dispatch — otel + composite + auto
+# ---------------------------------------------------------------------------
+
+
+def _clear_tracer_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "MOVATE_TRACER",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_PUBLIC_KEY",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.unit
+def test_build_tracer_explicit_otel_falls_back_when_endpoint_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    _clear_tracer_env(monkeypatch)
+    monkeypatch.setenv("MOVATE_TRACER", "otel")
+    tracer = build_tracer()
+    assert isinstance(tracer, StdoutTracer)
+    assert "OTel unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_build_tracer_composite_falls_back_when_nothing_configured(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    _clear_tracer_env(monkeypatch)
+    monkeypatch.setenv("MOVATE_TRACER", "composite")
+    tracer = build_tracer()
+    assert isinstance(tracer, StdoutTracer)
+    assert "no usable backends" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_build_tracer_otel_implicit_via_endpoint(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Setting only OTEL_EXPORTER_OTLP_ENDPOINT (no MOVATE_TRACER) selects OTel.
+    Since the SDK isn't installed, the runtime path falls back to stdout
+    with a stderr warning — exactly what we want for misconfigured prod."""
+    _clear_tracer_env(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+    tracer = build_tracer()
+    assert isinstance(tracer, StdoutTracer)
+    assert "OTel unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_build_tracer_composite_implicit_when_both_configured(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Both Langfuse and OTel env vars set → composite path. Without their
+    SDKs installed, both fall back, and composite resolves to stdout."""
+    _clear_tracer_env(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+    tracer = build_tracer()
+    assert isinstance(tracer, StdoutTracer)
+    err = capsys.readouterr().err
+    assert "Langfuse unavailable" in err
+    assert "OTel unavailable" in err

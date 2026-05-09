@@ -25,9 +25,12 @@ _PROVIDER_KEYS = (
     ("GEMINI_API_KEY", "Gemini"),
 )
 _TRACING_KEYS = (
+    ("MOVATE_TRACER", "explicit override"),
     ("LANGFUSE_SECRET_KEY", "Langfuse secret"),
     ("LANGFUSE_PUBLIC_KEY", "Langfuse public"),
     ("LANGFUSE_HOST", "Langfuse host"),
+    ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTel endpoint"),
+    ("OTEL_SERVICE_NAME", "OTel service.name"),
 )
 
 

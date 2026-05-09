@@ -105,9 +105,9 @@ def test_build_tracer_langfuse_falls_back_when_package_missing(
 
     tracer = build_tracer()
     assert isinstance(tracer, StdoutTracer)
-    captured = capsys.readouterr()
-    assert "Langfuse unavailable" in captured.err
-    assert "falling back to stdout" in captured.err
+    # Message changed in v0.4 stage 2 from "falling back to stdout" to
+    # "skipping" because composite mode uses the same builder.
+    assert "Langfuse unavailable" in capsys.readouterr().err
 
 
 @pytest.mark.unit
