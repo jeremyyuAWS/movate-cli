@@ -5,6 +5,53 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `movate watch` hot-reload for the dev inner loop (post-v1.0)
+
+**TDD-style feedback while iterating on a prompt.** Saves the file
+→ sees lint + cost-forecast + validate result in <1s. No more
+manual `movate validate` after every edit.
+
+- **`movate watch <agent>`** — polls the agent's files (agent.yaml,
+  prompt, both schemas, dataset, judge config if present) every
+  0.5s and re-runs `movate validate` whenever any of them changes.
+  Each re-run prints with a timestamp so you can correlate save →
+  result.
+- **Stdlib polling, not `watchdog`/`watchfiles`.** Adding a runtime
+  dep for one dev-loop command isn't worth it; mtime polling at
+  500ms is fast enough for human keystrokes, works identically on
+  every platform (no FSEvents vs inotify quirks), and pulls zero
+  extra deps.
+- **Resilient to broken-mid-save state.** Editors that do
+  write-then-rename can briefly produce an unparseable `agent.yaml`.
+  The watcher catches `AgentLoadError` on each re-derive and keeps
+  going with the previous file set — fix the file and the watcher
+  picks up the next valid state.
+- **200ms debounce** after detecting a change so an
+  atomic-write-then-rename doesn't dispatch twice for one save.
+- **Flags:**
+  * `--poll-interval N` (default 0.5s; raise for slow shared FS)
+  * `--strict` — pass-through to validate (promote lint warnings
+    to errors)
+- **Initial dispatch on entry** — operator sees current state
+  without having to make a no-op edit.
+- **Ctrl-C** exits cleanly. The watcher is intentionally
+  foreground-blocking; no daemon mode.
+- **Dispatch is split from the loop** (`dispatch_once(agent_dir,
+  *, strict)`) so tests can drive it deterministically without
+  spinning up real `time.sleep` machinery.
+- 8 new tests in `tests/test_watch.py` covering: path-discovery
+  includes all expected files (yaml + prompt + schemas + dataset)
+  + excludes missing optional files (judge), dispatch returns 0
+  for clean / 2 for broken agent, --strict promotes warnings,
+  CLI help renders, end-to-end file-change → dispatch via
+  short-poll, broken YAML doesn't crash the watcher.
+
+**Operator effect:** prompt-iterating engineer keeps `movate
+watch ./agents/faq-agent` running in one terminal, edits prompt.md
+in their editor, sees the lint + cost-forecast results scroll by
+on save. The "did I break the schema?" check shrinks from a
+deliberate command to a passive feedback loop.
+
 ### Added — Cost forecast on `movate validate` (post-v1.0)
 
 **Catches "this eval would cost $3" before running it.** Validate

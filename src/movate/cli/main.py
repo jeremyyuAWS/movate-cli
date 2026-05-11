@@ -29,6 +29,7 @@ from movate.cli import serve as serve_cmd  # noqa: E402
 from movate.cli import show as show_cmd  # noqa: E402
 from movate.cli import submit as submit_cmd  # noqa: E402
 from movate.cli import validate as validate_cmd  # noqa: E402
+from movate.cli import watch as watch_cmd  # noqa: E402
 from movate.cli import worker as worker_cmd  # noqa: E402
 from movate.cli.auth import auth_app  # noqa: E402
 from movate.cli.config_cmd import config_app  # noqa: E402
@@ -108,6 +109,11 @@ def _main(
 app.command("init", rich_help_panel=PANEL_DEVELOP)(init_cmd.init)
 app.command("validate", rich_help_panel=PANEL_DEVELOP)(validate_cmd.validate)
 app.command("show", rich_help_panel=PANEL_DEVELOP)(show_cmd.show)
+app.command(
+    "watch",
+    rich_help_panel=PANEL_DEVELOP,
+    help="Re-run validate on every save (TDD-style hot-reload).",
+)(watch_cmd.watch)
 
 # ----- Run & evaluate -------------------------------------------------------
 
