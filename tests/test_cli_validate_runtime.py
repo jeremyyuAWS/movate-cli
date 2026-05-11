@@ -49,25 +49,31 @@ def test_validate_accepts_explicit_litellm_runtime(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "runtime",
-    # NATIVE_ANTHROPIC (Tier-2 #6) + NATIVE_OPENAI (Tier-2 #7) are now
-    # wired when their extras are installed — see the per-runtime
-    # "accepts when installed" tests below. LANGCHAIN is the only one
-    # still pending.
-    [AgentRuntime.LANGCHAIN],
-)
-def test_validate_rejects_unwired_runtime(tmp_path: Path, runtime: AgentRuntime) -> None:
-    """LangChain doesn't ship an adapter yet (Tier-2 #8).
-    Declaring it in agent.yaml should fail validate with a clear
-    message naming the unwired runtime and listing what IS available."""
+def test_validate_rejects_unwired_runtime_by_simulating_missing_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every runtime in :class:`AgentRuntime` now has an adapter when
+    its extra is installed (#5-#8). To still exercise the
+    "unsupported runtime" branch, simulate the ``langchain_core``
+    import failing — then the validate flow should reject
+    ``runtime: langchain`` with the unsupported-runtime banner."""
+    import builtins  # noqa: PLC0415
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "langchain_core":
+            raise ImportError("simulated: langchain not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
     agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
-    _set_runtime(agent_dir, runtime)
+    _set_runtime(agent_dir, AgentRuntime.LANGCHAIN)
     result = runner.invoke(cli_app, ["validate", str(agent_dir)])
     assert result.exit_code == 2, result.stdout + result.stderr
     assert "unsupported runtime" in result.stdout
-    assert runtime.value in result.stdout
-    # The "what IS available" line names litellm at minimum.
+    assert "langchain" in result.stdout
     assert "litellm" in result.stdout
 
 
@@ -94,6 +100,22 @@ def test_validate_accepts_native_openai_when_installed(tmp_path: Path) -> None:
     result = runner.invoke(cli_app, ["validate", str(agent_dir)])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "runtime:     native_openai" in result.stdout
+
+
+@pytest.mark.unit
+def test_validate_accepts_langchain_when_installed(tmp_path: Path) -> None:
+    """Once the ``langchain`` extra is installed (Tier-2 #8 landed),
+    ``runtime: langchain`` should pass validate. NOTE: the agent's
+    ``model.provider`` field on this runtime is an entry-point spec
+    (``package.module:function``) — validate doesn't try to import it
+    yet (that happens at execute time), so the agent passes even if
+    the entry-point doesn't exist."""
+    pytest.importorskip("langchain_core")
+    agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
+    _set_runtime(agent_dir, AgentRuntime.LANGCHAIN)
+    result = runner.invoke(cli_app, ["validate", str(agent_dir)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "runtime:     langchain" in result.stdout
 
 
 @pytest.mark.unit

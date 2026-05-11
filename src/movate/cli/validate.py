@@ -49,6 +49,12 @@ def _available_runtimes() -> frozenset[AgentRuntime]:
         available.add(AgentRuntime.NATIVE_OPENAI)
     except ImportError:
         pass
+    try:
+        import langchain_core  # noqa: F401, PLC0415
+
+        available.add(AgentRuntime.LANGCHAIN)
+    except ImportError:
+        pass
     return frozenset(available)
 
 
@@ -107,10 +113,7 @@ def _validate_agent(path: Path, *, strict: bool, run_linter: bool) -> None:
         elif spec.runtime == AgentRuntime.NATIVE_OPENAI:
             console.print("[dim]  Install with: uv add 'movate-cli[openai]'[/dim]")
         elif spec.runtime == AgentRuntime.LANGCHAIN:
-            console.print(
-                "[dim]  The LangChain adapter lands as Tier-2 #8 "
-                "(install hint will appear here once shipped).[/dim]"
-            )
+            console.print("[dim]  Install with: uv add 'movate-cli[langchain]'[/dim]")
         raise typer.Exit(code=2)
 
     # Project-wide model policy. ``check_agent`` returns an empty list
