@@ -99,11 +99,19 @@ Now populate the KV secrets the apps will reference:
 ```bash
 KV=movate-<env>-kv
 
-# Postgres connection string (the password matches main.<env>.bicepparam)
-az keyvault secret set --vault-name $KV --name postgres-dsn \
-    --value "postgresql://movate:<password>@movate-<env>-pg.postgres.database.azure.com:5432/movate?sslmode=require"
+# Postgres admin password (matches main.<env>.bicepparam)
+az keyvault secret set --vault-name $KV --name pg-admin-password --value "$PG_PW"
 
-# Anything else the runtime needs at boot (provider keys, Langfuse, etc.)
+# KEDA Postgres scaler connection string — the worker's autoscaler
+# lives in ACA's KEDA sidecar, NOT in the worker container, so it
+# needs a self-contained DSN to count queued jobs. Without this
+# secret the worker will deploy but won't autoscale.
+PG_FQDN=$(az postgres flexible-server show -g movate-<env>-rg \
+    -n movate-<env>-pg --query fullyQualifiedDomainName -o tsv)
+az keyvault secret set --vault-name $KV --name pg-connection-string \
+    --value "host=$PG_FQDN port=5432 user=movate password=$PG_PW dbname=movate sslmode=require"
+
+# Provider keys (and anything else the runtime needs at boot)
 az keyvault secret set --vault-name $KV --name openai-api-key --value "sk-..."
 # ... repeat per secret your deployment references
 ```

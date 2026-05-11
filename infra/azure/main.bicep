@@ -72,6 +72,11 @@ var workerMinReplicas = isProd ? 2 : 1
 var workerMaxReplicas = isProd ? 20 : 2
 var workerCpu = isProd ? '1.0' : '0.5'
 var workerMemory = isProd ? '2.0Gi' : '1.0Gi'
+// Queue depth per replica triggers a scale-up via the KEDA postgresql
+// scaler. Prod scales at 10/replica (more headroom — fewer scale
+// events, slightly higher steady-state queue); dev scales aggressively
+// at 3/replica so a small queue is enough to spin up the second pod.
+var workerQueueDepthPerReplica = isProd ? 10 : 3
 
 // ---------------------------------------------------------------------------
 // Resource names — see docs/v1.0-azure-design §2 for the convention.
@@ -191,6 +196,7 @@ module worker 'modules/containerapp-worker.bicep' = {
     maxReplicas: workerMaxReplicas
     cpu: workerCpu
     memory: workerMemory
+    queueDepthPerReplica: workerQueueDepthPerReplica
     tags: tags
   }
 }

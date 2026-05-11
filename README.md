@@ -51,6 +51,7 @@ that v1.0 builds on.
 | Job retry + dead-letter on transient failures | `JobRetryPolicy` + `movate jobs list --status dead_letter` | ✓ post-v1.0 |
 | Liveness + readiness probes for ACA | `GET /healthz` (cheap) + `GET /ready` (deep checks) | ✓ post-v1.0 |
 | Per-API-key rate limiting | `movate serve --rate-limit-per-minute 60` | ✓ post-v1.0 |
+| Worker autoscaling on queue depth | KEDA postgresql scaler in `containerapp-worker.bicep` | ✓ post-v1.0 |
 | Model policy enforcement | `movate.yaml: policy:` (allowed_providers, deny_models, max cost) | ✓ v1.0 stage 3 |
 
 ## Prerequisites

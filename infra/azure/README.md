@@ -58,6 +58,15 @@ paths:
    PG_PW=$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-32)
    az keyvault secret set --vault-name $KV --name pg-admin-password --value "$PG_PW"
 
+   # KEDA Postgres scaler connection string — the worker's autoscaler
+   # lives OUTSIDE the worker container (in the ACA env's KEDA
+   # sidecar), so it needs a self-contained DSN to count queued jobs.
+   # Substitute the FQDN/db that the first-pass Bicep deploy created.
+   PG_FQDN=$(az postgres flexible-server show -g movate-${ENV}-rg \
+       -n movate-${ENV}-pg --query fullyQualifiedDomainName -o tsv)
+   az keyvault secret set --vault-name $KV --name pg-connection-string \
+       --value "host=$PG_FQDN port=5432 user=movate password=$PG_PW dbname=movate sslmode=require"
+
    # Provider API keys
    az keyvault secret set --vault-name $KV --name openai-api-key       --value "$OPENAI_API_KEY"
    az keyvault secret set --vault-name $KV --name anthropic-api-key    --value "$ANTHROPIC_API_KEY"

@@ -1,7 +1,11 @@
 // movate-worker Container App — runs `movate worker` (no ingress).
-// Same image as the API; only the command differs. Scales horizontally
-// based on queue depth (Postgres-driven custom rule lands in v1.1; for
-// now, scale on CPU as a proxy).
+// Same image as the API; only the command differs.
+//
+// Scales horizontally on **queue depth** via a KEDA postgresql
+// scaler. Counts claimable jobs (status='queued' AND retry window
+// elapsed) and adds one replica per ``targetQueryValue`` queued
+// jobs. Queue depth is a *leading* indicator (the load is visible
+// before any pod's CPU rises); CPU was a lagging indicator.
 
 @description('Container App name.')
 param name string
@@ -49,6 +53,19 @@ param cpu string = '0.5'
 @description('Memory per replica.')
 param memory string = '1.0Gi'
 
+@description('''
+Queue depth per replica that triggers a scale-up. KEDA evaluates this
+roughly every 30s by running the SQL query and computing
+``ceil(query_result / targetQueryValue)`` for the desired replica count.
+Default 5: at 50 queued jobs, ceil(50/5)=10 replicas; with maxReplicas=2
+the worker pegs at 2 until the queue drains. Tune up for cheaper agents
+(small target → many replicas), down for expensive agents that need
+exclusive CPU.
+''')
+@minValue(1)
+@maxValue(1000)
+param queueDepthPerReplica int = 5
+
 @description('Common tags.')
 param tags object = {}
 
@@ -75,6 +92,20 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'pg-password'
           keyVaultUrl: '${keyVaultUri}secrets/pg-admin-password'
+          identity: 'system'
+        }
+        {
+          // Full libpq connection string for the KEDA postgresql
+          // scaler. Distinct from PGPASSWORD because KEDA runs
+          // OUTSIDE the worker container (in the ACA env's scaler
+          // sidecar) and needs a self-contained DSN. Populate this
+          // KV secret during the two-pass deploy:
+          //   az keyvault secret set --vault-name $KV
+          //     --name pg-connection-string
+          //     --value "host=$PG_FQDN port=5432 user=movate
+          //              password=$PG_PASSWORD dbname=$PG_DB sslmode=require"
+          name: 'pg-connection-string'
+          keyVaultUrl: '${keyVaultUri}secrets/pg-connection-string'
           identity: 'system'
         }
         {
@@ -120,6 +151,15 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = {
               secretRef: 'pg-password'
             }
             {
+              // KEDA's postgresql scaler reads from this env var
+              // (see ``connectionFromEnv`` in the scale rule below).
+              // It's set on the container by ACA but consumed by the
+              // KEDA sidecar that lives in the ACA environment, not
+              // by the worker process itself.
+              name: 'KEDA_PG_CONNECTION_STRING'
+              secretRef: 'pg-connection-string'
+            }
+            {
               name: 'OPENAI_API_KEY'
               secretRef: 'openai-api-key'
             }
@@ -147,16 +187,23 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = {
         maxReplicas: maxReplicas
         rules: [
           {
-            // CPU-based scale as a proxy for queue depth in v1.0.
-            // v1.1 idea: KEDA Postgres scaler — query
-            // ``SELECT COUNT(*) FROM jobs WHERE status='queued'`` and
-            // scale on that. Better signal but more moving parts.
-            name: 'cpu'
+            // KEDA postgresql scaler — leading indicator (queue depth)
+            // beats lagging (CPU). The query filters on the same
+            // claimable-set the worker's claim_next_job uses:
+            //   status='queued' AND (next_retry_at IS NULL OR <= now)
+            // so re-queued jobs awaiting backoff don't artificially
+            // inflate the scale-up signal.
+            //
+            // ACA evaluates this ~every 30s. Desired replicas =
+            // ceil(queryResult / targetQueryValue), clamped to
+            // [minReplicas, maxReplicas].
+            name: 'queue-depth'
             custom: {
-              type: 'cpu'
+              type: 'postgresql'
               metadata: {
-                type: 'Utilization'
-                value: '70'
+                connectionFromEnv: 'KEDA_PG_CONNECTION_STRING'
+                query: 'SELECT COUNT(*) FROM jobs WHERE status = \'queued\' AND (next_retry_at IS NULL OR next_retry_at <= NOW())'
+                targetQueryValue: string(queueDepthPerReplica)
               }
             }
           }

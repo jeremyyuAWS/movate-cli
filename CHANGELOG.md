@@ -5,6 +5,50 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — Worker autoscaling: CPU → KEDA Postgres queue-depth (post-v1.0)
+
+**Leading-indicator scaling.** Before this, the worker Container App
+scaled on CPU utilization — a *lagging* indicator (CPU rises only
+after a backlog has built up + been claimed). Now it scales on
+**queue depth** via the KEDA postgresql scaler — the load is
+visible BEFORE any pod's CPU rises.
+
+- **`containerapp-worker.bicep`** scale rule replaced:
+  * Old: ``type: 'cpu', metadata: {type: 'Utilization', value: '70'}``
+  * New: ``type: 'postgresql'`` with the query
+    ``SELECT COUNT(*) FROM jobs WHERE status = 'queued' AND
+    (next_retry_at IS NULL OR next_retry_at <= NOW())``.
+  * Filters on the same claimable-set as ``claim_next_job`` — so
+    re-queued jobs awaiting backoff don't artificially inflate the
+    scale-up signal.
+- **`queueDepthPerReplica` param** (default 5 in the module, set
+  to 10 in prod / 3 in dev via ``main.bicep``). Desired replicas =
+  ``ceil(queryResult / queueDepthPerReplica)``, clamped to
+  ``[minReplicas, maxReplicas]``. KEDA evaluates ~every 30s.
+- **New KV secret ``pg-connection-string``** — full libpq DSN for
+  the KEDA scaler. Required because KEDA runs in ACA's environment
+  sidecar (outside the worker container) and needs a self-contained
+  connection string. Distinct from ``pg-password`` (which the
+  worker uses via PGPASSWORD). The operator runbook
+  (``docs/azure-bootstrap.md`` step 4 + ``infra/azure/README.md``
+  KV-population block) walks through setting this during the
+  two-pass deploy.
+- **`KEDA_PG_CONNECTION_STRING` env var** on the worker container —
+  references the new KV secret. Consumed by KEDA's
+  ``connectionFromEnv`` field, not by the worker process itself.
+
+**Operator effect:** when 50 jobs hit the queue, the worker scales
+up within ~30s (next KEDA evaluation cycle) instead of waiting for
+CPU to register the backlog. For an agent that's I/O-bound on a
+provider call, CPU might never rise enough to trigger the old
+rule — KEDA catches that case correctly.
+
+**What's NOT covered:** scale-to-zero. ACA + KEDA support it, but
+the worker keeps ``minReplicas >= 1`` so a job submitted in the
+first 30s after a quiet period doesn't wait for a cold-start.
+Operators can opt in by setting ``minReplicas: 0`` if cost matters
+more than first-job latency.
+
 ### Added — Per-API-key rate limiting (post-v1.0)
 
 **Protects the deployed runtime from runaway clients.** Before this,
