@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "risk_score", "indicators"],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["auto_approve", "auto_reject", "human_review"],
+      "description": "The triage decision from the rule engine."
+    },
+    "risk_score": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Aggregate risk score, 0 = clean, 1 = high-risk."
+    },
+    "indicators": {
+      "type": "array",
+      "description": "Named rules that fired. Order = order of contribution to risk.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "detail"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable identifier (e.g. 'tampered_serial', 'unsupported_brand')."
+          },
+          "severity": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Contribution to risk score (0..1)."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Human-readable explanation (operator-facing)."
+          }
+        }
+      }
+    },
+    "product_summary": {
+      "type": "string",
+      "description": "Short description of the product (brand + family + sku if known). Optional."
+    },
+    "customer_name": {
+      "type": "string",
+      "description": "First name only, if available. Optional — agent writes generic if absent."
+    }
+  }
+}

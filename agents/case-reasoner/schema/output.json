@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["headline", "body", "next_steps", "tone"],
+  "properties": {
+    "headline": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "One-line decision summary the customer sees first."
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600,
+      "description": "2-4 sentence explanation. For auto_reject, references specific indicators that fired without leaking confidence scores. For human_review, conveys 'one of our specialists will look at this'. For auto_approve, confirms + sets expectation for the warranty process."
+    },
+    "next_steps": {
+      "type": "array",
+      "description": "Concrete actions the customer can take now (each as an imperative phrase). Min 1, max 4.",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      }
+    },
+    "tone": {
+      "type": "string",
+      "enum": ["positive", "neutral", "empathetic"],
+      "description": "Self-classification of tone — operators can filter dashboards by this."
+    }
+  }
+}
