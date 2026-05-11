@@ -23,7 +23,14 @@ from typer.testing import CliRunner
 
 from movate.cli.main import app as cli_app
 from movate.core.auth import mint_api_key
-from movate.core.models import ApiKeyEnv, JobKind, JobStatus
+from movate.core.models import (
+    ApiKeyEnv,
+    JobKind,
+    JobStatus,
+    Metrics,
+    RunRecord,
+    TokenUsage,
+)
 from movate.runtime import build_app
 from movate.runtime.registry import scan_agents
 from movate.testing import InMemoryStorage
@@ -324,6 +331,102 @@ async def test_get_job_404_when_cross_tenant(
     )
     assert r.status_code == 404
     assert r.json()["detail"]["error"]["code"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# GET /runs/{id}
+# ---------------------------------------------------------------------------
+
+
+def _make_run(
+    *,
+    tenant_id: str,
+    job_id: str = "job-1",
+    run_id: str = "run-1",
+    output: dict | None = None,
+) -> RunRecord:
+    """Construct a minimal RunRecord for endpoint round-trip tests."""
+    return RunRecord(
+        run_id=run_id,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        agent="demo",
+        agent_version="0.1.0",
+        prompt_hash="sha256:deadbeef",
+        provider="openai/gpt-4o-mini",
+        provider_version="v1",
+        pricing_version="2024-09",
+        status=JobStatus.SUCCESS,
+        input={"q": "hi"},
+        output=output or {"answer": "hello"},
+        metrics=Metrics(
+            latency_ms=120,
+            tokens=TokenUsage(input=5, output=3),
+            cost_usd=0.0001,
+            provider="openai/gpt-4o-mini",
+            pricing_version="2024-09",
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_get_run_returns_output(
+    client: TestClient, minted_key, storage: InMemoryStorage
+) -> None:
+    """Happy path: persisted run is reachable via GET /runs/{id}, and the
+    response carries the agent's actual ``output`` — the whole reason this
+    endpoint exists (``GET /jobs/{id}`` deliberately omits the output)."""
+    minted, bearer = minted_key
+    run = _make_run(tenant_id=minted.record.tenant_id)
+    await storage.save_run(run)
+
+    r = client.get(f"/runs/{run.run_id}", headers=_auth_headers(bearer))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["run_id"] == run.run_id
+    assert body["job_id"] == run.job_id
+    assert body["output"] == {"answer": "hello"}
+    assert body["metrics"]["cost_usd"] == 0.0001
+    assert body["provider"] == "openai/gpt-4o-mini"
+    # tenant_id is audit-only — must NOT leak over the wire.
+    assert "tenant_id" not in body
+
+
+@pytest.mark.unit
+def test_get_run_404_for_unknown_id(client: TestClient, minted_key) -> None:
+    _, bearer = minted_key
+    r = client.get("/runs/no-such-run", headers=_auth_headers(bearer))
+    assert r.status_code == 404
+    assert r.json()["detail"]["error"]["code"] == "not_found"
+
+
+@pytest.mark.unit
+async def test_get_run_404_when_cross_tenant(
+    client: TestClient, minted_key, storage: InMemoryStorage
+) -> None:
+    """Same isolation contract as GET /jobs/{id}: a key from tenant B
+    must not see tenant A's run. 404, never 403 — 403 would leak that
+    the id exists in some other tenant."""
+    minted, _ = minted_key
+    run = _make_run(tenant_id=minted.record.tenant_id)
+    await storage.save_run(run)
+
+    # Mint a second key for a different tenant.
+    other = mint_api_key(tenant_id=uuid4().hex, env=ApiKeyEnv.LIVE)
+    await storage.save_api_key(other.record)
+
+    r = client.get(
+        f"/runs/{run.run_id}",
+        headers={"Authorization": f"Bearer {other.full_key}"},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["error"]["code"] == "not_found"
+
+
+@pytest.mark.unit
+def test_get_run_requires_auth(client: TestClient) -> None:
+    r = client.get("/runs/any-id")  # no auth header
+    assert r.status_code == 401
 
 
 # ---------------------------------------------------------------------------

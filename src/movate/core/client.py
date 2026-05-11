@@ -25,6 +25,7 @@ from movate.runtime.schemas import (
     JobView,
     RunAccepted,
     RunSubmission,
+    RunView,
 )
 
 
@@ -126,6 +127,18 @@ class MovateClient:
         r = await self._client.get(f"/jobs/{job_id}")
         self._raise_for_status(r)
         return JobView.model_validate(r.json())
+
+    async def get_run(self, run_id: str) -> RunView:
+        """``GET /runs/{id}`` — full run record including ``output``.
+
+        Use after ``get_job`` returns a terminal status with
+        ``result_run_id`` set; this is the only way for a client to
+        retrieve the actual agent output (``JobView`` deliberately
+        omits it — runs may be large and live on a separate retention
+        track from job-state polling)."""
+        r = await self._client.get(f"/runs/{run_id}")
+        self._raise_for_status(r)
+        return RunView.model_validate(r.json())
 
     # ------------------------------------------------------------------
     # Convenience: poll until terminal
