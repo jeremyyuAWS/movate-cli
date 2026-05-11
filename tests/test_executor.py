@@ -515,6 +515,78 @@ async def test_executor_prepends_history_to_provider_messages(
 
 
 @pytest.mark.unit
+async def test_executor_places_system_message_before_history(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """When the prompt template defines a system/user block split, the
+    system message goes FIRST in the conversation — before history,
+    before the current user turn. This is the token-efficient chat
+    memory path: the system instructions appear once at the head,
+    history sits in the middle, current turn at the end.
+
+    Without this ordering, multi-turn conversations would re-render
+    the system instructions inside every user message and burn tokens."""
+    from movate.providers.base import (  # noqa: PLC0415
+        BaseLLMProvider,
+        CompletionResponse,
+    )
+    from movate.providers.base import Message as ProviderMessage  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "split-demo")
+    # Promote the prompt to a system/user split.
+    (bundle_dir / "prompt.md").write_text(
+        "{% block system %}You are an echo bot.{% endblock %}"
+        "{% block user %}{{ input.text }}{% endblock %}"
+    )
+    bundle = load_agent(bundle_dir)
+
+    captured_messages: list[ProviderMessage] = []
+
+    class CapturingProvider(BaseLLMProvider):
+        name = "capture"
+        version = "0.0.1"
+
+        async def complete(self, request: CompletionRequest) -> CompletionResponse:
+            captured_messages.extend(request.messages)
+            return CompletionResponse(
+                text='{"message": "ok"}',
+                tokens=TokenUsage(input=5, output=3),
+            )
+
+        async def stream(self, request):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+        async def embed(self, text, *, model):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+    executor = Executor(
+        provider=CapturingProvider(), pricing=pricing, storage=storage, tracer=tracer
+    )
+    await executor.execute(
+        bundle,
+        RunRequest(agent="demo", input={"text": "now"}),
+        history=[
+            ProviderMessage(role="user", content="earlier"),
+            ProviderMessage(role="assistant", content="earlier reply"),
+        ],
+    )
+
+    # 4 messages reach the provider: system, history pair, current user.
+    assert len(captured_messages) == 4
+    assert captured_messages[0].role == "system"
+    assert "echo bot" in captured_messages[0].content
+    assert captured_messages[1].role == "user"
+    assert captured_messages[1].content == "earlier"
+    assert captured_messages[2].role == "assistant"
+    assert captured_messages[2].content == "earlier reply"
+    assert captured_messages[3].role == "user"
+    assert captured_messages[3].content == "now"
+
+
+@pytest.mark.unit
 async def test_executor_runtime_policy_permissive_by_default(
     tmp_path: Path,
     pricing: PricingTable,

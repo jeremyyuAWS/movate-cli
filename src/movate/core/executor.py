@@ -209,7 +209,15 @@ class Executor:
             except JsonSchemaError as exc:
                 raise SchemaError(f"input failed schema: {exc.message}") from exc
 
-            rendered = bundle.render_prompt(request.input)
+            # Render the current turn as role-tagged messages.
+            # ``render_messages`` returns ``[{system}, {user}]`` when the
+            # prompt template defines a system/user block split (a chat
+            # template optimization for memory), or ``[{user}]`` for
+            # every existing template (back-compat).
+            current_turn = [
+                Message(role=m["role"], content=m["content"])  # type: ignore[arg-type]
+                for m in bundle.render_messages(request.input)
+            ]
             self._tracer.log_event(span, {"prompt_hash": bundle.prompt_hash})
 
             chain: list[tuple[str, dict[str, Any]]] = [
@@ -226,13 +234,19 @@ class Executor:
             last_error: MovateError | None = None
 
             for provider_str, params in chain:
-                # Prepend conversation history (chat memory) before the
-                # newly-rendered current turn. History entries are passed
-                # through as-is; the renderer only sees the current
-                # request.input (history isn't fed to the Jinja template).
+                # Build the final conversation messages list:
+                #   [system?, *history, user]
+                # The system message (if any) goes FIRST so the model
+                # treats it as standing instruction. Conversation history
+                # (chat memory) goes between system and the current user
+                # turn so prior turns share the same system context
+                # without re-tokenizing the instructions every time.
+                system_msgs = [m for m in current_turn if m.role == "system"]
+                user_msgs = [m for m in current_turn if m.role == "user"]
                 conversation: list[Message] = [
+                    *system_msgs,
                     *(history or []),
-                    Message(role="user", content=rendered),
+                    *user_msgs,
                 ]
                 req = CompletionRequest(
                     provider=provider_str,

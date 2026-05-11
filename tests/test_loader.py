@@ -48,6 +48,65 @@ def test_render_prompt_undefined_variable_fails(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_render_messages_single_message_for_unsplit_template(tmp_path: Path) -> None:
+    """Templates without ``{% block system %}`` keep the existing
+    behavior: render the entire template as one user-role message.
+
+    Back-compat: every shipped template except chatbot does this."""
+    agent_dir = _scaffold_agent(tmp_path / "demo")
+    bundle = load_agent(agent_dir)
+    messages = bundle.render_messages({"text": "ping"})
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+    assert "ping" in messages[0]["content"]
+
+
+@pytest.mark.unit
+def test_render_messages_splits_system_and_user_blocks(tmp_path: Path) -> None:
+    """Templates with ``{% block system %}`` and ``{% block user %}``
+    produce two messages — system instructions first, current-turn
+    user content second. This is the token-efficient chat path:
+    multi-turn conversations send the system message ONCE rather than
+    duplicating it inside every user turn."""
+    agent_dir = _scaffold_agent(tmp_path / "demo")
+    # Replace the prompt with a split version.
+    (agent_dir / "prompt.md").write_text(
+        "{% block system %}\nYou are a strict echo bot.\n{% endblock %}\n"
+        "{% block user %}\n{{ input.text }}\n{% endblock %}\n"
+    )
+    # Reload to pick up the new prompt.
+    bundle = load_agent(agent_dir)
+    messages = bundle.render_messages({"text": "ping"})
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert "echo bot" in messages[0]["content"]
+    assert "ping" not in messages[0]["content"]  # user content stays out
+    assert messages[1]["role"] == "user"
+    assert messages[1]["content"] == "ping"
+
+
+@pytest.mark.unit
+def test_render_messages_system_only_block_falls_through(tmp_path: Path) -> None:
+    """Halfway-converted template (system block defined, user block
+    missing) shouldn't produce an empty user message. We render the
+    whole template as the user content as a safety net so the agent
+    still works while the operator finishes splitting."""
+    agent_dir = _scaffold_agent(tmp_path / "demo")
+    (agent_dir / "prompt.md").write_text(
+        "{% block system %}\nYou are a bot.\n{% endblock %}\nAdditional context: {{ input.text }}\n"
+    )
+    bundle = load_agent(agent_dir)
+    messages = bundle.render_messages({"text": "ping"})
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    # User content is the WHOLE rendered template — includes the
+    # system block too. Wasteful, but functional.
+    assert "ping" in messages[1]["content"]
+    assert "You are a bot" in messages[1]["content"]
+
+
+@pytest.mark.unit
 def test_load_missing_directory(tmp_path: Path) -> None:
     with pytest.raises(AgentLoadError, match="not a directory"):
         load_agent(tmp_path / "does-not-exist")
