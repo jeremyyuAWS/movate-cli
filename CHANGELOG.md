@@ -5,6 +5,49 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Cost forecast on `movate validate` (post-v1.0)
+
+**Catches "this eval would cost $3" before running it.** Validate
+now prints an estimated cost for running ``movate eval`` against
+the agent's dataset — char/4 token approximation × dataset size ×
+the model's pricing. Quick gut-check before burning real money.
+
+- **`core/cost_forecast.py`** — pure-Python ``estimate_eval_cost``
+  + ``CostForecast`` dataclass. Renders each case's prompt with
+  Jinja (microseconds per case) so the per-case interpolation is
+  captured, not just the template length.
+- **Math:** `tokens ≈ chars / 4` (well-established for GPT/Anthropic
+  families, ±20% for English). Output budget = `model.params.max_tokens`
+  if set, else 500. Cost = `input_tokens/1k × input_per_1k +
+  output_tokens/1k × output_per_1k`, summed across cases.
+- **Returns `None` (silent skip)** when: no dataset configured,
+  dataset file missing, model not in pricing table, dataset empty,
+  or every case fails to render. The right UX is absence, not a
+  "couldn't estimate" warning that ops learn to ignore.
+- **`movate validate`** prints a single dim line on the happy path:
+  > `eval cost: ~$0.0045 (30 cases x ~120 in + ~1024 out tokens)`
+  
+  Hidden when None. No flag needed — it's free info on every
+  validate.
+- **Cases with invalid inputs are skipped, not crashed.** A case
+  whose input refs a missing schema field would raise Jinja's
+  `UndefinedError` mid-render; the forecast eats that exception
+  and continues so a half-broken dataset still gets a partial
+  estimate. The `UNDECLARED_INPUT_REF` prompt-linter rule is the
+  right tool for diagnosing that bug; the forecast just keeps
+  shipping a number.
+- 10 new tests in `tests/test_cost_forecast.py`: None-when-missing
+  (dataset / pricing / empty), exact-math on a known pricing
+  table, default vs override of `max_tokens`, linear scaling
+  (10 cases = 2x 5 cases), invalid-input case skipping, CLI
+  integration (prints forecast on scaffold, hides when no dataset).
+
+**Operator effect:** before this, engineer runs `movate eval`
+without thinking, lands a $4 cloud bill on a 200-case dataset
+with `gpt-4o-2024-08-06`. After this, they see `eval cost: ~$4.12`
+at validate time and either swap to `gpt-4o-mini` or accept the
+cost knowingly.
+
 ### Added — Prompt linter in `movate validate` (post-v1.0)
 
 **Catches real prompt bugs at validate time, not at the first

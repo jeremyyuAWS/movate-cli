@@ -13,6 +13,7 @@ from rich.console import Console
 
 from movate.cli._workflow_path import is_workflow_path
 from movate.core.config import load_project_config
+from movate.core.cost_forecast import estimate_eval_cost
 from movate.core.loader import AgentLoadError, load_agent
 from movate.core.prompt_linter import LintIssue, lint_prompt
 from movate.core.workflow import (
@@ -22,6 +23,7 @@ from movate.core.workflow import (
     validate_linear,
 )
 from movate.core.workflow.spec import WorkflowSpecLoadError
+from movate.providers.pricing import load_pricing
 
 console = Console()
 
@@ -92,6 +94,21 @@ def _validate_agent(path: Path, *, strict: bool, run_linter: bool) -> None:
         console.print("  [dim]policy:      ✓ compliant[/dim]")
     if run_linter and not lint_issues:
         console.print("  [dim]lint:        ✓ clean[/dim]")
+
+    # Cost forecast — silent when no dataset / no pricing for model /
+    # empty dataset. The estimate_eval_cost helper returns None in
+    # every "skip" case so this stays a single conditional.
+    try:
+        forecast = estimate_eval_cost(bundle, pricing=load_pricing())
+    except Exception:  # pragma: no cover — defensive; load_pricing rarely fails
+        forecast = None
+    if forecast is not None:
+        console.print(
+            f"  [dim]eval cost:   ~${forecast.total_cost_usd:.4f} "
+            f"({forecast.cases} cases x "
+            f"~{forecast.input_tokens_per_call} in + "
+            f"~{forecast.output_tokens_per_call} out tokens)[/dim]"
+        )
 
     # Exit non-zero if there are real errors (always) or warnings
     # under --strict (CI gate mode).

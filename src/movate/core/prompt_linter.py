@@ -109,8 +109,7 @@ def _check_empty_prompt(bundle: AgentBundle) -> list[LintIssue]:
                 severity="error",
                 message="prompt is empty or whitespace-only",
                 hint=(
-                    "write the system instruction in the file "
-                    "referenced by `prompt:` in agent.yaml"
+                    "write the system instruction in the file referenced by `prompt:` in agent.yaml"
                 ),
             )
         ]
