@@ -377,9 +377,7 @@ async def test_executor_prepends_history_to_provider_messages(
         BaseLLMProvider,
         CompletionResponse,
     )
-    from movate.providers.base import (
-        Message as ProviderMessage,
-    )
+    from movate.providers.base import Message as ProviderMessage  # noqa: PLC0415
 
     captured_messages: list[ProviderMessage] = []
 

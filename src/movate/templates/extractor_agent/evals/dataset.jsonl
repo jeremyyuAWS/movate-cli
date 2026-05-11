@@ -1,0 +1,4 @@
+{"input": {"text": "Hi, this is Sarah Chen (sarah@acme.io). Our production deploy is broken and blocking the release — need help ASAP."}, "expected": {"contact_name": "Sarah Chen", "email": "sarah@acme.io", "intent": "support_request", "urgency": "high"}}
+{"input": {"text": "Hey team, would love to see a CSV export option in the dashboard when you get a chance."}, "expected": {"contact_name": null, "email": null, "intent": "feature_request", "urgency": "low"}}
+{"input": {"text": "From: marcus.lee@globex.com\n\nI was double-charged on my December invoice. Could someone take a look?"}, "expected": {"contact_name": null, "email": "marcus.lee@globex.com", "intent": "billing", "urgency": "medium"}}
+{"input": {"text": "Just exploring movate — what's the typical setup time for a new agent?"}, "expected": {"contact_name": null, "email": null, "intent": "general_inquiry", "urgency": "low"}}

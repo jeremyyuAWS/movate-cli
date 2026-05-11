@@ -1,0 +1,28 @@
+# LLM-as-judge config for the chatbot template. Rename to ``judge.yaml`` to enable.
+#
+# Exact-match scoring is wrong for a conversational reply — wording varies
+# between runs and across model families. LLM-as-judge with a rubric that
+# scores semantic appropriateness is the right tool.
+
+method: llm_judge
+
+model:
+  # Cross-family: agent runs on openai by default; the judge must NOT
+  # also run on openai (the eval engine refuses to let a provider judge
+  # itself).
+  provider: anthropic/claude-sonnet-4-6
+  params:
+    temperature: 0.0
+
+rubric: |
+  Score the assistant's reply against the expected reply, on a single
+  axis of conversational appropriateness:
+
+    1.0  Reply addresses the user's message correctly, in 1-3 sentences,
+         and avoids hallucinated facts. Tone matches the expected reply.
+    0.5  Reply is correct but verbose / off-tone, OR partially addresses
+         the message.
+    0.0  Reply is wrong, off-topic, or hallucinates facts the assistant
+         couldn't know.
+
+threshold: 0.7

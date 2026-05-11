@@ -38,6 +38,15 @@ CANONICAL: dict[str, tuple[dict, str]] = {
         },
         '{"label": "positive"}',
     ),
+    "chatbot": (
+        {"message": "hi there"},
+        '{"reply": "Hi! How can I help?"}',
+    ),
+    "extractor": (
+        {"text": "Sarah (sarah@acme.io) needs help — production is broken."},
+        '{"contact_name": "Sarah", "email": "sarah@acme.io", '
+        '"intent": "support_request", "urgency": "high"}',
+    ),
 }
 
 
@@ -48,7 +57,14 @@ CANONICAL: dict[str, tuple[dict, str]] = {
 
 @pytest.mark.unit
 def test_template_registry_exposes_all_known() -> None:
-    assert set(TEMPLATES.keys()) == {"default", "faq", "summarizer", "classifier"}
+    assert set(TEMPLATES.keys()) == {
+        "default",
+        "faq",
+        "summarizer",
+        "classifier",
+        "chatbot",
+        "extractor",
+    }
     assert list_templates() == sorted(TEMPLATES.keys())
 
 
@@ -152,16 +168,22 @@ async def test_template_runs_end_to_end_with_mock(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("template", ["faq", "summarizer"])
+@pytest.mark.parametrize("template", ["faq", "summarizer", "chatbot"])
 def test_subjective_templates_ship_judge_example(template: str, tmp_path: Path) -> None:
+    """Templates whose output is open-ended natural language ship a
+    judge.yaml.example — exact-match won't score them. Chatbot joined
+    the list with the chatbot template (Tier-1 #1 follow-up)."""
     dst = tmp_path / template
     scaffold_agent(dst, name="demo", template=template)
     assert (dst / "evals" / "judge.yaml.example").is_file()
 
 
 @pytest.mark.unit
-def test_classifier_does_not_need_judge_example(tmp_path: Path) -> None:
-    """Exact-match works for finite-label classifiers; no judge needed."""
-    dst = tmp_path / "classifier"
-    scaffold_agent(dst, name="demo", template="classifier")
+@pytest.mark.parametrize("template", ["classifier", "extractor"])
+def test_deterministic_templates_skip_judge_example(template: str, tmp_path: Path) -> None:
+    """Templates whose output is a fixed-shape typed value (finite-label
+    classifier, structured-field extractor) work fine with exact-match
+    scoring; no judge.yaml.example needed."""
+    dst = tmp_path / template
+    scaffold_agent(dst, name="demo", template=template)
     assert not (dst / "evals" / "judge.yaml.example").exists()

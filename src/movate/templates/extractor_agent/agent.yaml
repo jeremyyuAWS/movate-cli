@@ -1,0 +1,39 @@
+api_version: movate/v1
+kind: Agent
+
+name: __AGENT_NAME__
+version: 0.1.0
+description: |
+  Structured-field extractor. Reads unstructured text (an email, a
+  support ticket, a meeting transcript) and pulls out a fixed set of
+  fields. Demonstrates the pattern of using movate's strict output
+  schema as a typed contract for LLM extraction.
+owner: ""
+
+model:
+  provider: openai/gpt-4o-mini-2024-07-18
+  params:
+    temperature: 0.0    # extraction wants determinism, not creativity
+    max_tokens: 512
+  fallback:
+    - provider: anthropic/claude-haiku-4-5-20251001
+
+prompt: ./prompt.md
+
+schema:
+  input: ./schema/input.json
+  output: ./schema/output.json
+
+evals:
+  dataset: ./evals/dataset.jsonl
+
+timeouts:
+  call_ms: 30000
+  total_ms: 60000
+
+budget:
+  max_cost_usd_per_run: 0.05
+
+tags:
+  - extraction
+  - structured-output

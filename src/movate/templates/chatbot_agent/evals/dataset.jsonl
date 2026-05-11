@@ -1,0 +1,2 @@
+{"input": {"message": "hi there"}, "expected": {"reply": "Hi! How can I help?"}}
+{"input": {"message": "what's the time?"}, "expected": {"reply": "I don't have access to the current time."}}

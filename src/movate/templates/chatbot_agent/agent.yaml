@@ -1,0 +1,40 @@
+api_version: movate/v1
+kind: Agent
+
+name: __AGENT_NAME__
+version: 0.1.0
+description: |
+  Friendly conversational assistant. Single ``message`` input → single
+  ``reply`` output. Designed for ``movate chat`` — the REPL's memory
+  threads prior turns into context so follow-ups resolve correctly.
+owner: ""
+
+# Default runtime is LiteLLM (provider-portable). Override the model below
+# to swap families; the prompt and schemas are model-agnostic.
+model:
+  provider: openai/gpt-4o-mini-2024-07-18
+  params:
+    temperature: 0.7    # higher than the default — chat benefits from variety
+    max_tokens: 512
+  fallback:
+    - provider: anthropic/claude-haiku-4-5-20251001
+
+prompt: ./prompt.md
+
+schema:
+  input: ./schema/input.json
+  output: ./schema/output.json
+
+evals:
+  dataset: ./evals/dataset.jsonl
+
+timeouts:
+  call_ms: 30000
+  total_ms: 60000
+
+budget:
+  max_cost_usd_per_run: 0.10
+
+tags:
+  - chat
+  - conversational
