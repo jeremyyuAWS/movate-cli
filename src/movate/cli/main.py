@@ -19,6 +19,7 @@ load_dotenv()
 from movate import __version__  # noqa: E402
 from movate.cli import _console  # noqa: E402
 from movate.cli import bench as bench_cmd  # noqa: E402
+from movate.cli import chat as chat_cmd  # noqa: E402
 from movate.cli import deploy as deploy_cmd  # noqa: E402
 from movate.cli import doctor as doctor_cmd  # noqa: E402
 from movate.cli import eval as eval_cmd  # noqa: E402
@@ -141,6 +142,7 @@ app.command("watch", rich_help_panel=PANEL_DEVELOP)(watch_cmd.watch)
 # ----- Run & evaluate -------------------------------------------------------
 
 app.command("run", rich_help_panel=PANEL_RUN)(run_cmd.run)
+app.command("chat", rich_help_panel=PANEL_RUN)(chat_cmd.chat)
 app.command("bench", rich_help_panel=PANEL_RUN)(bench_cmd.bench)
 app.command("eval", rich_help_panel=PANEL_RUN)(eval_cmd.eval_)
 app.command("logs", rich_help_panel=PANEL_RUN)(logs_cmd.logs)
