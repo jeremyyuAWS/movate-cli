@@ -3,14 +3,29 @@
 Lets a teammate run ``movate bench faq-agent --input ...`` without remembering
 every model id. Defaults from ``movate.yaml`` at the project root; CLI flags
 always override.
+
+Also home to the **model policy** (v1.0 stage 3) — an org-wide set of rules
+about which providers / models / cost ceilings an agent may use. Enforced at:
+
+* ``movate validate`` — static check on every ``agent.yaml`` before merge
+* ``Executor.execute()`` entry — runtime check at every invocation, so a
+  bundle that skipped ``validate`` (e.g. loaded over HTTP by ``movate serve``)
+  still can't bypass the rules
+
+The policy is intentionally additive: an empty / absent ``policy:`` block is
+the permissive default (everything allowed, no cost ceiling).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from movate.core.models import AgentSpec
 
 
 class BenchConfig(BaseModel):
@@ -27,6 +42,124 @@ class EvalDefaults(BaseModel):
     gate: float | None = None
 
 
+class ModelPolicy(BaseModel):
+    """Project-wide model policy.
+
+    All three fields are optional; absent fields = no restriction. The
+    permissive default (everything empty / None) is equivalent to no
+    ``policy:`` block at all, so projects without policy needs see zero
+    behavior change.
+
+    Examples (in ``movate.yaml``)::
+
+        policy:
+          allowed_providers: [openai, azure, anthropic]
+          deny_models:
+            - openai/gpt-3.5-turbo
+            - openai/gpt-4-0314          # superseded; deny pre-0314 fallbacks
+          max_cost_per_run_usd: 0.50
+
+    Fields:
+
+    * ``allowed_providers``: provider *prefixes* (the part before ``/`` in
+      a LiteLLM model string). Empty list = all providers allowed.
+      ``openai/gpt-4o-mini`` matches prefix ``openai``; ``azure/gpt-4.1``
+      matches ``azure``.
+    * ``deny_models``: full LiteLLM model strings to reject outright.
+      Takes precedence over ``allowed_providers`` — a model can be in
+      an allowed provider but still denied by exact match.
+    * ``max_cost_per_run_usd``: hard ceiling on per-run cost. Each
+      agent's ``budget.max_cost_usd_per_run`` is capped at this value
+      at runtime (operator can't accidentally ship an agent with a
+      higher cap than the org allows). ``None`` = no ceiling.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed_providers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Provider prefixes (before '/') that an agent's model may use. "
+            "Empty list = no restriction."
+        ),
+    )
+    deny_models: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Full LiteLLM model strings that are blocked outright "
+            "(e.g. 'openai/gpt-3.5-turbo'). Takes precedence over allowed_providers."
+        ),
+    )
+    max_cost_per_run_usd: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Hard ceiling on per-run cost. Caps each agent's "
+            "budget.max_cost_usd_per_run at runtime. None = no ceiling."
+        ),
+    )
+
+    def is_permissive(self) -> bool:
+        """True if the policy imposes no restrictions — handy for fast-paths."""
+        return (
+            not self.allowed_providers
+            and not self.deny_models
+            and self.max_cost_per_run_usd is None
+        )
+
+    def check_model(self, provider: str) -> str | None:
+        """Validate one LiteLLM model string against the policy.
+
+        Returns a human-readable error message if the model violates the
+        policy, or ``None`` if it's allowed. Returning a string (not
+        raising) so callers can aggregate violations across an agent's
+        primary + fallback chain in one pass.
+        """
+        if provider in self.deny_models:
+            return f"model {provider!r} is in deny_models"
+        if self.allowed_providers:
+            prefix = provider.split("/", 1)[0] if "/" in provider else provider
+            if prefix not in self.allowed_providers:
+                allowed = ", ".join(sorted(self.allowed_providers))
+                return (
+                    f"provider prefix {prefix!r} (from {provider!r}) "
+                    f"not in allowed_providers [{allowed}]"
+                )
+        return None
+
+    def check_agent(self, spec: AgentSpec) -> list[str]:
+        """Validate every model an agent might use + its budget.
+
+        Returns a list of violation strings (empty list = compliant).
+        Checks: primary model, every fallback model, and budget ceiling.
+        """
+        violations: list[str] = []
+        if err := self.check_model(spec.model.provider):
+            violations.append(f"primary model: {err}")
+        for fb in spec.model.fallback:
+            if err := self.check_model(fb.provider):
+                violations.append(f"fallback {fb.provider!r}: {err}")
+        if (
+            self.max_cost_per_run_usd is not None
+            and spec.budget.max_cost_usd_per_run > self.max_cost_per_run_usd
+        ):
+            violations.append(
+                f"budget.max_cost_usd_per_run={spec.budget.max_cost_usd_per_run} "
+                f"exceeds policy ceiling {self.max_cost_per_run_usd}"
+            )
+        return violations
+
+    def effective_max_cost(self, agent_budget: float) -> float:
+        """The cost ceiling to enforce for one run.
+
+        Min of the agent's budget and the policy's ceiling. If the policy
+        has no ceiling, the agent's budget passes through unchanged.
+        """
+        if self.max_cost_per_run_usd is None:
+            return agent_budget
+        return min(agent_budget, self.max_cost_per_run_usd)
+
+
 class ProjectConfig(BaseModel):
     """Project-wide defaults — overrideable via CLI flags."""
 
@@ -36,6 +169,13 @@ class ProjectConfig(BaseModel):
     workflows_dir: str = "./workflows"
     bench: BenchConfig = Field(default_factory=BenchConfig)
     eval: EvalDefaults = Field(default_factory=EvalDefaults)
+    policy: ModelPolicy = Field(
+        default_factory=ModelPolicy,
+        description=(
+            "Org-wide model policy (allowed providers, deny-list, cost ceiling). "
+            "Empty/absent = permissive default."
+        ),
+    )
 
 
 def load_project_config(path: Path | str | None = None) -> ProjectConfig:

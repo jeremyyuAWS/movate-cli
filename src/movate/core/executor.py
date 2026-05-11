@@ -21,10 +21,12 @@ from uuid import uuid4
 
 from jsonschema import ValidationError as JsonSchemaError
 
+from movate.core.config import ModelPolicy
 from movate.core.failures import (
     DEFAULT_RETRY,
     BudgetExceededError,
     MovateError,
+    PolicyViolationError,
     SchemaError,
 )
 from movate.core.loader import AgentBundle
@@ -65,12 +67,17 @@ class Executor:
         storage: StorageProvider,
         tracer: Tracer,
         tenant_id: str = "local",
+        policy: ModelPolicy | None = None,
     ) -> None:
         self._provider = provider
         self._pricing = pricing
         self._storage = storage
         self._tracer = tracer
         self._tenant_id = tenant_id
+        # Permissive default — an executor built without a policy enforces
+        # nothing, preserving v0.1-style behavior for callers that haven't
+        # opted in yet (tests, downstream embedders).
+        self._policy = policy or ModelPolicy()
 
     async def execute(
         self,
@@ -113,6 +120,19 @@ class Executor:
 
         started = time.monotonic()
         try:
+            # Policy check happens BEFORE schema validation and prompt
+            # rendering — a denied model shouldn't get to bill latency
+            # or trigger any side effects. ``check_model`` is also
+            # cheaper than schema validation so a misconfigured agent
+            # fails fast.
+            #
+            # We check the effective model + every fallback the executor
+            # might try. ``bench`` uses ``model_override`` which disables
+            # the fallback chain, so we only check the override in that
+            # case (mirrors the chain construction below).
+            if not self._policy.is_permissive():
+                self._enforce_policy(spec, effective_model, model_override is not None)
+
             try:
                 bundle.input_validator.validate(request.input)
             except JsonSchemaError as exc:
@@ -170,9 +190,16 @@ class Executor:
             cost = self._pricing.cost_for(provider=chosen_provider, tokens=completion.tokens)
             self._check_cost_drift(span, completion, cost)
 
-            if cost > spec.budget.max_cost_usd_per_run:
+            # The effective ceiling is the MIN of the agent's declared
+            # budget and the project policy's ceiling. Project policy
+            # never relaxes — it can only tighten. If a project sets no
+            # ceiling, the agent's own budget wins.
+            effective_ceiling = self._policy.effective_max_cost(spec.budget.max_cost_usd_per_run)
+            if cost > effective_ceiling:
                 raise BudgetExceededError(
-                    f"run cost ${cost:.4f} exceeds budget ${spec.budget.max_cost_usd_per_run:.4f}"
+                    f"run cost ${cost:.4f} exceeds ceiling ${effective_ceiling:.4f} "
+                    f"(agent budget ${spec.budget.max_cost_usd_per_run:.4f}, "
+                    f"policy {self._policy.max_cost_per_run_usd})"
                 )
 
             output = _parse_json_output(completion.text)
@@ -228,6 +255,45 @@ class Executor:
                 job_id=job_id,
                 started=started,
                 err=exc.last_error,
+            )
+
+    def _enforce_policy(
+        self,
+        spec: Any,
+        effective_model: ModelConfig,
+        is_override: bool,
+    ) -> None:
+        """Raise ``PolicyViolationError`` if the run would violate policy.
+
+        Called at the top of ``execute()`` before any provider hits.
+        Checks the model the executor is about to invoke plus every
+        fallback it might try; for ``bench`` (model_override=True) the
+        fallback chain is disabled, so we only check the override.
+        """
+        violations: list[str] = []
+        if err := self._policy.check_model(effective_model.provider):
+            violations.append(f"primary model: {err}")
+        if not is_override:
+            for fb in spec.model.fallback:
+                if err := self._policy.check_model(fb.provider):
+                    violations.append(f"fallback {fb.provider!r}: {err}")
+        # Budget ceiling is enforced separately at the cost-check step
+        # (we don't know cost yet at executor entry). But if the agent
+        # declared a static budget larger than the policy ceiling, the
+        # operator should know NOW, not after spending money — so we
+        # flag it here too.
+        if (
+            self._policy.max_cost_per_run_usd is not None
+            and spec.budget.max_cost_usd_per_run > self._policy.max_cost_per_run_usd
+        ):
+            violations.append(
+                f"budget.max_cost_usd_per_run={spec.budget.max_cost_usd_per_run} "
+                f"exceeds policy ceiling {self._policy.max_cost_per_run_usd}"
+            )
+        if violations:
+            joined = "; ".join(violations)
+            raise PolicyViolationError(
+                f"agent {spec.name!r} violates model policy: {joined}. See movate.yaml: policy."
             )
 
     def _check_cost_drift(

@@ -14,3 +14,16 @@ bench:
 
 eval:
   gate: 0.7
+
+# Org-wide model policy (v1.0 stage 3). Enforced at `movate validate`
+# (static check on every agent.yaml) and at `Executor.execute()` entry
+# (runtime check, so bundles loaded via `movate serve` can't bypass).
+#
+# Empty / absent policy = permissive default (no restrictions). Uncomment
+# fields below to opt in.
+#
+# policy:
+#   allowed_providers: [openai, azure, anthropic]
+#   deny_models:
+#     - openai/gpt-3.5-turbo
+#   max_cost_per_run_usd: 0.50

@@ -46,6 +46,7 @@ that v1.0 builds on.
 | Azure deploy (Bicep IaC) | `infra/azure/main.bicep` (manual `az deployment`) | ✓ v1.0 stage 1 |
 | One-command deploy to ACA | `movate deploy --target <name>` | ✓ v1.0 stage 2 |
 | Auto-deploy on push to release/* | `.github/workflows/deploy.yml` (federated OIDC) | ✓ v1.0 stage 2 |
+| Model policy enforcement | `movate.yaml: policy:` (allowed_providers, deny_models, max cost) | ✓ v1.0 stage 3 |
 
 ## Prerequisites
 
@@ -298,6 +299,34 @@ Environment variables movate reads:
 | `LANGFUSE_SECRET_KEY` / `LANGFUSE_PUBLIC_KEY` | Langfuse auth | unset |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP-HTTP target | unset |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / etc. | Provider auth (LiteLLM passthrough) | unset |
+
+### Model policy
+
+Org-wide guardrails on which providers / models / cost ceilings an agent
+may use. Declared in `movate.yaml`:
+
+```yaml
+policy:
+  allowed_providers: [openai, azure, anthropic]   # provider prefixes
+  deny_models:
+    - openai/gpt-3.5-turbo                        # explicit blocklist
+  max_cost_per_run_usd: 0.50                      # caps agent budget
+```
+
+Enforced at two layers:
+
+* **`movate validate <agent>`** — static check on every `agent.yaml`
+  before merge. Reports all violations (primary model, every fallback,
+  budget ceiling) in one pass and exits 2.
+* **`Executor.execute()`** entry — runtime check at every invocation,
+  so bundles loaded over HTTP by `movate serve` can't bypass the
+  static gate. Denied models short-circuit before any provider call —
+  zero cost incurred for a forbidden run.
+
+All three fields are optional; an absent or empty `policy:` block is the
+permissive default (no restrictions). The policy can only tighten —
+the runtime ceiling is `min(agent.budget.max_cost_usd_per_run, policy)`
+so an agent's authored budget can never relax the org cap.
 
 ## Development
 

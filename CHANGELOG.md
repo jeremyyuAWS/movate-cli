@@ -5,6 +5,70 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Model policy enforcement (v1.0 stage 3)
+
+**Production-grade governance for which providers / models / cost
+ceilings an agent may use.** The `policy:` block on `movate.yaml`
+declares the rules; movate enforces them at two concentric layers so
+a bundle can't slip past the gate.
+
+- **`policy:` block on `movate.yaml`** — three optional fields, all
+  permissive by default (an absent or empty block = no restrictions,
+  preserving v0.x behavior for projects that haven't opted in):
+  * `allowed_providers: [openai, azure, anthropic]` — provider
+    *prefixes* (the part before `/` in a LiteLLM model string).
+    Empty list = no restriction.
+  * `deny_models: [openai/gpt-3.5-turbo]` — explicit full-model
+    blocklist. Takes precedence over `allowed_providers` so an
+    operator can pin out specific revisions even within an allowed
+    provider (e.g. deny `openai/gpt-4-0314` while keeping
+    `openai/gpt-4o-mini`).
+  * `max_cost_per_run_usd: 0.50` — hard ceiling on per-run cost. The
+    runtime enforces `min(agent.budget.max_cost_usd_per_run, policy)`
+    so an agent's authored budget can never relax the org cap.
+- **`ModelPolicy.check_model(provider)`** — returns `None` (allowed)
+  or a human-readable violation string. Pure function; the rest of
+  the integration composes it.
+- **`ModelPolicy.check_agent(spec)`** — aggregates violations across
+  primary + every fallback + budget in a single pass. Operator fixes
+  everything at once instead of playing whack-a-mole.
+- **`movate validate <agent>`** — static check on every agent.yaml
+  before merge. Exits 2 with a per-violation list (`primary model:
+  ...`, `fallback 'X': ...`, `budget=Y exceeds policy ceiling Z`)
+  plus a pointer back to `movate.yaml: policy`. Compliant agents see
+  a `policy: ✓ compliant` line in the validate output so the operator
+  knows the check actually ran.
+- **`Executor.execute()` entry** — runtime re-check at every
+  invocation (the bundle loaded by `movate serve` over HTTP never hit
+  `validate`, so the runtime layer is the actual security boundary).
+  Denied models raise `PolicyViolationError` BEFORE any provider call
+  — zero cost incurred for a forbidden model. The failure surfaces
+  as terminal `policy_violation` status and is persisted to the
+  `failures` table for audit.
+- **`PolicyViolationError`** + `FailureType.POLICY_VIOLATION` —
+  typed error, no retry, no fallback (the fallback chain is itself
+  policy-checked, so falling back to another denied model would just
+  hit the same wall). New entry in `DEFAULT_RETRY` for completeness.
+- **`bench`-friendly** — when `model_override` is passed to
+  `execute()` (the bench / compare flow), only the override is
+  checked, not the agent's fallbacks (which are already disabled in
+  override mode). Aligns the policy semantics with the existing
+  fallback-disabling behavior.
+- **`movate.yaml` example** — the repo's own `movate.yaml` ships
+  with a commented `policy:` block as a copy-paste template.
+- 21 new tests across `tests/test_policy.py` covering: permissive
+  default, allowed_providers prefix matching, deny_models precedence,
+  multi-violation aggregation, budget-ceiling check, `effective_max_cost`
+  min math, `movate.yaml` round-trip, executor enforcement
+  (denied-primary short-circuits provider call, denied fallback,
+  allowed override skips fallback policy check, budget ceiling
+  tightens), and `movate validate` CLI integration (compliant exits
+  0, three violation types each exit 2 with the right pointer).
+
+**What's left for v1.0:** stage 4 — tenant isolation audit. With
+stages 1 (Bicep), 2 (`movate deploy`), and 3 (model policy) done,
+v1.0 is one focused audit pass away from feature-complete.
+
 ### Added — `movate deploy` + GitHub Actions deploy workflow (v1.0 stage 2)
 
 **Closes the `git push release/* → ACA-deployed service` loop.** Stage 1

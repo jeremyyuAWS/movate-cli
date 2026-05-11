@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 
+from movate.core.config import load_project_config
 from movate.core.executor import Executor
 from movate.providers.base import BaseLLMProvider
 from movate.providers.litellm import LiteLLMProvider
@@ -35,6 +36,10 @@ async def build_local_runtime(*, mock: bool) -> LocalRuntime:
     await storage.init()
     tracer = build_tracer()
     pricing = load_pricing()
+    # Load the project policy once per CLI invocation. Permissive default
+    # if movate.yaml is absent or has no `policy:` block — local-only
+    # devs never trip a policy check they didn't set up.
+    project_cfg = load_project_config()
 
     provider: BaseLLMProvider = MockProvider() if mock else LiteLLMProvider()
 
@@ -44,6 +49,7 @@ async def build_local_runtime(*, mock: bool) -> LocalRuntime:
         storage=storage,
         tracer=tracer,
         tenant_id="local",
+        policy=project_cfg.policy,
     )
     return LocalRuntime(executor=executor, provider=provider, storage=storage, tracer=tracer)
 

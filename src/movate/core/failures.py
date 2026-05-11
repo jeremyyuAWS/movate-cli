@@ -20,6 +20,7 @@ class FailureType(StrEnum):
     AUTH_ERROR = "auth_error"
     CONTENT_FILTER = "content_filter"
     COST_BUDGET_EXCEEDED = "cost_budget_exceeded"
+    POLICY_VIOLATION = "policy_violation"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,11 @@ DEFAULT_RETRY: dict[FailureType, RetryRule] = {
     FailureType.AUTH_ERROR: RetryRule(1, (), fallback_on_exhaust=False),
     FailureType.CONTENT_FILTER: RetryRule(1, (), fallback_on_exhaust=False),
     FailureType.COST_BUDGET_EXCEEDED: RetryRule(1, (), fallback_on_exhaust=False),
+    # Policy violations are deterministic — a model that's denied stays
+    # denied. No retry, no fallback (the fallback chain itself is
+    # policy-checked, so falling back to another denied model would
+    # just hit the same wall).
+    FailureType.POLICY_VIOLATION: RetryRule(1, (), fallback_on_exhaust=False),
 }
 
 
@@ -100,4 +106,21 @@ class ContentFilterError(MovateError):
 
 class BudgetExceededError(MovateError):
     failure_type = FailureType.COST_BUDGET_EXCEEDED
+    retryable = False
+
+
+class PolicyViolationError(MovateError):
+    """An ``agent.yaml`` or runtime model choice violates the project's
+    ``policy:`` block (e.g. provider not in ``allowed_providers``, model
+    in ``deny_models``, budget above ``max_cost_per_run_usd`` ceiling).
+
+    Caught at two layers:
+
+    * ``movate validate <agent>`` — static check; fails fast at parse time
+      with the operator pointer ``See movate.yaml: policy``.
+    * ``Executor.execute()`` entry — runtime check; catches a runtime-loaded
+      bundle (e.g. one served via ``movate serve``) that skipped validate.
+    """
+
+    failure_type = FailureType.POLICY_VIOLATION
     retryable = False
