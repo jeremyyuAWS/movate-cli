@@ -7,7 +7,10 @@ Block PR merges when the eval suite regresses. Two pieces compose here:
    for ephemeral CI runners (sqlite is per-runner, JSON files travel with
    the repo).
 2. An example GitHub Actions workflow at
-   [.github/workflows/eval-gate.example.yml](../.github/workflows/eval-gate.example.yml).
+   [examples/ci/eval-gate.yml](../examples/ci/eval-gate.yml). It lives
+   under `examples/` rather than `.github/workflows/` so it doesn't
+   auto-fire inside `movate-cli` itself — copy it into your consumer
+   repo's `.github/workflows/` directory to activate.
 
 This doc explains the flow and how to wire it in your own repo.
 
@@ -53,7 +56,7 @@ In your *consumer* repo (the one holding agents, not movate-cli itself):
 2. **Copy the example workflow**:
 
     ```bash
-    cp /path/to/movate-cli/.github/workflows/eval-gate.example.yml \
+    cp /path/to/movate-cli/examples/ci/eval-gate.yml \
        .github/workflows/eval-gate.yml
     ```
 

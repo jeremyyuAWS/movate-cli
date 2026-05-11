@@ -122,8 +122,9 @@ movate eval ./faq-agent --mock \
   --regression-tolerance 0.05
 ```
 
-Full CI workflow at
-[.github/workflows/eval-gate.example.yml](.github/workflows/eval-gate.example.yml).
+Full CI workflow template at
+[examples/ci/eval-gate.yml](examples/ci/eval-gate.yml) — copy it into
+`.github/workflows/` in your consumer repo to activate.
 Walkthrough: [docs/ci-eval-gate.md](docs/ci-eval-gate.md).
 
 ### 5. Debug a regression with replay

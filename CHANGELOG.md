@@ -1158,12 +1158,14 @@ between two real processes.
   committed baseline current. Creates parent directories so users can
   drop the file at `.movate/<agent>/baseline.json` without pre-creating
   the dir.
-- Example workflow at
-  [.github/workflows/eval-gate.example.yml](.github/workflows/eval-gate.example.yml)
+- Example workflow template at
+  [examples/ci/eval-gate.yml](examples/ci/eval-gate.yml)
   with `gate-pr` (PR-time regression check) and `refresh-baseline`
-  (main-branch refresh) jobs. Docs at
-  [docs/ci-eval-gate.md](docs/ci-eval-gate.md). Six new tests cover
-  load, write, mutual exclusion, missing/malformed JSON.
+  (main-branch refresh) jobs. Lives under `examples/` rather than
+  `.github/workflows/` so GitHub Actions doesn't auto-execute it inside
+  movate-cli — copy it into your consumer repo's `.github/workflows/`
+  directory to activate. Docs at [docs/ci-eval-gate.md](docs/ci-eval-gate.md).
+  Six new tests cover load, write, mutual exclusion, missing/malformed JSON.
 
 [0.5.0]: https://github.com/jeremyyuAWS/movate-cli/releases/tag/v0.5.0
 
