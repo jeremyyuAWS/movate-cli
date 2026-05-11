@@ -20,6 +20,12 @@ TEMPLATES: dict[str, str] = {
     "summarizer": "summarizer_agent",
     # Classifier agent: text + label list → chosen label (exact-match-friendly).
     "classifier": "classifier_agent",
+    # Chatbot: single message → single reply. Designed for `movate chat` with
+    # conversation memory (each turn sees prior turns via the REPL's history).
+    "chatbot": "chatbot_agent",
+    # Structured-field extractor: free-form text → strict typed fields.
+    # Demonstrates strict output-schema enforcement for LLM extraction.
+    "extractor": "extractor_agent",
 }
 
 

@@ -32,6 +32,8 @@ def init(
       [bold]faq[/bold]        — question → answer + confidence
       [bold]summarizer[/bold] — text + max_words → summary + word_count
       [bold]classifier[/bold] — text + labels → chosen label
+      [bold]chatbot[/bold]    — message → reply (designed for `movate chat`)
+      [bold]extractor[/bold]  — text → strict typed fields (intent, urgency, contact)
     """
     try:
         template_dir = get_template_path(template)
