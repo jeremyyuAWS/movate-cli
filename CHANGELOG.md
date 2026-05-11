@@ -5,6 +5,59 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Prompt linter in `movate validate` (post-v1.0)
+
+**Catches real prompt bugs at validate time, not at the first
+provider call.** Four rules cover the most common ways an
+``agent.yaml`` works in scaffolding but fails in production.
+
+- **`core/prompt_linter.py`** — pure-function rules + ``LintIssue``
+  dataclass + ``lint_prompt(bundle)`` orchestrator. Each rule is
+  isolated so adding a new one is one function + one test.
+- **Rules shipped:**
+  * ``UNDECLARED_INPUT_REF`` (error) — the template references
+    ``{{ input.X }}`` but ``X`` isn't in the input schema's
+    ``properties``. Renders to ``StrictUndefined`` at runtime → the
+    real `render_prompt` raises. Catches it before deploy via
+    Jinja2 AST analysis (only matches actual Getattr nodes, not
+    string literals).
+  * ``MISSING_JSON_INSTRUCTION`` (warning) — output schema is an
+    object but prompt doesn't mention "json" anywhere. Models wrap
+    JSON in prose without an explicit instruction. Case-insensitive
+    match.
+  * ``NO_OUTPUT_SCHEMA_REFERENCE`` (warning) — prompt mentions NONE
+    of the output schema's field names. Models hallucinate field
+    names when the expected shape isn't visible in the prompt.
+  * ``EMPTY_PROMPT`` (error) — whitespace-only prompt. Scaffolding
+    leftover that somehow shipped.
+  * ``TINY_PROMPT`` (warning) — under 40 chars of non-whitespace
+    content. Scaffolding stub.
+- **`movate validate <agent>`** runs lint automatically. Errors
+  always exit 2; warnings print but don't fail by default.
+  * ``--strict`` — promote warnings to errors (CI gate setting).
+  * ``--no-lint`` — skip the linter (schema + policy checks still
+    run). Escape hatch for half-baked WIP agents.
+- **Output format:** errors first (red ✗ + code + message + dim
+  hint line), then warnings (yellow ! + same shape). Each issue
+  carries a stable ``code`` so CI annotations can filter or
+  suppress specific rules. On a clean pass, validate prints a
+  ``lint: ✓ clean`` row to confirm the linter ran.
+- 19 new tests in ``tests/test_prompt_linter.py``: each rule gets
+  a happy-path + finding test; the default scaffold passes every
+  rule (critical — if the scaffold tripped the linter, every
+  `movate init` would surface confusing warnings); CLI exit-code
+  + flag tests for ``--strict`` / ``--no-lint`` / errors-vs-warnings
+  semantics.
+
+**Operator effect:** an engineer copies the scaffold, renames the
+input schema field from ``text`` → ``question`` but forgets to
+update the prompt's ``{{ input.text }}``. Before this:
+``movate validate`` passes; first real ``movate run`` raises
+``UndefinedError`` mid-render. After this: `movate validate`
+reports `UNDECLARED_INPUT_REF: prompt references {{ input.text }}
+but 'text' is not in the input schema's properties` and exits 2.
+The bug is caught before commit.
+
 ### Added — Per-tenant monthly cost ceiling (v1.0)
 
 **Closes the runaway-cost gap.** Before this, a misbehaving agent or a
