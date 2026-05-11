@@ -23,6 +23,7 @@ from rich.console import Console
 
 from movate.cli._runtime import build_local_runtime, shutdown_runtime
 from movate.core.models import JobRecord, JobStatus
+from movate.core.notify import build_dispatcher
 from movate.runtime.dispatch import DispatchOutcome, WorkerDispatch
 from movate.runtime.registry import scan_agents, scan_workflows
 from movate.runtime.worker import Worker, WorkerConfig
@@ -143,11 +144,15 @@ async def _run_worker(
             f"[dim]({duration_ms}ms · {job.job_id[:8]})[/dim]"
         )
 
+    notifier = build_dispatcher()
+    err.print(f"[dim]notifications: {notifier.name} backend[/dim]")
+
     worker_obj = Worker(
         storage=rt.storage,
         dispatch=dispatch,
         config=config,
         on_job_complete=on_job_complete,
+        notifier=notifier,
     )
 
     stop_event = asyncio.Event()

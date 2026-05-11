@@ -34,6 +34,7 @@ from movate.core.models import (
     JobRecord,
     JobStatus,
 )
+from movate.core.notify import NotificationDispatcher
 from movate.runtime.dispatch import DispatchOutcome, WorkerDispatch
 from movate.storage.base import StorageProvider
 
@@ -63,6 +64,7 @@ class Worker:
         dispatch: WorkerDispatch,
         config: WorkerConfig | None = None,
         on_job_complete: Callable[[JobRecord, DispatchOutcome, int], None] | None = None,
+        notifier: NotificationDispatcher | None = None,
     ) -> None:
         self._storage = storage
         self._dispatch = dispatch
@@ -72,6 +74,12 @@ class Worker:
         Fires after each job completes (including ERROR / SAFETY_BLOCKED
         terminals); CLI uses it to render a per-job line in the live
         worker feed without coupling Worker to UI."""
+        self._notifier = notifier
+        """Optional :class:`NotificationDispatcher`. Fires after the
+        job transitions to a terminal status; receives the post-update
+        :class:`JobRecord` (with ``notify_email`` + final status set).
+        Errors inside the dispatcher are swallowed — courtesy, not
+        load-bearing."""
 
     async def run_one_cycle(self) -> JobRecord | None:
         """Claim one job (if any), dispatch, update. Returns the
@@ -136,6 +144,25 @@ class Worker:
                 self._on_job_complete(job, outcome, duration_ms)
             except Exception:
                 logger.warning("on_job_complete callback raised", exc_info=True)
+
+        # Fire-and-await notification AFTER the update has committed.
+        # The dispatcher's contract is "never raise"; we still wrap to
+        # belt-and-suspender any future implementation that slips and
+        # raises something the worker shouldn't die on.
+        if self._notifier is not None and job.notify_email:
+            try:
+                # Use the post-update view so the email reflects the
+                # terminal status, not the RUNNING snapshot we have here.
+                terminal_view = await self._storage.get_job(job.job_id)
+                if terminal_view is not None:
+                    await self._notifier.notify_terminal(terminal_view)
+            except Exception:
+                logger.warning(
+                    "notify_dispatcher_raised job_id=%s — job state "
+                    "is unchanged; this is notification path only",
+                    job.job_id,
+                    exc_info=True,
+                )
         return job
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:

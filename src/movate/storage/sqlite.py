@@ -168,6 +168,9 @@ _MIGRATIONS = [
         "CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_active "
         "ON api_keys(tenant_id) WHERE revoked_at IS NULL"
     ),
+    # post-v1.0: per-job email notification. SMS deferred — needs
+    # regulatory + phone-number provisioning out of band of code.
+    "ALTER TABLE jobs ADD COLUMN notify_email TEXT",
 ]
 
 
@@ -402,8 +405,9 @@ class SqliteProvider:
             INSERT INTO jobs (
                 job_id, tenant_id, kind, target, status, input,
                 result_run_id, error, api_key_id,
-                created_at, claimed_at, completed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, claimed_at, completed_at,
+                notify_email
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.job_id,
@@ -418,6 +422,7 @@ class SqliteProvider:
                 job.created_at.isoformat(),
                 job.claimed_at.isoformat() if job.claimed_at else None,
                 job.completed_at.isoformat() if job.completed_at else None,
+                job.notify_email,
             ),
         )
         await self._db.commit()
@@ -675,6 +680,7 @@ def _row_to_job(row: aiosqlite.Row) -> JobRecord:
         created_at=datetime.fromisoformat(row["created_at"]),
         claimed_at=datetime.fromisoformat(row["claimed_at"]) if row["claimed_at"] else None,
         completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+        notify_email=row["notify_email"],
     )
 
 

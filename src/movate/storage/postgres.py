@@ -126,8 +126,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     api_key_id    TEXT,
     created_at    TIMESTAMPTZ NOT NULL,
     claimed_at    TIMESTAMPTZ,
-    completed_at  TIMESTAMPTZ
+    completed_at  TIMESTAMPTZ,
+    notify_email  TEXT
 );
+-- Upgrade path for PG instances created pre-notify_email. PG natively
+-- supports ADD COLUMN IF NOT EXISTS so this is idempotent on every init.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notify_email TEXT;
 CREATE INDEX IF NOT EXISTS idx_jobs_queue_head
     ON jobs(tenant_id, created_at) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_jobs_tenant_created
@@ -408,8 +412,9 @@ class PostgresProvider:
             INSERT INTO jobs (
                 job_id, tenant_id, kind, target, status, input,
                 result_run_id, error, api_key_id,
-                created_at, claimed_at, completed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                created_at, claimed_at, completed_at,
+                notify_email
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             """,
             job.job_id,
             job.tenant_id,
@@ -423,6 +428,7 @@ class PostgresProvider:
             job.created_at,
             job.claimed_at,
             job.completed_at,
+            job.notify_email,
         )
 
     async def get_job(self, job_id: str) -> JobRecord | None:
@@ -656,6 +662,7 @@ def _row_to_job(row: asyncpg.Record) -> JobRecord:
         created_at=row["created_at"],
         claimed_at=row["claimed_at"],
         completed_at=row["completed_at"],
+        notify_email=row["notify_email"],
     )
 
 

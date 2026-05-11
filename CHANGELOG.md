@@ -5,6 +5,64 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Server-side email notifications (post-v1.0)
+
+**Per-job email when work finishes.** Closes the "kick off a long
+remote job, get pinged when done" loop without requiring the user to
+keep their laptop awake polling. Server-side: the runtime workers
+fire SMTP after each terminal status transition.
+
+- **Schema:** `notify_email TEXT` column on `jobs`. Sqlite via
+  idempotent `ALTER TABLE` in `_MIGRATIONS`; postgres via
+  `ADD COLUMN IF NOT EXISTS` in `_SCHEMA` (PG-native idempotency).
+  `JobRecord` Pydantic + `RunSubmission` wire type + `JobView`
+  response all surface the field. The HTTP handler threads it from
+  the request body into the persisted record.
+- **`core/notify.py`** — pluggable `NotificationDispatcher` Protocol:
+  * `ConsoleBackend` — logs the intent at INFO. Default; safe in
+    dev / tests / misconfigured deployments. Operators see what
+    would have been sent if SMTP were wired up.
+  * `SmtpEmailBackend` — sends via stdlib `smtplib`. Vendor-agnostic:
+    ACS Email, SendGrid, Mailgun, AWS SES, Gmail all speak SMTP. The
+    operator picks via env vars (`MOVATE_SMTP_HOST`, `_PORT`, `_USER`,
+    `_PASSWORD`, `_FROM`, `_USE_SSL`, `_TIMEOUT_SECONDS`). STARTTLS
+    upgrade on port 587, full SSL on port 465. Constructor takes
+    explicit args so tests don't depend on env state.
+- **`build_dispatcher()`** factory — env-driven backend selection.
+  `MOVATE_SMTP_HOST` unset → `ConsoleBackend`. Set → `SmtpEmailBackend`.
+  Bad config (non-int port, etc.) falls back to console with a
+  warning instead of crashing the worker.
+- **Worker integration** — `Worker.__init__` now accepts an optional
+  `notifier: NotificationDispatcher`. After each terminal
+  `update_job`, the worker re-fetches the post-update view (so the
+  email sees the final status, not the RUNNING snapshot from
+  `claim_next_job`) and fires the dispatcher. Wrapped in
+  try/except so a buggy dispatcher can't sink the loop —
+  notification is courtesy, never load-bearing.
+- **`movate submit --notify-email <addr>`** — threads through
+  `MovateClient.submit_job(..., notify_email=...)` → `RunSubmission`
+  → handler → `JobRecord` → worker → dispatcher → SMTP. The worker
+  prints `notifications: smtp backend` (or `console`) at startup so
+  operators see immediately which path is active.
+- 14 new tests across `build_dispatcher` env selection, both backends
+  (ConsoleBackend logs / SmtpEmailBackend sends via a faked
+  `smtplib.SMTP`), STARTTLS-skip-on-SSL, SMTP error swallowing,
+  worker fires dispatcher on terminal, worker skips dispatcher when
+  no email, worker swallows dispatcher exceptions, schema round-trip
+  preserves the column.
+
+**Subject line example:**
+> `[movate] ✓ agent/faq-agent — success`
+
+**Body:** job id, kind, target, tenant, run id, elapsed time, error
+info if applicable. Plain text — works in every mail client without
+HTML rendering quirks.
+
+**SMS deferred.** Phone-number provisioning + carrier registration
+(A2P 10DLC for US numbers, equivalents elsewhere) is multi-week
+business setup. Code shape is identical (`notify_sms` column +
+Twilio/ACS SMS backend); skipping until a customer specifically asks.
+
 ### Added — Remote-runtime CLI: targets, `submit`, `jobs`
 
 **The dev-team intuitive workflow for deployed runtimes.** Stop typing

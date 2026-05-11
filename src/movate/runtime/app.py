@@ -130,6 +130,7 @@ def build_app(
             status=JobStatus.QUEUED,
             input=body.input,
             api_key_id=ctx.api_key_id,
+            notify_email=body.notify_email,
         )
         store: StorageProvider = request.app.state.storage
         await store.save_job(job)

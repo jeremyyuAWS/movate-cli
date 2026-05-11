@@ -93,6 +93,15 @@ def submit(
         help="Desktop notification when --wait completes (macOS terminal-notifier "
         "/ osascript, Linux notify-send). No-op on unsupported platforms.",
     ),
+    notify_email: str = typer.Option(
+        None,
+        "--notify-email",
+        help=(
+            "Email address the server-side worker emails when the job "
+            "reaches a terminal status. Worker must have SMTP configured "
+            "(MOVATE_SMTP_HOST + creds) or it falls back to logging only."
+        ),
+    ),
     output_format: str = typer.Option("table", "--output", "-o", help="table | json"),
 ) -> None:
     """Queue a job at a deployed runtime and (optionally) wait for completion.
@@ -140,6 +149,7 @@ def submit(
             timeout=timeout,
             poll_interval=poll_interval,
             notify=notify,
+            notify_email=notify_email,
             output_format=output_format,
         )
     )
@@ -162,12 +172,18 @@ async def _submit(
     timeout: float,
     poll_interval: float,
     notify: bool,
+    notify_email: str | None,
     output_format: str,
 ) -> None:
     async with MovateClient(base_url=base_url, api_key=token) as client:
         try:
             with spinner(f"submitting to {target_name}..."):
-                accepted = await client.submit_job(kind=kind, target=agent, input=input_payload)
+                accepted = await client.submit_job(
+                    kind=kind,
+                    target=agent,
+                    input=input_payload,
+                    notify_email=notify_email,
+                )
         except MovateClientError as exc:
             err.print(f"[red]✗ submit failed:[/red] {exc}")
             raise typer.Exit(code=1) from None

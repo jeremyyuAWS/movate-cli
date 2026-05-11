@@ -384,6 +384,13 @@ class JobRecord(BaseModel):
     created_at: datetime = Field(default_factory=_now)
     claimed_at: datetime | None = None
     completed_at: datetime | None = None
+    notify_email: str | None = None
+    """Optional email address to notify when the job transitions to a
+    terminal status. The worker fires-and-forgets the notification via
+    the configured :class:`NotificationDispatcher` — failure to
+    deliver never re-queues the job. SMS notifications are deferred
+    to a future release (phone-number provisioning + regulatory
+    approval are out of band of code)."""
 
 
 # ---------------------------------------------------------------------------

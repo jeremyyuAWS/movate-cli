@@ -37,6 +37,14 @@ class RunSubmission(BaseModel):
     kind: JobKind
     target: str = Field(..., min_length=1)
     input: dict[str, Any]
+    notify_email: str | None = Field(
+        default=None,
+        description=(
+            "Optional email address. If set, the worker emails this address "
+            "when the job reaches a terminal status. Notification failure "
+            "is logged but never re-queues the job."
+        ),
+    )
 
 
 class RunAccepted(BaseModel):
@@ -69,6 +77,7 @@ class JobView(BaseModel):
     created_at: datetime
     claimed_at: datetime | None = None
     completed_at: datetime | None = None
+    notify_email: str | None = None
 
     @classmethod
     def from_record(cls, record: JobRecord) -> JobView:
@@ -83,6 +92,7 @@ class JobView(BaseModel):
             created_at=record.created_at,
             claimed_at=record.claimed_at,
             completed_at=record.completed_at,
+            notify_email=record.notify_email,
         )
 
 
