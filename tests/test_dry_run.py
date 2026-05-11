@@ -15,6 +15,7 @@ Contracts verified here:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -25,6 +26,15 @@ from movate.cli.main import app as cli_app
 from movate.testing import scaffold_agent
 
 runner = CliRunner(mix_stderr=False)
+
+# Strip ANSI escape codes before substring assertions — Rich's --help
+# renderer can inject them mid-token in some CI environments. Same
+# helper appears in tests/test_watch.py and tests/test_diff.py.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -217,8 +227,5 @@ def test_dry_run_rejects_workflow_path(tmp_path: Path) -> None:
 def test_dry_run_flag_appears_in_help() -> None:
     r = runner.invoke(cli_app, ["run", "--help"])
     assert r.exit_code == 0
-    # ANSI codes can interleave inside the flag text; strip whitespace
-    # + ANSI for the substring assertion (mirrors the pattern in
-    # tests/test_watch.py).
-    plain = r.stdout.replace("\n", "").replace(" ", "")
+    plain = _strip_ansi(r.stdout)
     assert "--dry-run" in plain

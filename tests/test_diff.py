@@ -16,6 +16,7 @@ The matrix below covers the contracts the renderers depend on:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,16 @@ from movate.core.diff import (
 from movate.testing import scaffold_agent
 
 runner = CliRunner(mix_stderr=False)
+
+# Rich's --help renderer can interleave ANSI escape codes mid-token in some
+# CI environments, breaking literal substring assertions on flag names.
+# Strip the codes before checking. Same pattern lives in tests/test_watch.py
+# and tests/test_dry_run.py.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -276,10 +287,10 @@ def test_markdown_cell_escapes_pipes(tmp_path: Path) -> None:
 def test_cli_diff_help_renders() -> None:
     r = runner.invoke(cli_app, ["diff", "--help"])
     assert r.exit_code == 0
-    plain = r.stdout
+    plain = _strip_ansi(r.stdout)
     assert "diff" in plain.lower()
-    assert "--prompt-only" in plain.replace("\n", "").replace(" ", "")
-    assert "--fail-on-change" in plain.replace("\n", "").replace(" ", "")
+    assert "--prompt-only" in plain
+    assert "--fail-on-change" in plain
 
 
 @pytest.mark.unit
