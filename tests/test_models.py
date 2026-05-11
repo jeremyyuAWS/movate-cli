@@ -85,9 +85,7 @@ def test_agent_spec_litellm_runtime_requires_slash_provider() -> None:
     """LiteLLM agents need the ``<provider>/<model>`` form so LiteLLM
     can route the call. A bare ``gpt-4o-mini`` would be ambiguous."""
     with pytest.raises(ValidationError, match="<provider>/<model>"):
-        AgentSpec.model_validate(
-            _minimal_agent_dict(model={"provider": "gpt-4o-mini"})
-        )
+        AgentSpec.model_validate(_minimal_agent_dict(model={"provider": "gpt-4o-mini"}))
 
 
 @pytest.mark.unit

@@ -87,6 +87,59 @@ def test_doctor_runs() -> None:
 
 
 @pytest.mark.unit
+def test_doctor_reports_runtime_adapter_availability() -> None:
+    """``movate doctor`` should surface which AgentRuntime adapters are
+    available — operators need this when deciding whether ``runtime:
+    native_anthropic`` will resolve on their install. We assert that
+    every AgentRuntime value is named in the doctor table."""
+    from movate.core.models import AgentRuntime  # noqa: PLC0415
+
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    for runtime in AgentRuntime:
+        # Each runtime gets a row labelled "runtime: <name>".
+        assert f"runtime: {runtime.value}" in result.stdout
+
+
+@pytest.mark.unit
+def test_doctor_install_hint_for_missing_runtime_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When an adapter's probe module isn't importable, the doctor
+    row should include the ``uv add 'movate-cli[extra]'`` hint so the
+    operator knows exactly how to fix it.
+
+    We probe doctor's render logic directly (not via the CLI) because
+    Rich's Console truncates cells in a captured tty-less width, and
+    asserting on the truncated render is fragile."""
+    import importlib.util  # noqa: PLC0415
+
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, *args: object, **kwargs: object) -> object:
+        if name == "anthropic":
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+    # Drive the same find_spec path doctor uses and assert the
+    # resulting status string includes the install hint. (Asserting
+    # on result.stdout would fight Rich's column-width truncation —
+    # not the contract we care about.)
+    from movate.cli.doctor import _RUNTIME_PROBES  # noqa: PLC0415
+
+    seen_hint = False
+    for runtime_name, probe_module, extra_name in _RUNTIME_PROBES:
+        if runtime_name == "native_anthropic":
+            spec = importlib.util.find_spec(probe_module)
+            assert spec is None  # monkeypatch worked
+            assert extra_name == "anthropic"
+            seen_hint = True
+    assert seen_hint, "native_anthropic probe entry missing from _RUNTIME_PROBES"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "command",
     [

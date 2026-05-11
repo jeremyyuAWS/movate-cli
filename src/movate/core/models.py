@@ -216,12 +216,11 @@ class AgentSpec(BaseModel):
                     f"`runtime: native_anthropic` / `native_openai` / "
                     f"`langchain` to use a different naming convention)"
                 )
-        elif self.runtime == AgentRuntime.LANGCHAIN:
-            if ":" not in provider:
-                raise ValueError(
-                    f"provider {provider!r} for runtime: langchain must be a "
-                    f"Python entry-point spec like 'package.module:function'"
-                )
+        elif self.runtime == AgentRuntime.LANGCHAIN and ":" not in provider:
+            raise ValueError(
+                f"provider {provider!r} for runtime: langchain must be a "
+                f"Python entry-point spec like 'package.module:function'"
+            )
         # Native runtimes (anthropic / openai) accept bare or prefixed —
         # adapters tolerate both via pricing_key() normalization.
         return self
