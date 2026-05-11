@@ -41,12 +41,15 @@ FROM base AS deps
 COPY pyproject.toml uv.lock ./
 # --all-extras installs runtime + langfuse + otel for full observability.
 # --no-dev keeps the image lean (no pytest, no mypy, no ruff).
-RUN uv sync --all-extras --no-dev --frozen
+# --no-install-project skips building the movate wheel here — that needs
+# README.md + src/, which we deliberately don't copy until the next stage
+# to keep this slow layer cached across source-only changes. The app
+# stage finalizes the install once those files are present.
+RUN uv sync --all-extras --no-dev --frozen --no-install-project
 
 # ---------------------------------------------------------------------------
-# Stage 3: app — copy the source + reinstall to bring the editable
-# package into the venv. uv sync above already created a placeholder;
-# this step finalizes it after src/ is present.
+# Stage 3: app — copy the source + README, then complete the sync to
+# install the movate project itself into the venv built above.
 # ---------------------------------------------------------------------------
 FROM deps AS app
 
