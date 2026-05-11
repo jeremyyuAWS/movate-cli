@@ -19,6 +19,7 @@ path end-to-end without subprocess gymnastics.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC
 from pathlib import Path
 from uuid import uuid4
 
@@ -107,6 +108,54 @@ async def test_client_get_job_unknown_id_404(auth_pair) -> None:
     async with _client_for(app, key) as client:
         with pytest.raises(MovateClientError) as exc_info:
             await client.get_job("no-such-job")
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.code == "not_found"
+
+
+@pytest.mark.unit
+async def test_client_get_run_round_trip(auth_pair) -> None:
+    """End-to-end: client.get_run() fetches a persisted run and returns
+    its ``output`` — the field ``JobView`` deliberately omits."""
+    from movate.core.models import Metrics, RunRecord, TokenUsage  # noqa: PLC0415
+
+    storage, app, key, tenant_id = auth_pair
+    run = RunRecord(
+        run_id="r-42",
+        job_id="j-42",
+        tenant_id=tenant_id,
+        agent="alpha",
+        agent_version="0.1.0",
+        prompt_hash="sha256:cafebabe",
+        provider="openai/gpt-4o-mini",
+        provider_version="v1",
+        pricing_version="2024-09",
+        status=JobStatus.SUCCESS,
+        input={"q": "hi"},
+        output={"answer": "hello"},
+        metrics=Metrics(
+            latency_ms=42,
+            tokens=TokenUsage(input=5, output=3),
+            cost_usd=0.00042,
+            provider="openai/gpt-4o-mini",
+            pricing_version="2024-09",
+        ),
+    )
+    await storage.save_run(run)
+
+    async with _client_for(app, key) as client:
+        view = await client.get_run("r-42")
+    assert view.run_id == "r-42"
+    assert view.output == {"answer": "hello"}
+    assert view.metrics.cost_usd == 0.00042
+
+
+@pytest.mark.unit
+async def test_client_get_run_unknown_id_404(auth_pair) -> None:
+    """A run id that doesn't exist surfaces as a clean MovateClientError."""
+    _, app, key, _ = auth_pair
+    async with _client_for(app, key) as client:
+        with pytest.raises(MovateClientError) as exc_info:
+            await client.get_run("no-such-run")
     assert exc_info.value.status_code == 404
     assert exc_info.value.code == "not_found"
 
@@ -473,6 +522,149 @@ def test_cli_jobs_list_agents(cli_env) -> None:
 
     payload = json.loads(result.stdout)
     assert "agents" in payload
+
+
+@pytest.mark.unit
+def test_emit_terminal_json_wraps_job_and_run() -> None:
+    """``submit --wait --output json`` returns a single ``{job, run}``
+    envelope so script consumers see both the job-level state AND the
+    actual agent output in one parse. ``run`` is ``null`` when no run
+    record was produced (dispatch-time failure)."""
+    import io  # noqa: PLC0415
+    import json  # noqa: PLC0415
+    from contextlib import redirect_stdout  # noqa: PLC0415
+    from datetime import datetime  # noqa: PLC0415
+
+    from movate.cli.submit import _emit_terminal  # noqa: PLC0415
+    from movate.core.models import JobKind, JobStatus, Metrics, TokenUsage  # noqa: PLC0415
+    from movate.runtime.schemas import JobView, RunView  # noqa: PLC0415
+
+    job = JobView(
+        job_id="j-1",
+        kind=JobKind.AGENT,
+        target="alpha",
+        status=JobStatus.SUCCESS,
+        input={"q": "hi"},
+        result_run_id="r-1",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    run = RunView(
+        run_id="r-1",
+        job_id="j-1",
+        agent="alpha",
+        agent_version="0.1.0",
+        prompt_hash="sha256:abc",
+        provider="openai/gpt-4o-mini",
+        provider_version="v1",
+        pricing_version="2024-09",
+        status=JobStatus.SUCCESS,
+        input={"q": "hi"},
+        output={"answer": "hello"},
+        metrics=Metrics(
+            latency_ms=10,
+            tokens=TokenUsage(input=3, output=2),
+            cost_usd=0.0001,
+            provider="openai/gpt-4o-mini",
+            pricing_version="2024-09",
+        ),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _emit_terminal(job, run=run, output_format="json")
+
+    envelope = json.loads(buf.getvalue())
+    assert envelope["job"]["job_id"] == "j-1"
+    assert envelope["job"]["status"] == "success"
+    assert envelope["run"]["run_id"] == "r-1"
+    assert envelope["run"]["output"] == {"answer": "hello"}
+
+
+@pytest.mark.unit
+def test_emit_terminal_json_null_run_when_no_run_record() -> None:
+    """A job that errored before producing a run record (e.g. dispatch
+    failure) emits ``run: null`` — callers can branch on that without
+    rescuing a KeyError."""
+    import io  # noqa: PLC0415
+    import json  # noqa: PLC0415
+    from contextlib import redirect_stdout  # noqa: PLC0415
+    from datetime import datetime  # noqa: PLC0415
+
+    from movate.cli.submit import _emit_terminal  # noqa: PLC0415
+    from movate.core.models import ErrorInfo, JobKind, JobStatus  # noqa: PLC0415
+    from movate.runtime.schemas import JobView  # noqa: PLC0415
+
+    job = JobView(
+        job_id="j-2",
+        kind=JobKind.AGENT,
+        target="alpha",
+        status=JobStatus.ERROR,
+        input={},
+        error=ErrorInfo(type="DispatchError", message="agent not found"),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _emit_terminal(job, run=None, output_format="json")
+
+    envelope = json.loads(buf.getvalue())
+    assert envelope["job"]["status"] == "error"
+    assert envelope["run"] is None
+
+
+@pytest.mark.unit
+def test_emit_terminal_table_includes_output_panel(capsys) -> None:
+    """Table mode appends an output panel below the summary so the
+    operator sees what the agent actually wrote without a second command."""
+    from datetime import datetime  # noqa: PLC0415
+
+    from movate.cli.submit import _emit_terminal  # noqa: PLC0415
+    from movate.core.models import JobKind, JobStatus, Metrics, TokenUsage  # noqa: PLC0415
+    from movate.runtime.schemas import JobView, RunView  # noqa: PLC0415
+
+    job = JobView(
+        job_id="j-3",
+        kind=JobKind.AGENT,
+        target="alpha",
+        status=JobStatus.SUCCESS,
+        input={},
+        result_run_id="r-3",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    run = RunView(
+        run_id="r-3",
+        job_id="j-3",
+        agent="alpha",
+        agent_version="0.1.0",
+        prompt_hash="sha256:abc",
+        provider="openai/gpt-4o-mini",
+        provider_version="v1",
+        pricing_version="2024-09",
+        status=JobStatus.SUCCESS,
+        input={},
+        output={"headline": "Approved", "body": "All set."},
+        metrics=Metrics(
+            latency_ms=10,
+            tokens=TokenUsage(input=3, output=2),
+            cost_usd=0.0001,
+            provider="openai/gpt-4o-mini",
+            pricing_version="2024-09",
+        ),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    _emit_terminal(job, run=run, output_format="table")
+    out = capsys.readouterr().out
+    # Output panel header + JSON content both present in the rendered
+    # table — assert on substrings since Rich may wrap or color the
+    # exact whitespace.
+    assert "output" in out
+    assert "Approved" in out
+    assert "All set." in out
+    # Provider + cost rendered in the summary table.
+    assert "openai/gpt-4o-mini" in out
 
 
 @pytest.mark.unit

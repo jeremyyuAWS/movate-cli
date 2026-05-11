@@ -38,6 +38,7 @@ from movate.runtime.schemas import (
     ReadyView,
     RunAccepted,
     RunSubmission,
+    RunView,
 )
 from movate.storage.base import StorageProvider
 
@@ -229,6 +230,26 @@ def build_app(
         if record is None:
             raise not_found("job", job_id)
         return JobView.from_record(record)
+
+    @app.get("/runs/{run_id}", response_model=RunView, tags=["runs"])
+    async def get_run(
+        run_id: str,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> RunView:
+        """Return a single run including its ``output``.
+
+        Companion to ``GET /jobs/{id}`` — ``JobView`` only carries the
+        ``result_run_id`` pointer, not the actual agent output. Callers
+        that want to *see* what the agent produced fetch the job, read
+        ``result_run_id``, then hit this endpoint. Same tenant-scoping
+        story as jobs: 404 on cross-tenant access (never 403, which
+        would leak that the id exists)."""
+        store: StorageProvider = request.app.state.storage
+        record = await store.get_run(run_id, tenant_id=ctx.tenant_id)
+        if record is None:
+            raise not_found("run", run_id)
+        return RunView.from_record(record)
 
     return app
 

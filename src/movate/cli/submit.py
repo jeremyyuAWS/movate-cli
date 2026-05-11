@@ -39,7 +39,7 @@ from movate.core.user_config import (
     resolve_bearer_token,
     resolve_target,
 )
-from movate.runtime.schemas import JobView
+from movate.runtime.schemas import JobView, RunView
 
 stdout = Console()
 err = Console(stderr=True)
@@ -216,7 +216,22 @@ async def _submit(
             err.print(f"[red]✗ poll failed:[/red] {exc}")
             raise typer.Exit(code=1) from None
 
-        _emit_terminal(final, output_format=output_format)
+        # Fetch the run record so we can show the actual LLM output —
+        # JobView only carries pointer state, never the agent's output.
+        # Best-effort: a 404 / transient error here doesn't invalidate
+        # the terminal job state we already have, just degrades the
+        # display.
+        run: RunView | None = None
+        if final.result_run_id:
+            try:
+                run = await client.get_run(final.result_run_id)
+            except MovateClientError as exc:
+                err.print(
+                    f"[dim]could not fetch run {final.result_run_id} "
+                    f"({exc}); showing job-level summary only.[/dim]"
+                )
+
+        _emit_terminal(final, run=run, output_format=output_format)
 
         if notify:
             _desktop_notify(final, target_name=target_name)
@@ -231,9 +246,22 @@ async def _submit(
 # ---------------------------------------------------------------------------
 
 
-def _emit_terminal(view: JobView, *, output_format: str) -> None:
+def _emit_terminal(
+    view: JobView,
+    *,
+    run: RunView | None,
+    output_format: str,
+) -> None:
     if output_format == "json":
-        stdout.print(view.model_dump_json(indent=2), soft_wrap=True, highlight=False)
+        # JSON mode: callers want a single parsable object. Wrap job
+        # + run so they can pick either; ``run`` is null when the job
+        # didn't produce one (e.g. dispatch-time failure before the
+        # worker created a RunRecord).
+        envelope: dict[str, Any] = {
+            "job": view.model_dump(mode="json"),
+            "run": run.model_dump(mode="json") if run else None,
+        }
+        stdout.print(json.dumps(envelope, indent=2), soft_wrap=True, highlight=False)
         return
 
     icon = {
@@ -251,9 +279,28 @@ def _emit_terminal(view: JobView, *, output_format: str) -> None:
     if view.completed_at and view.claimed_at:
         ms = int((view.completed_at - view.claimed_at).total_seconds() * 1000)
         table.add_row("duration", f"{ms}ms (claim → terminal)")
+    if run is not None:
+        # Provider/cost belongs on the same summary so operators see
+        # what model actually answered + what it cost without a
+        # second command. Round cost to 4 decimals — anything tighter
+        # is noise given pricing-table granularity.
+        table.add_row("provider", run.provider)
+        table.add_row(
+            "cost",
+            f"${run.metrics.cost_usd:.4f} "
+            f"({run.metrics.tokens.input}+{run.metrics.tokens.output} tok)",
+        )
     if view.error:
         table.add_row("error", f"{view.error.type}: {view.error.message}")
     stdout.print(table)
+
+    # Output panel under the table so the headline doesn't compete with
+    # the agent's actual response. Skip silently when no run / no
+    # output — partial errors fall back to the job-level error row.
+    if run is not None and run.output is not None:
+        stdout.print()
+        stdout.print("[bold]output[/bold]")
+        stdout.print(json.dumps(run.output, indent=2), soft_wrap=True, highlight=False)
 
 
 # ---------------------------------------------------------------------------
