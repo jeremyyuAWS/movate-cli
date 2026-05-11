@@ -27,6 +27,7 @@ class ErrorCode(StrEnum):
     NOT_FOUND = "not_found"
     BAD_REQUEST = "bad_request"
     INTERNAL = "internal"
+    RATE_LIMITED = "rate_limited"
 
 
 class ErrorBody(BaseModel):
@@ -90,6 +91,37 @@ def not_found(resource: str, identifier: str) -> HTTPException:
     )
 
 
+def rate_limited(
+    *,
+    retry_after_seconds: int,
+    limit: int,
+    reset_at_unix: int,
+) -> HTTPException:
+    """429 with ``Retry-After`` + the same ``X-RateLimit-*`` headers as
+    successful responses, so the client can recover programmatically.
+
+    RFC 7231 §7.1.3: ``Retry-After`` is either a delta-seconds or a
+    HTTP-date. We send the delta-seconds form because it's friendlier
+    to clients that don't keep accurate wall clocks.
+    """
+    exc = http_error(
+        ErrorCode.RATE_LIMITED,
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        message=f"rate limit exceeded (limit={limit}/min); retry after {retry_after_seconds}s",
+    )
+    # FastAPI's HTTPException exposes ``headers`` as a mutable dict-like
+    # we can stamp before raising. The middleware attaches the same
+    # rate-limit headers to the 200 path; doing it here for 429 keeps
+    # the client-side handling symmetric.
+    exc.headers = {
+        "Retry-After": str(retry_after_seconds),
+        "X-RateLimit-Limit": str(limit),
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": str(reset_at_unix),
+    }
+    return exc
+
+
 __all__ = [
     "ErrorBody",
     "ErrorCode",
@@ -97,4 +129,5 @@ __all__ = [
     "auth_required",
     "http_error",
     "not_found",
+    "rate_limited",
 ]

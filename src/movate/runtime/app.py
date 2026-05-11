@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 import movate
 from movate.core.loader import AgentBundle
 from movate.core.models import JobRecord, JobStatus
+from movate.core.rate_limit import InProcessRateLimiter, NoOpRateLimiter, RateLimiter
 from movate.runtime.errors import auth_required, not_found
 from movate.runtime.middleware import AuthContext, make_auth_dependency
 from movate.runtime.schemas import (
@@ -45,6 +46,7 @@ def build_app(
     storage: StorageProvider,
     *,
     agents: list[AgentBundle] | None = None,
+    rate_limit_per_minute: int | None = 60,
 ) -> FastAPI:
     """Build the FastAPI app bound to ``storage`` + ``agents``.
 
@@ -53,10 +55,16 @@ def build_app(
     constant-time list lookup, not a fresh disk walk. Pass ``None``
     (the default) for tests that don't care about the registry.
 
-    The app's ``state`` carries both so handlers can read them
-    without closing over the factory's locals — keeps testability
-    clean (override ``app.state.storage`` / ``state.agents`` to
-    swap mid-test if you really need to).
+    ``rate_limit_per_minute`` is the per-API-key token-bucket
+    capacity (and the steady-state allowed request rate). Default
+    60. Pass ``None`` to disable rate limiting entirely (uses a
+    :class:`NoOpRateLimiter` that always allows).
+
+    The app's ``state`` carries collaborators so handlers can read
+    them without closing over the factory's locals — keeps
+    testability clean (override ``app.state.storage`` /
+    ``state.agents`` / ``state.rate_limiter`` to swap mid-test if
+    you really need to).
     """
     app = FastAPI(
         title="movate",
@@ -66,7 +74,17 @@ def build_app(
     app.state.storage = storage
     app.state.agents = agents or []
 
-    auth_dep = make_auth_dependency(storage)
+    # Build the rate limiter once at app construction so bucket state
+    # persists across requests. NoOp when disabled, but the middleware
+    # still calls .check() — keeps the header path uniform.
+    limiter: RateLimiter
+    if rate_limit_per_minute is None or rate_limit_per_minute <= 0:
+        limiter = NoOpRateLimiter()
+    else:
+        limiter = InProcessRateLimiter(limit_per_minute=rate_limit_per_minute)
+    app.state.rate_limiter = limiter
+
+    auth_dep = make_auth_dependency(storage, rate_limiter=limiter)
 
     # ------------------------------------------------------------------
     # /healthz — unauthed liveness probe

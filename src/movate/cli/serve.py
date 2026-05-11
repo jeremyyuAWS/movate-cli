@@ -42,19 +42,33 @@ def serve(
         "--log-level",
         help="uvicorn log level (debug | info | warning | error).",
     ),
+    rate_limit_per_minute: int = typer.Option(
+        60,
+        "--rate-limit-per-minute",
+        envvar="MOVATE_RATE_LIMIT_PER_MINUTE",
+        help=(
+            "Per-API-key token-bucket capacity (steady-state requests/min). "
+            "Default 60. Set to 0 to disable rate limiting entirely "
+            "(returns ``X-RateLimit-Limit: 0`` headers — operator's signal "
+            "that limiting is OFF)."
+        ),
+    ),
 ) -> None:
     """Start the movate FastAPI runtime.
 
     [bold]Examples:[/bold]
 
-      [dim]# Default — binds 127.0.0.1:8000, scans ./agents/[/dim]
+      [dim]# Default — binds 127.0.0.1:8000, scans ./agents/, 60 req/min/key[/dim]
       $ movate serve
 
       [dim]# Custom port + remote-accessible[/dim]
       $ movate serve --host 0.0.0.0 --port 8080
 
-      [dim]# Specific agents path[/dim]
-      $ movate serve --agents-path /opt/movate/agents
+      [dim]# Higher rate limit for a high-traffic prod deploy[/dim]
+      $ movate serve --rate-limit-per-minute 600
+
+      [dim]# Disable rate limiting (single-tenant dev)[/dim]
+      $ movate serve --rate-limit-per-minute 0
     """
     asyncio.run(
         _run_serve(
@@ -62,6 +76,7 @@ def serve(
             port=port,
             agents_path=agents_path,
             log_level=log_level,
+            rate_limit_per_minute=rate_limit_per_minute,
         )
     )
 
@@ -72,6 +87,7 @@ async def _run_serve(
     port: int,
     agents_path: Path,
     log_level: str,
+    rate_limit_per_minute: int,
 ) -> None:
     """Async entry that owns the loop end-to-end.
 
@@ -97,8 +113,16 @@ async def _run_serve(
         for b in agents:
             err.print(f"  - {b.spec.name} v{b.spec.version}")
 
-    app = build_app(storage, agents=agents)
+    app = build_app(
+        storage,
+        agents=agents,
+        rate_limit_per_minute=rate_limit_per_minute,
+    )
     err.print(f"[bold]movate[/bold] serving on http://{host}:{port}")
+    if rate_limit_per_minute > 0:
+        err.print(f"[dim]  rate limit: {rate_limit_per_minute} req/min per API key[/dim]")
+    else:
+        err.print("[dim]  rate limit: [yellow]DISABLED[/yellow][/dim]")
 
     config = uvicorn.Config(
         app,

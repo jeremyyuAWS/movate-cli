@@ -24,10 +24,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Header
+from fastapi import Header, Response
 
 from movate.core.auth import ApiKeyParseError, check_record, parse_api_key
-from movate.runtime.errors import auth_required
+from movate.core.rate_limit import NoOpRateLimiter, RateLimiter
+from movate.runtime.errors import auth_required, rate_limited
 from movate.storage.base import StorageProvider
 
 logger = logging.getLogger(__name__)
@@ -59,14 +60,25 @@ class AuthContext:
 
 def make_auth_dependency(
     storage: StorageProvider,
+    rate_limiter: RateLimiter | None = None,
 ) -> Callable[..., Awaitable[AuthContext]]:
-    """Build the FastAPI auth dependency bound to ``storage``.
+    """Build the FastAPI auth dependency bound to ``storage`` + an
+    optional ``rate_limiter``.
 
     Called once in :func:`build_app`. Tests build a fresh app per case
-    so each one closes over its own ``InMemoryStorage``.
+    so each one closes over its own ``InMemoryStorage`` (and, when
+    rate-limit testing, its own limiter with a low capacity).
+
+    ``rate_limiter=None`` → uses :class:`NoOpRateLimiter` (always
+    allow). Default behavior preserved for callers that haven't
+    opted in. The headers ``X-RateLimit-*`` still attach with the
+    sentinel zero limit so clients don't see them appear/disappear
+    based on opt-in.
     """
+    limiter: RateLimiter = rate_limiter or NoOpRateLimiter()
 
     async def auth_dependency(
+        response: Response,
         authorization: Annotated[str | None, Header()] = None,
     ) -> AuthContext:
         if authorization is None:
@@ -106,6 +118,32 @@ def make_auth_dependency(
         # ``record.tenant_id`` to touch_api_key with confidence — the
         # WHERE clause is defense in depth, not the primary check.
         await _safe_touch(storage, record.key_id, record.tenant_id)
+
+        # Rate-limit AFTER auth succeeds — we use ``record.key_id`` as
+        # the bucket key (not the presented token, which differs on
+        # every refresh). Unauthenticated requests never reach here,
+        # so the limiter is never asked about an anonymous identity.
+        # If the bucket is empty, raise 429 with Retry-After + the
+        # same X-RateLimit-* headers we set on the 200 path.
+        decision = await limiter.check(record.key_id)
+        # Attach the headers regardless — gives clients a way to see
+        # their current budget on every successful response.
+        response.headers["X-RateLimit-Limit"] = str(decision.limit)
+        response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
+        response.headers["X-RateLimit-Reset"] = str(decision.reset_at_unix)
+        if not decision.allowed:
+            logger.info(
+                "rate_limited key_id=%s limit=%d retry_after=%s",
+                record.key_id,
+                decision.limit,
+                decision.retry_after_seconds,
+            )
+            assert decision.retry_after_seconds is not None
+            raise rate_limited(
+                retry_after_seconds=decision.retry_after_seconds,
+                limit=decision.limit,
+                reset_at_unix=decision.reset_at_unix,
+            )
 
         return AuthContext(
             tenant_id=record.tenant_id,

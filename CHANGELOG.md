@@ -5,6 +5,75 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Per-API-key rate limiting (post-v1.0)
+
+**Protects the deployed runtime from runaway clients.** Before this,
+a single misbehaving consumer could flood ``POST /run`` and starve
+every other tenant's quota. Now each API key gets its own
+token-bucket budget; overflow returns 429 + ``Retry-After`` so
+well-behaved clients recover automatically.
+
+- **`core/rate_limit.py`** — pluggable rate limiter:
+  * ``RateLimiter`` Protocol — single ``check(key)`` method
+    returning a ``RateLimitDecision`` (allowed, limit, remaining,
+    reset_at_unix, retry_after_seconds).
+  * ``InProcessRateLimiter`` — token bucket per key, dict-backed,
+    single-process. Default for v1.x. Memory grows linearly with
+    distinct keys (~tens of bytes per key).
+  * ``NoOpRateLimiter`` — always-allow fallback. Used when limit is
+    disabled. Headers still attach with sentinel ``Limit: 0`` so
+    operators see "rate limiting OFF" at a glance.
+  * Future ``RedisRateLimiter`` slots in against the same Protocol
+    when multi-replica shared state is actually needed (post-v1.x).
+- **Algorithm:** token bucket (NOT leaky bucket) to tolerate
+  realistic bursts. A client quiet for a minute can spend the full
+  60-token budget in one go; steady-state still averages to
+  ``limit_per_minute``. ``time.monotonic`` for rate windows (immune
+  to NTP corrections) + ``time.time`` for the reset-at header (real
+  Unix timestamp clients expect).
+- **`build_app(storage, *, rate_limit_per_minute=60)`** — default
+  60 req/min/key, matching the BACKLOG plan. Pass ``0`` (or
+  ``None``) to disable.
+- **Middleware integration** — the rate-limit check runs AFTER
+  successful auth (so anonymous/invalid-key floods get 401 cheaply
+  before touching the limiter). Bucket key is ``record.key_id``
+  (stable across token refreshes for the same logical key).
+  ``/healthz`` and ``/ready`` are unauthed → bypass the limiter
+  entirely so ACA's 10-second readiness probe + 30-second liveness
+  probe never burn a budget.
+- **Response headers** (every authenticated response, success or
+  429):
+  * ``X-RateLimit-Limit`` — bucket capacity
+  * ``X-RateLimit-Remaining`` — tokens left (integer floor)
+  * ``X-RateLimit-Reset`` — Unix timestamp when bucket will be full
+  
+  429 responses additionally carry ``Retry-After`` (RFC 7231
+  delta-seconds, integer ceiling).
+- **`ErrorCode.RATE_LIMITED`** + ``rate_limited()`` helper in
+  ``runtime/errors.py`` — matches the existing 401/404 envelope
+  shape with stable code, human-readable message.
+- **`movate serve --rate-limit-per-minute`** + env var
+  ``MOVATE_RATE_LIMIT_PER_MINUTE``. Startup banner surfaces the
+  configured value (or ``DISABLED`` in yellow when off).
+- 16 new tests in ``tests/test_rate_limit.py``:
+  * Pure-math (clock-mocked): bucket starts full, drains, refills
+    with elapsed time, capacity caps refill at idle, per-key
+    isolation, ``retry_after`` ceiling math, ``limit_per_minute<1``
+    raises at construction, ``NoOpRateLimiter`` always allows.
+  * Middleware integration: auth'd responses carry headers, 4th
+    request after a 3-token drain returns 429 + Retry-After,
+    unauthenticated floods aren't rate-limited (auth fails first),
+    ``/healthz`` + ``/ready`` not rate-limited, per-key isolation
+    at the HTTP layer, ``rate_limit_per_minute=0`` returns the
+    sentinel zero-limit headers, end-to-end recovery after the
+    retry window elapses (via the clock-monkeypatch).
+
+**Operator effect:** a single tenant flooding ``POST /run`` at 600
+req/min stops getting 5xx-amplification at the worker — they get
+clean 429s with a ``Retry-After`` telling them when to back off.
+Other tenants' quotas are unaffected (per-key buckets are
+independent).
+
 ### Added — `/ready` endpoint with deep checks (post-v1.0)
 
 **Stops ACA from routing traffic to broken pods.** Before this, ACA's
