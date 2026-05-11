@@ -61,7 +61,7 @@ def submit(
         "If the agent has exactly one required string field, a plain string is auto-wrapped.",
     ),
     input_flag: str = typer.Option(None, "--input", "-i", help="Alternative way to pass input."),
-    kind: str = typer.Option("agent", "--kind", "-k", help="`agent` or `workflow`."),
+    kind: JobKind = typer.Option(JobKind.AGENT, "--kind", "-k", case_sensitive=False),
     target: str = typer.Option(
         None,
         "--target",
@@ -121,12 +121,9 @@ def submit(
       [dim]# Workflow kind, against prod[/dim]
       $ movate submit returns-pipeline -t prod -k workflow -i initial_state.json
     """
-    try:
-        kind_enum = JobKind(kind)
-    except ValueError as exc:
-        err.print(f"[red]✗[/red] kind must be 'agent' or 'workflow'; got {kind!r}")
-        raise typer.Exit(code=2) from exc
-
+    # `kind` is already a JobKind enum value — Typer validates choices
+    # at parse time (invalid values exit 2 with "Invalid value for
+    # '--kind'"), so we don't need a defensive JobKind(kind) cast.
     raw = input_flag or input_arg
     if raw is None:
         err.print("[red]✗[/red] provide input as a positional arg, --input, or '-' for stdin")
@@ -145,7 +142,7 @@ def submit(
             target_name=target_name,
             base_url=target_cfg.url,
             token=token,
-            kind=kind_enum,
+            kind=kind,
             agent=agent,
             input_payload=payload,
             wait=wait,
