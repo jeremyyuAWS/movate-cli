@@ -22,6 +22,7 @@ import typer
 from rich.console import Console
 
 from movate.cli._runtime import build_local_runtime, shutdown_runtime
+from movate.cli._console import hint
 from movate.core.models import JobRecord, JobStatus
 from movate.core.notify import build_dispatcher
 from movate.runtime.dispatch import DispatchOutcome, WorkerDispatch
@@ -145,7 +146,7 @@ async def _run_worker(
         )
 
     notifier = build_dispatcher()
-    err.print(f"[dim]notifications: {notifier.name} backend[/dim]")
+    hint(f"[dim]notifications: {notifier.name} backend[/dim]")
 
     worker_obj = Worker(
         storage=rt.storage,
@@ -159,7 +160,7 @@ async def _run_worker(
 
     def _handle_signal(*_: object) -> None:
         err.print()  # newline after ^C
-        err.print("[dim]received shutdown signal — finishing current job...[/dim]")
+        hint("[dim]received shutdown signal — finishing current job...[/dim]")
         stop_event.set()
 
     loop = asyncio.get_running_loop()

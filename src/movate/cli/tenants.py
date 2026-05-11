@@ -29,6 +29,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._console import hint
 from movate.core.models import TenantBudget
 from movate.storage import build_storage
 
@@ -132,7 +133,7 @@ def list_tenants() -> None:
     budgets, spends = asyncio.run(_load_all())
 
     if not budgets:
-        err.print("[dim]no tenant budgets configured[/dim]")
+        hint("[dim]no tenant budgets configured[/dim]")
         return
 
     table = Table(title="tenant budgets")
