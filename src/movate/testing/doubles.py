@@ -47,6 +47,12 @@ class InMemoryStorage:
     async def init(self) -> None:
         return None
 
+    async def ping(self) -> None:
+        """No-op for the in-memory double — there's no backend to
+        check. Tests that exercise the ``/ready`` failure path use a
+        custom subclass that overrides this to raise."""
+        return None
+
     async def save_run(self, run: RunRecord) -> None:
         self.runs.append(run)
 

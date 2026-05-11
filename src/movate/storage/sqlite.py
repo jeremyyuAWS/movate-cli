@@ -199,6 +199,13 @@ class SqliteProvider:
         self._path = Path(str(db_path)).expanduser()
         self._conn: aiosqlite.Connection | None = None
 
+    async def ping(self) -> None:
+        """``SELECT 1`` — confirms the connection is alive without
+        touching any application table. Cheap enough to run on every
+        ACA readiness probe (default cadence ~10s)."""
+        async with self._db.execute("SELECT 1") as cur:
+            await cur.fetchone()
+
     async def init(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._path)

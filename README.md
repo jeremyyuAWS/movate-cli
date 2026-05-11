@@ -49,6 +49,7 @@ that v1.0 builds on.
 | Azure preflight diagnostic | `movate doctor --target <name>` | ✓ v1.0 |
 | Azure bootstrap (RG + SP + federated cred) | `scripts/azure-bootstrap.sh <env>` | ✓ v1.0 |
 | Job retry + dead-letter on transient failures | `JobRetryPolicy` + `movate jobs list --status dead_letter` | ✓ post-v1.0 |
+| Liveness + readiness probes for ACA | `GET /healthz` (cheap) + `GET /ready` (deep checks) | ✓ post-v1.0 |
 | Model policy enforcement | `movate.yaml: policy:` (allowed_providers, deny_models, max cost) | ✓ v1.0 stage 3 |
 
 ## Prerequisites

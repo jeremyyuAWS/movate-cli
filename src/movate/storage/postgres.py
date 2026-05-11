@@ -216,6 +216,13 @@ class PostgresProvider:
         async with self._pool.acquire() as conn:
             await conn.execute(_SCHEMA)
 
+    async def ping(self) -> None:
+        """``SELECT 1`` against the pool — picks up DB-down /
+        pool-exhausted / network-blip conditions for the ``/ready``
+        endpoint. Acquires from the pool so we exercise the same
+        path real queries take."""
+        await self._db.execute("SELECT 1")
+
     @property
     def _db(self) -> asyncpg.Pool:
         if self._pool is None:

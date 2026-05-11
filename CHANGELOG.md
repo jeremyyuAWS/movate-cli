@@ -5,6 +5,52 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `/ready` endpoint with deep checks (post-v1.0)
+
+**Stops ACA from routing traffic to broken pods.** Before this, ACA's
+readiness probe hit ``/healthz`` (unconditional 200) — meaning a pod
+whose Postgres connection was dead still received traffic and 5xx'd
+every request. Now ``/ready`` runs deep checks (storage ping); 503
+when anything's broken so ACA pulls the pod out of rotation
+WITHOUT restarting it (a restart wouldn't help if the DB is the
+problem). The pod returns to the load balancer once the dependency
+recovers.
+
+- **`GET /ready`** — unauthed readiness probe with per-check status.
+  Returns 200 + ``{"status": "ready", "checks": {...}}`` when every
+  check passes; 503 + ``{"status": "not_ready", "checks":
+  {"storage": "<error type + truncated message>"}}`` when any
+  fails. ACA reads the HTTP status; the JSON body is for human
+  triage via curl. Truncates error messages to 120 chars so we
+  don't leak DSNs or internal context.
+- **`StorageProvider.ping()`** — new Protocol method. Sqlite does
+  ``SELECT 1``; postgres does ``SELECT 1`` against the pool
+  (exercises the same path real queries take, catching
+  pool-exhausted on top of DB-down). `InMemoryStorage.ping()` is a
+  no-op (tests that exercise the failure path use a custom
+  subclass that overrides ping to raise).
+- **`ReadyView`** schema — separate from `HealthView` so the two
+  probes have distinct contracts. `/healthz` stays minimal
+  (`status` + `version`); `/ready` carries the per-check map for
+  triage.
+- **`/healthz` stays unconditional 200.** Deliberately doesn't gate
+  on storage because a DB blip would otherwise trigger pod
+  restarts that don't help. Liveness checks "is this process
+  alive?"; readiness checks "should this process get traffic?"
+  Separate concerns.
+- **Bicep `containerapp-api.bicep`** — readinessProbe path flipped
+  from `/healthz` to `/ready`. Liveness probe unchanged (stays on
+  `/healthz`). Cadence unchanged (10s readiness, 30s liveness).
+- 3 new tests in `tests/test_runtime_app.py`: 200 happy path, 503
+  with the right error info when storage ping fails (via a
+  `FailingStorage` subclass that raises on `ping()`), and unauthed
+  access works (ACA hits without bearer).
+
+**Operator effect:** during a planned Postgres failover window
+(~30s), ACA will mark every API pod NotReady → stop routing →
+client retries succeed once Postgres comes back. Without this,
+clients would see 30s of 500s instead.
+
 ### Added — Job retry policy with exponential backoff + dead-letter (post-v1.0)
 
 **Closes the production-readiness reliability gap.** Before this, every

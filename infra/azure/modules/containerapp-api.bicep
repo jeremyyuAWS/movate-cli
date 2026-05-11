@@ -164,6 +164,10 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
           ]
           probes: [
             {
+              // Liveness stays on /healthz: unconditional 200,
+              // independent of storage. A DB blip shouldn't trigger
+              // a pod restart that wouldn't help (the new pod hits
+              // the same DB).
               type: 'Liveness'
               httpGet: {
                 path: '/healthz'
@@ -173,9 +177,14 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
               failureThreshold: 3
             }
             {
+              // Readiness hits /ready: deep checks (storage ping).
+              // Failure means "stop routing traffic to this pod"
+              // without restarting it — the right move when a
+              // dependency is down. Pod returns to the load
+              // balancer once the dependency recovers.
               type: 'Readiness'
               httpGet: {
-                path: '/healthz'
+                path: '/ready'
                 port: 8000
               }
               periodSeconds: 10

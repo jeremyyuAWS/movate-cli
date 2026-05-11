@@ -41,6 +41,20 @@ class StorageProvider(Protocol):
     async def init(self) -> None:
         """Idempotent setup (schema migration, etc.)."""
 
+    async def ping(self) -> None:
+        """Cheap liveness check: validate the backend connection is alive.
+
+        Used by ``GET /ready`` to gate ACA traffic — if this raises,
+        the pod is reporting "not ready" and ACA stops routing to it
+        without restarting it (the liveness probe on ``/healthz``
+        stays green so the pod isn't killed for a transient blip).
+
+        Implementations should make this as cheap as possible:
+        sqlite does a ``SELECT 1``; postgres does a pool-acquire +
+        ``SELECT 1``. Raises any backend error on failure (the
+        caller catches and converts to a 503).
+        """
+
     async def save_run(self, run: RunRecord) -> None: ...
 
     async def save_failure(self, f: FailureRecord) -> None: ...

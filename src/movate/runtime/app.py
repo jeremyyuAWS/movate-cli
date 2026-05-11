@@ -21,7 +21,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
 import movate
 from movate.core.loader import AgentBundle
@@ -33,6 +34,7 @@ from movate.runtime.schemas import (
     AgentView,
     HealthView,
     JobView,
+    ReadyView,
     RunAccepted,
     RunSubmission,
 )
@@ -67,12 +69,67 @@ def build_app(
     auth_dep = make_auth_dependency(storage)
 
     # ------------------------------------------------------------------
-    # /healthz — unauthed
+    # /healthz — unauthed liveness probe
     # ------------------------------------------------------------------
     @app.get("/healthz", response_model=HealthView, tags=["meta"])
     async def healthz() -> HealthView:
-        """Liveness probe. Cheap on purpose — never hits storage."""
+        """Liveness probe. Cheap on purpose — never hits storage.
+
+        ACA's liveness probe restarts a pod if this fails. We
+        deliberately don't gate on DB connectivity here because a DB
+        blip would otherwise trigger a pod restart that doesn't help
+        (the new pod will hit the same dead DB). Use ``/ready`` for
+        readiness; let liveness stay simple.
+        """
         return HealthView(status="ok", version=movate.__version__)
+
+    # ------------------------------------------------------------------
+    # /ready — unauthed readiness probe with deep checks
+    # ------------------------------------------------------------------
+    @app.get(
+        "/ready",
+        response_model=ReadyView,
+        tags=["meta"],
+        responses={503: {"model": ReadyView}},
+    )
+    async def ready(request: Request) -> Response:
+        """Readiness probe with deep checks.
+
+        ACA's readiness probe stops routing traffic to a pod when
+        this fails (but doesn't restart it — that's liveness's job).
+        We check the dependencies whose failure would make every
+        request 5xx: storage backend connectivity, primarily.
+
+        Returns 200 with ``{"status": "ready", "checks": {...}}`` on
+        the happy path; 503 with ``{"status": "not_ready", "checks":
+        {"storage": "<error>"}}`` if any check fails. The HTTP
+        status is what ACA reads; the JSON body is for human triage
+        and curl-by-hand debugging.
+        """
+        store: StorageProvider = request.app.state.storage
+        checks: dict[str, str] = {}
+        # Storage ping — covers DB-down, pool-exhausted, network-blip,
+        # sqlite-file-missing. Any backend error here means real
+        # queries will fail too, so the pod shouldn't get traffic.
+        try:
+            await store.ping()
+            checks["storage"] = "ok"
+        except Exception as exc:
+            # Surface the exception class + a truncated message. We
+            # don't want to leak DSNs or other internals, but the
+            # class name + short message is operator-actionable.
+            checks["storage"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+
+        all_ok = all(v == "ok" for v in checks.values())
+        body = ReadyView(
+            status="ready" if all_ok else "not_ready",
+            version=movate.__version__,
+            checks=checks,
+        )
+        return JSONResponse(
+            status_code=200 if all_ok else 503,
+            content=body.model_dump(),
+        )
 
     # ------------------------------------------------------------------
     # GET /agents — registry discovery

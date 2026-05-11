@@ -77,6 +77,54 @@ def test_healthz_returns_ok_without_auth(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /ready — unauthed readiness probe with deep checks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_ready_returns_200_when_storage_healthy(client: TestClient) -> None:
+    """Happy path: storage ping succeeds → 200 + every check ok."""
+    r = client.get("/ready")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["status"] == "ready"
+    assert payload["checks"]["storage"] == "ok"
+    assert "version" in payload
+
+
+@pytest.mark.unit
+def test_ready_returns_503_when_storage_ping_fails() -> None:
+    """When the storage backend can't be reached, /ready returns 503 with
+    a per-check failure reason so ACA stops routing traffic to this pod
+    until the dependency recovers."""
+
+    class FailingStorage(InMemoryStorage):
+        async def ping(self) -> None:
+            raise ConnectionError("simulated DB down")
+
+    failing = FailingStorage()
+    # ``init`` is a no-op on the in-memory double; no need to await
+    # since the failing variant inherits the no-op.
+    app = build_app(failing)
+    client = TestClient(app)
+
+    r = client.get("/ready")
+    assert r.status_code == 503
+    payload = r.json()
+    assert payload["status"] == "not_ready"
+    assert "ConnectionError" in payload["checks"]["storage"]
+    assert "simulated DB down" in payload["checks"]["storage"]
+
+
+@pytest.mark.unit
+def test_ready_does_not_require_auth(client: TestClient) -> None:
+    """ACA's readiness probe hits this endpoint without any Authorization
+    header. Must work, same as /healthz."""
+    r = client.get("/ready")  # no auth header
+    assert r.status_code in (200, 503)  # NOT 401
+
+
+# ---------------------------------------------------------------------------
 # Auth — every failure mode collapses to 401 AUTH_REQUIRED
 # ---------------------------------------------------------------------------
 

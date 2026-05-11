@@ -105,6 +105,33 @@ class HealthView(BaseModel):
     version: str
 
 
+class ReadyView(BaseModel):
+    """``GET /ready`` response — readiness probe with per-check status.
+
+    Distinct from ``/healthz`` (the liveness probe) — ``/ready`` runs
+    deep checks (DB ping, etc.) and returns 503 if any fails so ACA
+    stops routing traffic to a pod whose dependencies are dead,
+    WITHOUT restarting it (a restart wouldn't help if the DB is the
+    problem).
+
+    The ``checks`` map surfaces each check's status individually so
+    the operator can tell at a glance which dependency tripped the
+    probe.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    """``"ready"`` (every check passed) or ``"not_ready"`` (at least one
+    check failed). Mirrors the HTTP status (200 vs 503) for clients
+    that prefer to parse JSON."""
+    version: str
+    checks: dict[str, str]
+    """Per-check result. Keys are the check name (``"storage"``, etc.);
+    values are ``"ok"`` or a short failure reason. ACA only cares
+    about the HTTP status; the map is for human triage."""
+
+
 class AgentView(BaseModel):
     """One entry in the registry response.
 
