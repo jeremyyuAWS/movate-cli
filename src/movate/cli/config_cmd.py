@@ -52,28 +52,74 @@ def add_target(
         "--set-active",
         help="Make this the default target (saves you a `config use` step).",
     ),
+    # --- Optional Azure deploy config (consumed by `movate deploy`) -------
+    azure_subscription: str = typer.Option(
+        None,
+        "--azure-subscription",
+        help="Azure subscription id. Required to enable `movate deploy --target <name>`.",
+    ),
+    azure_resource_group: str = typer.Option(
+        None,
+        "--azure-resource-group",
+        help="Resource group containing the ACA env + ACR (e.g. movate-dev-rg).",
+    ),
+    azure_acr_name: str = typer.Option(
+        None,
+        "--azure-acr",
+        help="ACR registry name without the .azurecr.io suffix (e.g. movatedevacr).",
+    ),
+    azure_env: str = typer.Option(
+        None,
+        "--azure-env",
+        help=(
+            "Environment label (dev / staging / prod). Used to derive Container "
+            "App names: movate-{env}-api, movate-{env}-worker. Should match the "
+            "`env` param used when running the Bicep deployment."
+        ),
+    ),
 ) -> None:
     """Register a deployment target.
 
     [bold]Examples:[/bold]
 
-      [dim]# Local dev runtime[/dim]
+      [dim]# Local dev runtime (no deploy config)[/dim]
       $ movate config add-target local --url http://127.0.0.1:8000 --key-env MOVATE_LOCAL_KEY
 
-      [dim]# Prod, and make it the default[/dim]
+      [dim]# Prod, with deploy enabled, and make it the default[/dim]
       $ movate config add-target prod \\
             --url https://movate-prod-api.eastus2.azurecontainerapps.io \\
             --key-env MOVATE_PROD_KEY \\
+            --azure-subscription "$SUBSCRIPTION_ID" \\
+            --azure-resource-group movate-prod-rg \\
+            --azure-acr movateprodacr \\
+            --azure-env prod \\
             --set-active
     """
     cfg = load_user_config()
-    cfg.targets[name] = TargetConfig(url=url, key_env=key_env)
+    cfg.targets[name] = TargetConfig(
+        url=url,
+        key_env=key_env,
+        azure_subscription=azure_subscription,
+        azure_resource_group=azure_resource_group,
+        azure_acr_name=azure_acr_name,
+        azure_env=azure_env,
+    )
     if set_active or cfg.active is None:
         cfg.active = name
     path = save_user_config(cfg)
     err.print(f"[green]✓[/green] added target {name!r} → {url}")
     if cfg.active == name:
         err.print(f"[dim]  (active target is now {name!r})[/dim]")
+    # Surface which capabilities are configured so the operator sees
+    # at registration time whether `movate deploy` will work.
+    deploy_ready = all((azure_subscription, azure_resource_group, azure_acr_name, azure_env))
+    if deploy_ready:
+        err.print(f"[dim]  (deploy enabled: env={azure_env}, rg={azure_resource_group})[/dim]")
+    else:
+        err.print(
+            "[dim]  (deploy NOT enabled — pass --azure-subscription / "
+            "--azure-resource-group / --azure-acr / --azure-env to enable)[/dim]"
+        )
     err.print(f"[dim]config: {path}[/dim]")
 
 

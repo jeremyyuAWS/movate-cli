@@ -44,7 +44,8 @@ that v1.0 builds on.
 | Inspect jobs on a deployed runtime | `movate jobs show | wait | list-agents` | ✓ v0.5+ |
 | Manage deployment targets | `movate config add-target | use | list-targets` | ✓ v0.5+ |
 | Azure deploy (Bicep IaC) | `infra/azure/main.bicep` (manual `az deployment`) | ✓ v1.0 stage 1 |
-| Azure deploy CLI | `movate deploy` | ⚠️ stub; v1.0 stage 2 |
+| One-command deploy to ACA | `movate deploy --target <name>` | ✓ v1.0 stage 2 |
+| Auto-deploy on push to release/* | `.github/workflows/deploy.yml` (federated OIDC) | ✓ v1.0 stage 2 |
 
 ## Prerequisites
 
@@ -218,6 +219,49 @@ The `--notify` desktop fallback uses `terminal-notifier` / `osascript`
 on macOS, `notify-send` on Linux, and is a no-op on Windows. Server-side
 SMS / email notifications (per-job `notify_target`, fired by the worker)
 are tracked in [BACKLOG.md](BACKLOG.md) for post-v1.0.
+
+## Quickstart — deploy to Azure Container Apps
+
+Once the Bicep IaC has provisioned a resource group, ACR, Container Apps
+environment, and Postgres ([infra/azure/README.md](infra/azure/README.md)
+walks the first-time setup), shipping a code change is one command:
+
+```bash
+# One-time: register the deploy target with its Azure metadata. The
+# bearer token still lives in an env var; --azure-* fields tell
+# `movate deploy` where to push images and which apps to update.
+movate config add-target prod \
+    --url https://movate-prod-api.eastus2.azurecontainerapps.io \
+    --key-env MOVATE_PROD_KEY \
+    --azure-subscription "$SUBSCRIPTION_ID" \
+    --azure-resource-group movate-prod-rg \
+    --azure-acr movateprodacr \
+    --azure-env prod \
+    --set-active
+
+# Build the image in ACR (no local Docker needed) + roll out both
+# Container Apps + poll /healthz until version matches. Default tag is
+# movate:<version>-<git-sha-short>.
+movate deploy --target prod
+
+# CI / fire-and-forget — skip the /healthz verification step.
+movate deploy --target prod --no-wait
+
+# Rollback to a previously-built image (no rebuild).
+movate deploy --target prod --skip-build --image-tag movate:0.5.0-abc1234
+
+# Worker-only update (e.g. dispatch-logic change).
+movate deploy --target prod --only worker
+
+# Plan inspection — prints the `az` commands without running them.
+movate deploy --target prod --dry-run
+```
+
+For CI, push a commit to a `release/<env>` branch (e.g. `release/prod`)
+and [.github/workflows/deploy.yml](.github/workflows/deploy.yml) runs
+the same `movate deploy` flow with Azure federated OIDC auth — no
+client secrets stored in GitHub. Per-env GitHub *Environments* hold
+the scoped secrets so prod can require approval gates.
 
 ## Available templates
 

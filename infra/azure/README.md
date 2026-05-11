@@ -136,7 +136,31 @@ az containerapp exec -g movate-${ENV}-rg -n movate-${ENV}-api \
 
 ## Update flow (incremental redeploy)
 
-For routine updates after the first deploy:
+For routine updates after the first deploy, use `movate deploy` —
+it wraps the same `az acr build` + `az containerapp update` sequence
+plus a `/healthz` poll that verifies the new revision is actually
+serving before returning.
+
+```bash
+# One-time: register this RG/ACR/env combo as a deploy target so
+# `movate deploy` knows where to push.
+movate config add-target ${ENV} \
+    --url $API_URL \
+    --key-env MOVATE_${ENV^^}_KEY \
+    --azure-subscription $(az account show --query id -o tsv) \
+    --azure-resource-group movate-${ENV}-rg \
+    --azure-acr movate${ENV}acr \
+    --azure-env ${ENV} \
+    --set-active
+
+# Every subsequent update is one command. Image tag defaults to
+# movate:<version>-<git-sha-short> so each deploy is traceable.
+movate deploy --target ${ENV}
+```
+
+ACA does a rolling restart (no downtime if `minReplicas ≥ 2`).
+
+If you'd rather drive the raw `az` commands manually:
 
 ```bash
 # 1. Build + push new image
@@ -147,8 +171,10 @@ az containerapp update -g movate-${ENV}-rg -n movate-${ENV}-api    --image movat
 az containerapp update -g movate-${ENV}-rg -n movate-${ENV}-worker --image movate${ENV}acr.azurecr.io/movate:0.5.1
 ```
 
-ACA does a rolling restart (no downtime if `minReplicas ≥ 2`).
-`movate deploy` (lands stage 2 of v1.0) automates this.
+For CI, push to a `release/<env>` branch and
+[.github/workflows/deploy.yml](../../.github/workflows/deploy.yml) does
+the same flow via Azure federated OIDC — no client secrets in
+GitHub. See the workflow file for the per-env secret list it expects.
 
 ## Tear down
 
@@ -170,6 +196,8 @@ intervention required).
   "publicly addressable" ≠ "publicly accessible."
 - **NOT multi-region.** Single-region deployment. Customers needing
   failover should run their own active/passive across two of these.
-- **NOT auto-deployed.** Stage 1 (this) provisions infra. Stage 2
-  (`movate deploy` + `.github/workflows/deploy.yml`) builds the
-  image and rolls out on `git push release/*`.
+- **NOT auto-deployed by Bicep alone.** Stage 1 (the Bicep here)
+  provisions infra. Stage 2 — `movate deploy` and
+  [.github/workflows/deploy.yml](../../.github/workflows/deploy.yml)
+  — builds the image and rolls it out (manually with `movate deploy`,
+  or automatically on `git push release/*`).

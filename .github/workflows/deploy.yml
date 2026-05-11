@@ -1,0 +1,180 @@
+name: deploy
+
+# Promote a release/* branch to its matching ACA environment.
+#
+# Triggers on any push to a branch named release/<env> where <env> is the
+# Azure environment label (e.g. release/dev, release/staging, release/prod).
+# The env label drives:
+#   * which `movate config` target is hydrated (we synthesize one from
+#     environment secrets so the workflow doesn't need to commit
+#     ~/.movate/config.yaml)
+#   * which GitHub *environment* gates the deploy — so prod can require
+#     approval, and prod secrets can't leak into dev runs
+#
+# Auth: Azure federated identity via OIDC — no client secrets stored in GH.
+# Set up the federated credential pinning subject to
+# `repo:<org>/<repo>:ref:refs/heads/release/<env>` per environment.
+#
+# Required GitHub *environment* secrets (configure one environment per env
+# at Settings → Environments):
+#   AZURE_CLIENT_ID         — service principal app (client) id
+#   AZURE_TENANT_ID         — AAD tenant id
+#   AZURE_SUBSCRIPTION_ID   — subscription id
+#   AZURE_RG                — resource group name (e.g. movate-prod-rg)
+#   AZURE_ACR               — ACR name without .azurecr.io (e.g. movateprodacr)
+#   RUNTIME_URL             — base URL of the deployed API for /healthz polling
+#   RUNTIME_KEY             — bearer token (referenced by env var, never persisted)
+#
+# Manual triggers via workflow_dispatch let an operator deploy ad-hoc
+# without pushing to a release/* branch (e.g. rollback from main).
+
+on:
+  push:
+    branches:
+      - "release/**"
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: "Environment label (dev / staging / prod). Drives resource names."
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      image_tag:
+        description: "Optional image tag to redeploy (skips build). Format: movate:<ver>-<sha>"
+        required: false
+        type: string
+      skip_build:
+        description: "Skip `az acr build`; redeploy --image-tag only."
+        required: false
+        type: boolean
+        default: false
+
+# OIDC needs id-token: write. contents: read is enough for the checkout.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Resolve the target env name (e.g. "prod") from the branch or input.
+  # This runs unconditionally so the actual deploy job can scope itself
+  # to the right GitHub Environment (which gates secrets + approvals).
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      env_name: ${{ steps.pick.outputs.name }}
+    steps:
+      - id: pick
+        run: |
+          if [ -n "${{ inputs.target_env }}" ]; then
+            echo "name=${{ inputs.target_env }}" >> "$GITHUB_OUTPUT"
+          else
+            BRANCH="${GITHUB_REF_NAME}"
+            ENV_NAME="${BRANCH#release/}"
+            if [ -z "$ENV_NAME" ] || [ "$ENV_NAME" = "$BRANCH" ]; then
+              echo "Could not derive env from ref '$BRANCH'" >&2
+              exit 1
+            fi
+            echo "name=${ENV_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    needs: resolve
+    runs-on: ubuntu-latest
+    # Scoping to the GH Environment gives us approval gates + per-env
+    # secret isolation. Configure environments named `dev`/`staging`/`prod`
+    # at Settings → Environments and attach the AZURE_* + RUNTIME_*
+    # secrets to each.
+    environment: ${{ needs.resolve.outputs.env_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history so `git rev-parse --short HEAD` agrees
+          # with what `movate deploy` derives locally.
+          fetch-depth: 0
+
+      - name: Azure login (OIDC, no stored secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync deps
+        run: uv sync --all-extras --dev
+
+      - name: Hydrate ~/.movate/config.yaml from environment secrets
+        env:
+          ENV_NAME: ${{ needs.resolve.outputs.env_name }}
+          RUNTIME_URL: ${{ secrets.RUNTIME_URL }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RG: ${{ secrets.AZURE_RG }}
+          AZURE_ACR: ${{ secrets.AZURE_ACR }}
+        run: |
+          # Register a target named after the env, with full Azure config
+          # so `movate deploy --target $ENV_NAME` works. The runtime key
+          # env var is set in the next step and referenced here by name.
+          uv run movate config add-target "$ENV_NAME" \
+            --url "$RUNTIME_URL" \
+            --key-env MOVATE_RUNTIME_KEY \
+            --azure-subscription "$AZURE_SUBSCRIPTION_ID" \
+            --azure-resource-group "$AZURE_RG" \
+            --azure-acr "$AZURE_ACR" \
+            --azure-env "$ENV_NAME" \
+            --set-active
+
+      - name: Deploy to Azure Container Apps
+        env:
+          # /healthz poll authenticates with the runtime token; only used
+          # for the post-deploy verification step.
+          MOVATE_RUNTIME_KEY: ${{ secrets.RUNTIME_KEY }}
+          ENV_NAME: ${{ needs.resolve.outputs.env_name }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          SKIP_BUILD: ${{ inputs.skip_build }}
+        run: |
+          ARGS=(--target "$ENV_NAME")
+          if [ -n "$IMAGE_TAG" ]; then
+            ARGS+=(--image-tag "$IMAGE_TAG")
+          fi
+          if [ "$SKIP_BUILD" = "true" ]; then
+            ARGS+=(--skip-build)
+          fi
+          uv run movate deploy "${ARGS[@]}"
+
+      - name: Summary
+        if: success()
+        env:
+          ENV_NAME: ${{ needs.resolve.outputs.env_name }}
+          RUNTIME_URL: ${{ secrets.RUNTIME_URL }}
+        run: |
+          {
+            echo "### ✅ Deployed to ${ENV_NAME}"
+            echo ""
+            echo "* commit: \`${GITHUB_SHA}\`"
+            echo "* runtime: ${RUNTIME_URL}"
+            echo "* triggered by: ${{ github.event_name }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Failure summary
+        if: failure()
+        env:
+          ENV_NAME: ${{ needs.resolve.outputs.env_name }}
+        run: |
+          {
+            echo "### ❌ Deploy to ${ENV_NAME} failed"
+            echo ""
+            echo "Check the \`Deploy to Azure Container Apps\` step. Common causes:"
+            echo "* OIDC federated credential missing for branch \`${GITHUB_REF_NAME}\`"
+            echo "* Service principal lacks AcrPush / Container Apps Contributor on RG"
+            echo "* /healthz polling timed out (exit 124) — ACA rollout slower than expected; check \`az containerapp revision list\`"
+          } >> "$GITHUB_STEP_SUMMARY"

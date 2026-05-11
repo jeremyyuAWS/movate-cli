@@ -36,7 +36,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class TargetConfig(BaseModel):
-    """One deployment movate-cli can talk to."""
+    """One deployment movate-cli can talk to.
+
+    Beyond the runtime URL + bearer-token env var, optional Azure
+    fields tie a target to its deploy infrastructure so ``movate deploy
+    --target <name>`` knows where to push images + which Container
+    Apps to update. All Azure fields are optional — pure read-only
+    targets (e.g. a customer's runtime you can submit jobs to but
+    can't deploy) leave them None.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -47,6 +55,27 @@ class TargetConfig(BaseModel):
     key_env: str = Field(
         ...,
         description="Name of the env var that holds the bearer token (e.g. MOVATE_PROD_KEY).",
+    )
+
+    # --- Optional deploy config (used by `movate deploy`) -----------------
+    azure_subscription: str | None = Field(
+        default=None,
+        description="Azure subscription id. Passed to `az --subscription`.",
+    )
+    azure_resource_group: str | None = Field(
+        default=None,
+        description="Resource group containing the ACA env + ACR (e.g. movate-dev-rg).",
+    )
+    azure_acr_name: str | None = Field(
+        default=None,
+        description="ACR registry name without the .azurecr.io suffix (e.g. movatedevacr).",
+    )
+    azure_env: str | None = Field(
+        default=None,
+        description=(
+            "Environment label baked into resource names (dev / staging / prod). "
+            "Used to derive Container App names: movate-{env}-api, movate-{env}-worker."
+        ),
     )
 
 

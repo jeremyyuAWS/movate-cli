@@ -122,3 +122,136 @@ def test_resolve_bearer_token_errors_on_empty_string(monkeypatch) -> None:
     target = TargetConfig(url="https://x", key_env="EMPTY_TOKEN")
     with pytest.raises(UserConfigError, match="unset or empty"):
         resolve_bearer_token(target)
+
+
+# ---------------------------------------------------------------------------
+# TargetConfig — optional Azure deploy fields (used by ``movate deploy``)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_target_config_azure_fields_default_to_none() -> None:
+    """A target registered without --azure-* flags reads back with all
+    Azure fields as None — read-only / non-deployable targets are valid."""
+    t = TargetConfig(url="https://prod", key_env="K")
+    assert t.azure_subscription is None
+    assert t.azure_resource_group is None
+    assert t.azure_acr_name is None
+    assert t.azure_env is None
+
+
+@pytest.mark.unit
+def test_target_config_azure_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
+    """All four Azure fields survive a save → load cycle so ``movate deploy``
+    can find them later."""
+    monkeypatch.setenv("MOVATE_CONFIG_PATH", str(tmp_path / "cfg.yaml"))
+    cfg = UserConfig(
+        targets={
+            "prod": TargetConfig(
+                url="https://prod",
+                key_env="K",
+                azure_subscription="sub-id",
+                azure_resource_group="movate-prod-rg",
+                azure_acr_name="movateprodacr",
+                azure_env="prod",
+            )
+        },
+        active="prod",
+    )
+    save_user_config(cfg)
+    loaded = load_user_config()
+    t = loaded.targets["prod"]
+    assert t.azure_subscription == "sub-id"
+    assert t.azure_resource_group == "movate-prod-rg"
+    assert t.azure_acr_name == "movateprodacr"
+    assert t.azure_env == "prod"
+
+
+@pytest.mark.unit
+def test_target_config_round_trip_omits_none_fields(tmp_path: Path, monkeypatch) -> None:
+    """The persisted YAML doesn't carry ``null`` Azure fields — keeps the
+    file readable for the common (deploy-less) target case."""
+    monkeypatch.setenv("MOVATE_CONFIG_PATH", str(tmp_path / "cfg.yaml"))
+    cfg = UserConfig(
+        targets={"local": TargetConfig(url="http://127.0.0.1:8000", key_env="L")},
+        active="local",
+    )
+    path = save_user_config(cfg)
+    content = path.read_text()
+    assert "azure_subscription" not in content
+    assert "azure_resource_group" not in content
+
+
+@pytest.mark.unit
+def test_cli_config_add_target_with_azure_flags_persists(tmp_path: Path, monkeypatch) -> None:
+    """``movate config add-target --azure-...`` writes the Azure fields
+    so ``movate deploy --target <name>`` sees them later."""
+    from typer.testing import CliRunner  # noqa: PLC0415
+
+    from movate.cli.main import app as cli_app  # noqa: PLC0415
+
+    cfg_path = tmp_path / "cfg.yaml"
+    monkeypatch.setenv("MOVATE_CONFIG_PATH", str(cfg_path))
+    cli_runner = CliRunner(mix_stderr=False)
+
+    result = cli_runner.invoke(
+        cli_app,
+        [
+            "config",
+            "add-target",
+            "prod",
+            "--url",
+            "https://prod.example.com",
+            "--key-env",
+            "MOVATE_PROD_KEY",
+            "--azure-subscription",
+            "sub-id",
+            "--azure-resource-group",
+            "movate-prod-rg",
+            "--azure-acr",
+            "movateprodacr",
+            "--azure-env",
+            "prod",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    # Operator hint surfaces the fact that deploy is now enabled.
+    assert "deploy enabled" in result.stderr
+
+    cfg = load_user_config()
+    t = cfg.targets["prod"]
+    assert t.azure_subscription == "sub-id"
+    assert t.azure_resource_group == "movate-prod-rg"
+    assert t.azure_acr_name == "movateprodacr"
+    assert t.azure_env == "prod"
+
+
+@pytest.mark.unit
+def test_cli_config_add_target_without_azure_flags_hints_deploy_disabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Without --azure-* flags, ``add-target`` works but flags the target
+    as non-deployable — operator sees this at registration time, not
+    later from a confusing ``movate deploy`` error."""
+    from typer.testing import CliRunner  # noqa: PLC0415
+
+    from movate.cli.main import app as cli_app  # noqa: PLC0415
+
+    cfg_path = tmp_path / "cfg.yaml"
+    monkeypatch.setenv("MOVATE_CONFIG_PATH", str(cfg_path))
+    cli_runner = CliRunner(mix_stderr=False)
+
+    result = cli_runner.invoke(
+        cli_app,
+        [
+            "config",
+            "add-target",
+            "local",
+            "--url",
+            "http://127.0.0.1:8000",
+            "--key-env",
+            "MOVATE_LOCAL_KEY",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "deploy NOT enabled" in result.stderr

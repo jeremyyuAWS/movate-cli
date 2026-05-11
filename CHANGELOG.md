@@ -5,6 +5,68 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `movate deploy` + GitHub Actions deploy workflow (v1.0 stage 2)
+
+**Closes the `git push release/* → ACA-deployed service` loop.** Stage 1
+provisioned the infrastructure (Bicep); stage 2 makes deploying a code
+change one command: `movate deploy --target prod`.
+
+- **`movate deploy`** — wraps `az acr build` (cloud-side Docker build,
+  no local Docker needed) + `az containerapp update` for both the API
+  and worker Container Apps, then polls `GET /healthz` until the new
+  revision's `version` field matches the just-built image. Image tag
+  default is `movate:<version>-<git-sha-short>` for traceability.
+  Flags:
+  * `--target <name>` — pulls Azure config from the target's
+    `azure_subscription` / `azure_resource_group` / `azure_acr_name`
+    / `azure_env` fields
+  * `--image-tag <tag>` — override (e.g. for rollbacks)
+  * `--skip-build` — redeploy an existing image (rollback flow:
+    pair with `--image-tag movate:<prev>`)
+  * `--only api` / `--only worker` — partial update for code changes
+    confined to one component
+  * `--dry-run` — print the plan + the exact `az` commands without
+    running them
+  * `--no-wait` — fire-and-forget mode for CI
+  * `--wait-timeout` — `/healthz` poll budget (exit 124 on timeout)
+- **`TargetConfig` extended** with four optional Azure deploy fields
+  (`azure_subscription`, `azure_resource_group`, `azure_acr_name`,
+  `azure_env`). A target without these fields can still be used for
+  `movate submit` / `movate jobs` (read-only access to a runtime),
+  but `movate deploy` errors with a clean pointer back to
+  `movate config add-target`. `add-target` now accepts `--azure-*`
+  flags and surfaces "deploy enabled" or "deploy NOT enabled" at
+  registration time so the operator sees the capability gap immediately.
+- **`.github/workflows/deploy.yml`** — push to `release/<env>` (or
+  manual `workflow_dispatch` with `target_env` input) → Azure federated
+  OIDC login (no stored client secrets) → hydrate `~/.movate/config.yaml`
+  from per-environment GitHub secrets → run `movate deploy`. The
+  workflow scopes itself to a matching GitHub *Environment* so prod
+  deploys can require approval and per-env secret sets can't leak
+  across envs. A small `resolve` job extracts the env name from the
+  branch (`release/prod` → `prod`) before the deploy job picks up the
+  right scoped secrets.
+- **Integration surface = `az` CLI shell-out, not Azure SDKs.** Adds
+  zero new runtime deps; operators already have `az` for everything
+  else. Cost = subprocess management; benefit = clean rollback /
+  retry / debug story (an operator can re-run the printed command
+  by hand if anything looks off).
+- 23 new tests across plan-building (image-tag composition, only-api /
+  only-worker filtering, every missing-Azure-field branch with helpful
+  pointer), CLI integration (dry-run no-subprocess, full run fires
+  3 `az` commands, `--skip-build` skips the build, `--only` filters
+  apps, missing-`az` exits 2, missing-Azure-config exits 2, `az`
+  failure surfaces as exit 1), and the async `/healthz` poll loop
+  (version-match return, exit-124 timeout, transient network errors
+  swallowed and retried via `httpx.MockTransport`).
+
+**What's left for v1.0:** stage 3 (model policy enforcement at
+executor entry) and stage 4 (tenant-isolation audit). With stages 1
+and 2 done, the deploy story is complete — a developer can scaffold
+an agent locally, run evals, push to `release/dev`, and have it
+serving traffic in Azure ~3 minutes later with no manual `az`
+invocations.
+
 ### Added — Server-side email notifications (post-v1.0)
 
 **Per-job email when work finishes.** Closes the "kick off a long
