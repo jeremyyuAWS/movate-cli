@@ -32,6 +32,7 @@ import typer
 from rich.console import Console
 
 import movate
+from movate.cli._console import hint
 from movate.cli._progress import spinner
 from movate.core.user_config import (
     TargetConfig,
@@ -391,7 +392,7 @@ async def _wait_for_healthz(*, url: str, expected_version: str, timeout: float) 
     ``timeout`` seconds, then bail with exit 124."""
     deadline = asyncio.get_event_loop().time() + timeout
     poll_interval = 5.0
-    err.print(f"[dim]waiting for /healthz to report version {expected_version}...[/dim]")
+    hint(f"[dim]waiting for /healthz to report version {expected_version}...[/dim]")
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             try:
@@ -401,9 +402,9 @@ async def _wait_for_healthz(*, url: str, expected_version: str, timeout: float) 
                     seen = body.get("version", "?")
                     if seen == expected_version:
                         return
-                    err.print(f"[dim]  still seeing version {seen}, retrying...[/dim]")
+                    hint(f"[dim]  still seeing version {seen}, retrying...[/dim]")
             except (httpx.HTTPError, ValueError):
-                err.print("[dim]  /healthz unreachable, retrying...[/dim]")
+                hint("[dim]  /healthz unreachable, retrying...[/dim]")
             if asyncio.get_event_loop().time() >= deadline:
                 err.print(
                     f"[yellow]⏱[/yellow] timed out after {timeout:.0f}s waiting "

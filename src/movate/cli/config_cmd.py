@@ -19,6 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._console import hint
 from movate.core.user_config import (
     TargetConfig,
     UserConfigError,
@@ -109,18 +110,18 @@ def add_target(
     path = save_user_config(cfg)
     err.print(f"[green]✓[/green] added target {name!r} → {url}")
     if cfg.active == name:
-        err.print(f"[dim]  (active target is now {name!r})[/dim]")
+        hint(f"[dim]  (active target is now {name!r})[/dim]")
     # Surface which capabilities are configured so the operator sees
     # at registration time whether `movate deploy` will work.
     deploy_ready = all((azure_subscription, azure_resource_group, azure_acr_name, azure_env))
     if deploy_ready:
-        err.print(f"[dim]  (deploy enabled: env={azure_env}, rg={azure_resource_group})[/dim]")
+        hint(f"[dim]  (deploy enabled: env={azure_env}, rg={azure_resource_group})[/dim]")
     else:
-        err.print(
+        hint(
             "[dim]  (deploy NOT enabled — pass --azure-subscription / "
             "--azure-resource-group / --azure-acr / --azure-env to enable)[/dim]"
         )
-    err.print(f"[dim]config: {path}[/dim]")
+    hint(f"[dim]config: {path}[/dim]")
 
 
 @config_app.command("list-targets")
@@ -128,7 +129,7 @@ def list_targets() -> None:
     """Show all registered targets, highlighting the active one."""
     cfg = load_user_config()
     if not cfg.targets:
-        err.print("[dim]no targets registered — run `movate config add-target` first[/dim]")
+        hint("[dim]no targets registered — run `movate config add-target` first[/dim]")
         return
 
     table = Table(title="movate targets")
@@ -162,7 +163,7 @@ def show() -> None:
     """Dump the resolved config (useful for debugging)."""
     cfg = load_user_config()
     stdout.print(cfg.model_dump_json(indent=2))
-    err.print(f"[dim]config path: {config_path()}[/dim]")
+    hint(f"[dim]config path: {config_path()}[/dim]")
 
 
 @config_app.command("remove-target")

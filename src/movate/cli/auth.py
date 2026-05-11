@@ -22,6 +22,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._console import hint
 from movate.core.auth import mint_api_key
 from movate.core.models import ApiKeyEnv, ApiKeyRecord
 from movate.storage import build_storage
@@ -109,7 +110,7 @@ def list_keys(
     keys = asyncio.run(_load_keys(tenant_id=tenant_id, include_revoked=include_revoked))
 
     if not keys:
-        err.print("[dim]no keys found[/dim]")
+        hint("[dim]no keys found[/dim]")
         return
 
     table = Table(title=f"api keys{f' for tenant {tenant_id[:8]}…' if tenant_id else ''}")

@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from movate import __version__  # noqa: E402
+from movate.cli import _console  # noqa: E402
 from movate.cli import bench as bench_cmd  # noqa: E402
 from movate.cli import deploy as deploy_cmd  # noqa: E402
 from movate.cli import doctor as doctor_cmd  # noqa: E402
@@ -102,6 +103,10 @@ def _main(
         level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    # Suppress dim "FYI" stderr hints (the kind of "queued j-1 on dev,
+    # poll with..." line that's friendly interactively but a nuisance
+    # when piping). Error / warning prints stay on regardless.
+    _console.set_quiet(quiet)
 
 
 # ----- Develop --------------------------------------------------------------

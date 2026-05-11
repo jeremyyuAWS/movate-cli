@@ -19,6 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._console import hint
 from movate.cli._output import TableJson
 from movate.cli._progress import spinner
 from movate.core.client import MovateClient, MovateClientError
@@ -120,7 +121,7 @@ def list_jobs(
         # Distinct from "no agents" — operators reading this scan stderr
         # for the dim hint before assuming the call succeeded with no rows.
         filter_desc = f" with status={status.value}" if status else ""
-        err.print(f"[dim]no jobs found{filter_desc}[/dim]")
+        hint(f"[dim]no jobs found{filter_desc}[/dim]")
         return
     table = Table(title=f"{listing.count} job(s) on {target or '<active>'}")
     table.add_column("job_id", style="dim")
@@ -157,7 +158,7 @@ def list_agents(
         stdout.print(listing.model_dump_json(indent=2), soft_wrap=True, highlight=False)
         return
     if not listing.agents:
-        err.print("[dim]no agents registered[/dim]")
+        hint("[dim]no agents registered[/dim]")
         return
     table = Table(title=f"agents on {target or '<active>'}")
     table.add_column("name", style="bold")

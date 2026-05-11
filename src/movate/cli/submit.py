@@ -32,6 +32,7 @@ from rich.console import Console
 from rich.table import Table
 
 from movate.cli._completion import complete_agent_name
+from movate.cli._console import hint
 from movate.cli._output import TableJson
 from movate.cli._progress import spinner
 from movate.core.client import MovateClient, MovateClientError
@@ -193,7 +194,7 @@ async def _submit(
         if not wait:
             # Fire-and-forget: bare JSON on stdout (parsable; pipe-friendly).
             stdout.print(accepted.model_dump_json(), soft_wrap=True, highlight=False)
-            err.print(
+            hint(
                 f"[dim]queued {accepted.job_id} on {target_name}. "
                 f"Poll with: movate jobs show {accepted.job_id}"
                 + (f" -t {target_name}" if target_name != "local" else "")
@@ -228,7 +229,7 @@ async def _submit(
             try:
                 run = await client.get_run(final.result_run_id)
             except MovateClientError as exc:
-                err.print(
+                hint(
                     f"[dim]could not fetch run {final.result_run_id} "
                     f"({exc}); showing job-level summary only.[/dim]"
                 )
@@ -360,16 +361,16 @@ def _desktop_notify(view: JobView, *, target_name: str) -> None:
             # Windows toast notifications need a third-party package
             # (win10toast / windows-toasts). Out of scope for v0.5;
             # fall through to "no-op + hint".
-            err.print(
+            hint(
                 "[dim]--notify: Windows desktop notifications require "
                 "win10toast; install + integrate in a follow-up.[/dim]"
             )
             return
         else:
-            err.print("[dim]--notify: unsupported platform; skipping desktop notification.[/dim]")
+            hint("[dim]--notify: unsupported platform; skipping desktop notification.[/dim]")
             return
     except Exception as exc:  # courtesy notification; never fatal
-        err.print(f"[dim]--notify: desktop notification failed ({exc}); continuing.[/dim]")
+        hint(f"[dim]--notify: desktop notification failed ({exc}); continuing.[/dim]")
 
 
 # ---------------------------------------------------------------------------
