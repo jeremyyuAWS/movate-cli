@@ -43,6 +43,12 @@ def _available_runtimes() -> frozenset[AgentRuntime]:
         available.add(AgentRuntime.NATIVE_ANTHROPIC)
     except ImportError:
         pass
+    try:
+        import openai  # noqa: F401, PLC0415
+
+        available.add(AgentRuntime.NATIVE_OPENAI)
+    except ImportError:
+        pass
     return frozenset(available)
 
 
@@ -99,10 +105,7 @@ def _validate_agent(path: Path, *, strict: bool, run_linter: bool) -> None:
         if spec.runtime == AgentRuntime.NATIVE_ANTHROPIC:
             console.print("[dim]  Install with: uv add 'movate-cli[anthropic]'[/dim]")
         elif spec.runtime == AgentRuntime.NATIVE_OPENAI:
-            console.print(
-                "[dim]  The native OpenAI adapter lands as Tier-2 #7 "
-                "(install hint will appear here once shipped).[/dim]"
-            )
+            console.print("[dim]  Install with: uv add 'movate-cli[openai]'[/dim]")
         elif spec.runtime == AgentRuntime.LANGCHAIN:
             console.print(
                 "[dim]  The LangChain adapter lands as Tier-2 #8 "

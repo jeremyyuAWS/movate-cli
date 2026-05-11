@@ -51,15 +51,15 @@ def test_validate_accepts_explicit_litellm_runtime(tmp_path: Path) -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "runtime",
-    # Only the still-unwired runtimes belong here. NATIVE_ANTHROPIC was
-    # added in Tier-2 #6 — when this build has the ``anthropic`` extra
-    # installed (the default dev env does), declaring it should now
-    # PASS validate, not fail. See test_validate_accepts_native_anthropic_when_installed.
-    [AgentRuntime.NATIVE_OPENAI, AgentRuntime.LANGCHAIN],
+    # NATIVE_ANTHROPIC (Tier-2 #6) + NATIVE_OPENAI (Tier-2 #7) are now
+    # wired when their extras are installed — see the per-runtime
+    # "accepts when installed" tests below. LANGCHAIN is the only one
+    # still pending.
+    [AgentRuntime.LANGCHAIN],
 )
 def test_validate_rejects_unwired_runtime(tmp_path: Path, runtime: AgentRuntime) -> None:
-    """Native_openai + LangChain don't ship adapters yet (Tier-2 #7 / #8).
-    Declaring them in agent.yaml should fail validate with a clear
+    """LangChain doesn't ship an adapter yet (Tier-2 #8).
+    Declaring it in agent.yaml should fail validate with a clear
     message naming the unwired runtime and listing what IS available."""
     agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
     _set_runtime(agent_dir, runtime)
@@ -82,6 +82,18 @@ def test_validate_accepts_native_anthropic_when_installed(tmp_path: Path) -> Non
     result = runner.invoke(cli_app, ["validate", str(agent_dir)])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "runtime:     native_anthropic" in result.stdout
+
+
+@pytest.mark.unit
+def test_validate_accepts_native_openai_when_installed(tmp_path: Path) -> None:
+    """Once the ``openai`` extra is installed (Tier-2 #7 landed),
+    ``runtime: native_openai`` should pass validate."""
+    pytest.importorskip("openai")
+    agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
+    _set_runtime(agent_dir, AgentRuntime.NATIVE_OPENAI)
+    result = runner.invoke(cli_app, ["validate", str(agent_dir)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "runtime:     native_openai" in result.stdout
 
 
 @pytest.mark.unit
