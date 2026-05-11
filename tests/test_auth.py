@@ -361,7 +361,9 @@ def test_cli_auth_revoke_marks_inactive(isolated_db: Path) -> None:
     # In quiet mode the key_id is the only thing on stdout.
     key_id = create.stdout.strip()
 
-    revoke = runner.invoke(app, ["auth", "revoke-key", key_id])
+    # `-y` bypasses the destructive-op confirm prompt that we added
+    # so revoke-key has the same scripting affordance as Linux `rm -f`.
+    revoke = runner.invoke(app, ["auth", "revoke-key", key_id, "-y"])
     assert revoke.exit_code == 0, revoke.stdout
 
     # `list-keys` (default: active only) no longer shows the key.

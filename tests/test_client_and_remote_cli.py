@@ -339,7 +339,9 @@ def test_cli_config_remove_target_clears_active_if_needed(tmp_path: Path, monkey
             active="prod",
         )
     )
-    result = runner.invoke(cli_app, ["config", "remove-target", "prod"])
+    # `-y` skips the destructive-op confirm prompt added in the
+    # confirmation-prompts pass.
+    result = runner.invoke(cli_app, ["config", "remove-target", "prod", "-y"])
     assert result.exit_code == 0
     from movate.core.user_config import load_user_config  # noqa: PLC0415
 
