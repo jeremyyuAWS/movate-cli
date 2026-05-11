@@ -26,6 +26,7 @@ Module state instead of an env var because:
 
 from __future__ import annotations
 
+import typer
 from rich.console import Console
 
 stderr = Console(stderr=True)
@@ -123,6 +124,25 @@ def warn(message: str, *, icon: str = "⚠") -> None:
     stderr.print(f"[yellow]{icon}[/yellow] {message}")
 
 
+def confirm_destructive(prompt: str, *, yes: bool) -> None:
+    """Gate a destructive operation behind an interactive confirm.
+
+    Pattern: every destructive command (``auth revoke-key``,
+    ``config remove-target``, ``tenants clear-budget``) takes a
+    ``--yes/-y`` flag and calls this helper first. In a TTY the
+    operator gets a yes/no prompt; in a script they pass ``-y`` to
+    bypass it. When stdin isn't a TTY and ``-y`` wasn't passed,
+    Typer / Click raise ``Abort`` (exit 1) rather than block — so
+    CI pipelines fail loud if they forgot ``-y``.
+
+    Centralized here so every destructive command uses identical
+    wording shape ("Y/N?") and the same exit semantics."""
+    if yes:
+        return
+    if not typer.confirm(prompt):
+        raise typer.Abort()
+
+
 def success(message: str) -> None:
     """Print a green ``✓``-prefixed success line to stderr.
 
@@ -134,6 +154,7 @@ def success(message: str) -> None:
 
 
 __all__ = [
+    "confirm_destructive",
     "error",
     "get_global_target",
     "hint",

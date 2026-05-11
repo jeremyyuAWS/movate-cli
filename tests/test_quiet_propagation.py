@@ -20,6 +20,7 @@ from __future__ import annotations
 import pytest
 
 from movate.cli._console import (
+    confirm_destructive,
     error,
     get_global_target,
     is_quiet,
@@ -142,6 +143,53 @@ def test_error_helper_not_suppressed_by_quiet() -> None:
 
     out = buf_console.file.getvalue()  # type: ignore[union-attr]
     assert "world is on fire" in out
+
+
+@pytest.mark.unit
+def test_confirm_destructive_yes_skips_prompt() -> None:
+    """When ``yes=True`` we return immediately — no prompt, no abort,
+    no stdin interaction at all. This is the scripting path."""
+    confirm_destructive("Drop the production database?", yes=True)
+    # Reaching this line is the assertion — no exception raised.
+
+
+@pytest.mark.unit
+def test_confirm_destructive_no_aborts_when_stdin_says_no(monkeypatch) -> None:
+    """When ``yes=False`` and the operator answers no, Click raises
+    typer.Abort (which Typer translates to exit 1 + "Aborted."). We
+    simulate "no" by patching click's ``confirm`` to return False."""
+    import typer  # noqa: PLC0415
+
+    monkeypatch.setattr(typer, "confirm", lambda _: False)
+    with pytest.raises(typer.Abort):
+        confirm_destructive("Delete everything?", yes=False)
+
+
+@pytest.mark.unit
+def test_confirm_destructive_no_proceeds_when_stdin_says_yes(monkeypatch) -> None:
+    """When the operator answers yes interactively, we proceed
+    silently — same outcome as ``yes=True``."""
+    import typer  # noqa: PLC0415
+
+    monkeypatch.setattr(typer, "confirm", lambda _: True)
+    confirm_destructive("Delete everything?", yes=False)
+
+
+@pytest.mark.unit
+def test_cli_revoke_key_aborts_without_yes(monkeypatch, tmp_path) -> None:
+    """``movate auth revoke-key`` without ``-y`` calls typer.confirm.
+    In CliRunner stdin is closed so confirm raises Abort → exit 1."""
+    from typer.testing import CliRunner  # noqa: PLC0415
+
+    from movate.cli.main import app as cli_app  # noqa: PLC0415
+
+    monkeypatch.setenv("MOVATE_SQLITE_PATH", str(tmp_path / "movate.db"))
+    runner = CliRunner(mix_stderr=False)
+    # No `-y`, no piped "y\n" → Abort.
+    result = runner.invoke(cli_app, ["auth", "revoke-key", "some-key-id"])
+    assert result.exit_code == 1
+    # Click's Abort prints "Aborted." to stderr.
+    assert "Abort" in result.stderr or "Aborted" in result.stderr
 
 
 @pytest.mark.unit

@@ -19,7 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from movate.cli._console import error, hint, success
+from movate.cli._console import confirm_destructive, error, hint, success
 from movate.core.user_config import (
     TargetConfig,
     UserConfigError,
@@ -169,14 +169,22 @@ def show() -> None:
 @config_app.command("remove-target")
 def remove_target(
     name: str = typer.Argument(..., help="Name of a registered target."),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirm prompt (use in scripts / CI).",
+    ),
 ) -> None:
     """Delete a target. If it was active, the active pointer is cleared
     (next CLI call will require --target until you `config use` again).
-    """
+
+    Prompts before deleting; pass ``-y`` to bypass for scripts."""
     cfg = load_user_config()
     if name not in cfg.targets:
         error(f"target {name!r} not found")
         raise typer.Exit(code=2)
+    confirm_destructive(f"Remove target {name!r} from config?", yes=yes)
     del cfg.targets[name]
     if cfg.active == name:
         cfg.active = None
