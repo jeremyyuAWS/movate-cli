@@ -386,7 +386,28 @@ class FailureRecord(BaseModel):
 
 
 class JudgeMethod(StrEnum):
+    """How the eval engine scores an agent's output against ``case.expected``.
+
+    * ``exact`` — full-dict equality. Strict; useful for finite-label
+      classifiers and other deterministic agents where every output key
+      is known.
+
+    * ``subset_match`` — every key in ``expected`` must appear in
+      ``actual`` with the same value; extra keys in ``actual`` are
+      tolerated. Useful when the dataset only pins a SUBSET of the
+      output (e.g. ``expected: {"tone": "positive"}`` for an agent
+      whose full output is ``{headline, body, next_steps, tone}``).
+      Deterministic — no LLM judge needed, no cross-family
+      enforcement, no API key required. Cheaper + faster than
+      ``llm_judge`` whenever the subset is enough.
+
+    * ``llm_judge`` — fire a second LLM call against a rubric to score
+      open-ended outputs. Cross-family enforced (judge family must
+      differ from agent family).
+    """
+
     EXACT = "exact"
+    SUBSET_MATCH = "subset_match"
     LLM_JUDGE = "llm_judge"
 
 

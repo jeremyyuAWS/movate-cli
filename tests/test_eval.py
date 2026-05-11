@@ -9,6 +9,7 @@ import pytest
 from movate.core.eval import (
     EvalConfigError,
     EvalEngine,
+    _subset_match,  # type: ignore[attr-defined]
     aggregate_scores,
     assert_cross_family,
     load_dataset,
@@ -198,6 +199,86 @@ def test_load_judge_from_yaml(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_load_judge_subset_match_no_model_required(tmp_path: Path) -> None:
+    """``subset_match`` is deterministic — no LLM judge needed, so the
+    YAML can omit ``model`` and ``rubric``. ``_validate_judge`` should
+    accept this shape without complaint (the LLM_JUDGE-only requirement
+    of ``model + rubric`` doesn't apply)."""
+    agent_dir = _scaffold(tmp_path / "demo")
+    (agent_dir / "evals" / "judge.yaml").write_text("method: subset_match\nthreshold: 0.7\n")
+    bundle = load_agent(agent_dir)
+    judge = load_judge_config(bundle)
+    assert judge.method is JudgeMethod.SUBSET_MATCH
+    assert judge.model is None
+    assert judge.threshold == 0.7
+
+
+# ---------------------------------------------------------------------------
+# _subset_match — pure scoring function
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_subset_match_perfect_when_all_expected_keys_match() -> None:
+    """Every key in ``expected`` appears in ``actual`` with the same
+    value — extra keys in ``actual`` are tolerated."""
+    actual = {"tone": "positive", "headline": "Approved!", "body": "..."}
+    expected = {"tone": "positive"}
+    score, rationale = _subset_match(actual, expected)
+    assert score == 1.0
+    assert rationale == "subset match"
+
+
+@pytest.mark.unit
+def test_subset_match_zero_when_a_key_is_missing() -> None:
+    actual = {"headline": "Approved", "body": "..."}  # no `tone`
+    expected = {"tone": "positive"}
+    score, rationale = _subset_match(actual, expected)
+    assert score == 0.0
+    assert "missing" in rationale
+    assert "tone" in rationale
+
+
+@pytest.mark.unit
+def test_subset_match_zero_when_value_differs() -> None:
+    """Wrong value gets a detailed rationale naming the field, the
+    actual value, and the expected — CI diffs can point at the
+    specific regression."""
+    actual = {"tone": "neutral", "extra": "fine"}
+    expected = {"tone": "positive"}
+    score, rationale = _subset_match(actual, expected)
+    assert score == 0.0
+    assert "tone" in rationale
+    assert "'neutral'" in rationale
+    assert "'positive'" in rationale
+
+
+@pytest.mark.unit
+def test_subset_match_lists_multiple_failures() -> None:
+    """Multiple failing fields all appear in the rationale — not just
+    the first — so the operator sees the whole shape of the regression."""
+    actual = {"tone": "neutral"}  # missing decision_label; wrong tone
+    expected = {"tone": "positive", "decision_label": "approve"}
+    score, rationale = _subset_match(actual, expected)
+    assert score == 0.0
+    assert "tone" in rationale
+    assert "decision_label" in rationale
+
+
+@pytest.mark.unit
+def test_subset_match_empty_expected_always_passes() -> None:
+    """Edge case: empty expected dict means "no constraints" → always
+    passes. Documented behaviour, not a bug."""
+    score, _ = _subset_match({"anything": "goes"}, {})
+    assert score == 1.0
+
+
+# ---------------------------------------------------------------------------
+# subset_match through the eval engine end-to-end
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
 def test_load_judge_invalid_yaml_raises(tmp_path: Path) -> None:
     agent_dir = _scaffold(tmp_path / "demo")
     (agent_dir / "evals" / "judge.yaml").write_text("method: not-a-method")
@@ -232,6 +313,66 @@ async def test_engine_exact_match_pass(
     assert summary.pass_rate == 0.5
     # Default per-case threshold is 0.7 → second case fails → overall fail.
     assert not summary.overall_pass
+
+
+@pytest.mark.unit
+async def test_engine_subset_match_passes_when_expected_keys_in_actual(
+    tmp_path: Path, pricing: PricingTable, storage, tracer
+) -> None:
+    """The whole reason ``subset_match`` exists: an agent's output has
+    MORE fields than the dataset pins. Exact-match would always fail;
+    subset-match passes iff the pinned subset matches.
+
+    Mimics case-reasoner's shape: agent outputs {message, extra};
+    dataset pins {message: 'hello'}. Score = 1.0."""
+    agent_dir = _scaffold(tmp_path / "demo")
+    (agent_dir / "evals" / "judge.yaml").write_text("method: subset_match\nthreshold: 0.7\n")
+    (agent_dir / "evals" / "dataset.jsonl").write_text(
+        # Dataset pins only `message`; agent's full output will have more.
+        '{"input": {"text": "hi"}, "expected": {"message": "hello"}}\n'
+    )
+    # Allow the agent's output schema to carry extra fields (the whole
+    # point of subset_match — agent output is richer than the pin).
+    (agent_dir / "schema" / "output.json").write_text(
+        '{"$schema": "https://json-schema.org/draft/2020-12/schema",'
+        '"type": "object", "additionalProperties": true,'
+        '"required": ["message"],'
+        '"properties": {"message": {"type": "string"}}}'
+    )
+    bundle = load_agent(agent_dir)
+    provider = MockProvider(response='{"message": "hello", "extra_field": "fine"}')
+    executor = _executor(provider, pricing, storage, tracer)
+    engine = EvalEngine(executor=executor, provider=provider)
+
+    summary = await engine.run(bundle)
+    assert summary.sample_count == 1
+    assert summary.cases[0].aggregated_score == 1.0
+    assert summary.cases[0].passed
+
+
+@pytest.mark.unit
+async def test_engine_subset_match_fails_on_value_drift(
+    tmp_path: Path, pricing: PricingTable, storage, tracer
+) -> None:
+    """Subset_match still catches the regression that matters:
+    expected key present in actual but with a different value → 0.0
+    with a detailed rationale identifying the field."""
+    agent_dir = _scaffold(tmp_path / "demo")
+    (agent_dir / "evals" / "judge.yaml").write_text("method: subset_match\nthreshold: 0.7\n")
+    (agent_dir / "evals" / "dataset.jsonl").write_text(
+        '{"input": {"text": "hi"}, "expected": {"message": "wanted"}}\n'
+    )
+    bundle = load_agent(agent_dir)
+    provider = MockProvider(response='{"message": "got_something_else"}')
+    executor = _executor(provider, pricing, storage, tracer)
+    engine = EvalEngine(executor=executor, provider=provider)
+
+    summary = await engine.run(bundle)
+    assert summary.cases[0].aggregated_score == 0.0
+    # Rationale captured in run details — the operator should be able
+    # to see *what* field drifted (CI diff would name it).
+    case_rationale = summary.cases[0].runs[0].rationale
+    assert "message" in case_rationale
 
 
 @pytest.mark.unit

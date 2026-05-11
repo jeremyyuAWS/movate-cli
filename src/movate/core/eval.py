@@ -366,6 +366,9 @@ class EvalEngine:
         if judge.method == JudgeMethod.EXACT:
             return (1.0, "exact match") if actual == case.expected else (0.0, "mismatch")
 
+        if judge.method == JudgeMethod.SUBSET_MATCH:
+            return _subset_match(actual, case.expected)
+
         assert judge.model is not None and judge.rubric is not None  # validated upstream
         prompt = _JUDGE_PROMPT.format(
             input_json=json.dumps(case.input),
@@ -380,6 +383,26 @@ class EvalEngine:
         )
         response = await self._provider.complete(req)
         return _parse_judge_response(response.text)
+
+
+def _subset_match(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[float, str]:
+    """``actual`` is a superset of ``expected``: every key in ``expected``
+    must appear in ``actual`` with the same value. Extra keys in
+    ``actual`` are tolerated.
+
+    Returns ``(1.0, "subset match")`` on full pass, or
+    ``(0.0, "subset mismatch: <details>")`` listing every failing field.
+    Detail line names the missing / wrong-valued keys so a CI diff can
+    point at the specific regression rather than "everything's wrong"."""
+    failures: list[str] = []
+    for key, expected_val in expected.items():
+        if key not in actual:
+            failures.append(f"{key!r} (missing)")
+        elif actual[key] != expected_val:
+            failures.append(f"{key!r} (got {actual[key]!r}, want {expected_val!r})")
+    if not failures:
+        return (1.0, "subset match")
+    return (0.0, f"subset mismatch: {', '.join(failures)}")
 
 
 def _parse_judge_response(text: str) -> tuple[float, str]:
