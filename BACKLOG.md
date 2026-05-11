@@ -247,17 +247,37 @@ out so you can prioritize the code + business work independently.
 
 ## 7. LangGraph swap-in + advanced (Phase 7 / v1.1+)
 
-- [ ] **`workflow/compilers/langgraph.py`** `[HIGH] [v1.1] [1w]` — alternative compiler from `WorkflowGraph` IR; gated by `runtime: langgraph`.
-- [ ] **Conditional edges** `[HIGH] [v1.1] [2-3d]` — `edges: [{from: A, to: B, when: "$.score > 0.7"}]`.
-- [ ] **Parallel fan-out** `[HIGH] [v1.1] [2-3d]` — `fan_out` nodes with deterministic merge.
-- [ ] **HITL nodes (`type: human`)** `[HIGH] [v1.1] [1w]` — pause workflow, await external resolve via `/runs/{id}/resume`.
-- [ ] **Checkpointing (LangGraph-native)** `[HIGH] [v1.1] [2-3d]` — resume from last successful node after failure.
-- [ ] **Tool registry (`movate.tools`)** `[HIGH] [v1.1] [1w]` — Python decorator → JSON schema → injected into prompt + tool-calling loop.
-- [ ] **Built-in tools — `kb_search`, `http_get`, `sql_query`** `[MED] [v1.1] [3-5d]` — high reuse across customer engagements.
+### Tier 2 follow-up: determinism implementation
+
+The determinism semantics are *documented* in
+[docs/determinism.md](docs/determinism.md) (shipped with PR #6). The
+items below ship the *code* that makes those semantics enforceable —
+this is the "ship determinism" Tier 2 follow-up.
+
+Scoped together because they share an IR change (the LangGraph spike's
+findings in [docs/langgraph-seam.md](docs/langgraph-seam.md)) and a
+single API surface (`POST /workflows/{id}/resume`). Sequence matters:
+checkpointer first, then resume, then HITL on top.
+
+- [ ] **`workflow/compilers/langgraph.py`** `[HIGH] [v1.1] [1w]` — alternative compiler from `WorkflowGraph` IR; gated by `workflow.yaml: runtime: langgraph`. Built against the seam findings in [docs/langgraph-seam.md](docs/langgraph-seam.md); needs the additive IR fields described there (reducer annotations, conditional-edge DSL, HUMAN-node resume schema, checkpointer config). Delete `scripts/langgraph_prototype.py` after this lands.
+- [ ] **Workflow checkpointer (memory / sqlite / postgres)** `[HIGH] [v1.1] [2-3d]` — backs LangGraph's `BaseCheckpointSaver` Protocol for the three storage providers we already ship. Postgres backend adds new tables to the existing schema; sqlite mirrors. **Per-tenant key isolation is load-bearing** — checkpoint key must include `tenant_id` so tenant A can't resume tenant B's HITL workflow. Selected via workflow YAML field `checkpointer: <kind>` (default: memory if no HUMAN nodes, else require explicit choice).
+- [ ] **`POST /workflows/{id}/resume` HTTP API** `[HIGH] [v1.1] [≤1d]` — external system supplies the human's payload, runtime merges into checkpointed state, calls `graph.invoke(None, config={"thread_id": run_id})` to continue. Validates payload against the HUMAN node's `resume_payload_schema`. Returns the same shape as the original `/run` response. CLI counterpart: `movate workflows resume <run-id> '<json>'`.
+- [ ] **HITL nodes (`type: human`)** `[HIGH] [v1.1] [1w]` — first-class node type; pause graph via `interrupt_before`; resume via the API above. `WorkflowNode.resume_payload_schema` field (additive IR change per docs/langgraph-seam.md §D). Compiler enforces `type == HUMAN ⇒ resume_payload_schema is not None`.
+- [ ] **Conditional edges** `[HIGH] [v1.1] [2-3d]` — `edges: [{from: A, to: B, when: "$.score > 0.7"}]`. JSONPath-like DSL (per docs/langgraph-seam.md §B), parsed at compile time, evaluated at runtime — no `eval` of operator-authored strings. Last conditional edge per source must have `when: null` ("else" / default).
+- [ ] **Parallel fan-out + reducer annotations** `[HIGH] [v1.1] [2-3d]` — multiple `PARALLEL_FAN_OUT` edges run concurrently; state keys written by parallel branches need explicit reducers via `x-movate-reducer: append|union|max|replace` schema annotation (docs/langgraph-seam.md §A). Compiler rejects parallel writes to keys without a reducer.
+- [ ] **Branch-level failure invalidation** `[HIGH] [v1.1] [≤1d, after checkpointer]` — when one branch of a conditional / parallel topology fails, sibling branches that completed stay valid in the checkpoint. Operator can resume by fixing only the failing branch. Today's whole-workflow rollback semantics apply only to v0.3 linear workflows.
+- [ ] **Tool registry with side-effect declarations** `[HIGH] [v1.1] [1w]` — `movate.tools` Python decorator → JSON schema → injected into prompt + tool-calling loop. Required `side_effects: true|false` flag on each tool. Checkpointer consults the flag on resume: `side_effects: true` tools MUST NOT replay (state mutation already happened); idempotent tools replay safely. Compiler rejects workflows that cross a `side_effects: true` boundary on resume without explicit `--allow-replay-side-effects` opt-in.
+- [ ] **Cached-LLM-response replay mode (`--replay-cached`)** `[MED] [v1.1] [2-3d]` — content-addressed cache on `(prompt_hash, model.provider, model.params)` → `response.data`. `movate run --replay-cached` uses recorded responses instead of live calls; cache miss falls through to the live model. Useful for (a) debugging downstream nodes with deterministic upstream, (b) CI evals testing prompt logic without burning API budget. NOT a substitute for `--mock` (mock is faster + entirely hermetic).
+- [ ] **Workflow replay CLI (`movate run --replay <workflow-run-id>`)** `[MED] [v1.1] [2-3d]` — single-agent replay (v0.4) extended to workflows. Decision per node: full re-execute (default), or replay-from-checkpoint when `--from-checkpoint` is set. Pairs with the checkpointer above.
+
+### Phase 7 — other v1.1+ work
+
+- [ ] **Built-in tools — `kb_search`, `http_get`, `sql_query`** `[MED] [v1.1] [3-5d]` — high reuse across customer engagements. Each declares `side_effects:` honestly (`http_get` defaults false on GET; `sql_query` errors if write detected).
 - [ ] **Skill packs (composable rule + prompt bundles)** `[MED] [v1.2] [1w]` — `grounding`, `citation_enforcement`, `pii_redaction`.
 - [ ] **Provider routing rules (cost / latency / region)** `[HIGH] [v1.1] [3-5d]` — `models/routing.yaml`; declarative, enforced at executor.
 - [ ] **Memory provider (PRD §F)** `[MED] [v1.2] [1w]` — short-term + long-term; sqlite + Postgres backends.
 - [ ] **Retrieval provider (pgvector)** `[HIGH] [v1.2] [1w]` — embed + ANN; canonical "grounding" implementation.
+- [ ] **`movate lifecycle promote <agent> <state>` CLI** `[MED] [v1.1] [≤1d]` — audit-logged state transitions on `AgentLifecycle` (the field landed in PR #6). Pairs with a `lifecycle_history` table on agent records so promotions / demotions are auditable.
 - [ ] **RBAC** `[MED] [v1.2] [1w]` — role-keyed scopes on `mvt_*` keys.
 - [ ] **Azure AD SSO** `[MED] [v1.3] [1w]`.
 - [ ] **Visual workflow editor** `[—] [post-v2] [—]` — explicitly out per PRD §2.

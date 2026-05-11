@@ -332,21 +332,28 @@ descending likelihood:
 
 ## What v1.1 will add
 
-Tracked separately in BACKLOG.md + `docs/langgraph-seam.md`:
+Tracked as a single coherent bundle ("Tier 2 follow-up: determinism
+implementation") at the top of Phase 7 in
+[BACKLOG.md](../BACKLOG.md#7-langgraph-swap-in--advanced-phase-7--v11).
+Sequenced in dependency order:
 
-* Workflow checkpointer (memory / sqlite / postgres) with per-tenant
-  isolation.
-* `POST /workflows/{id}/resume` HTTP API for HITL.
-* Cached-LLM-response replay mode (`movate run --replay-cached`).
-* `tool: side_effects: true|false` declaration on the (forthcoming) tool
-  registry.
-* Conditional + parallel topology failure semantics — branch-level
-  invalidation rather than whole-workflow rollback.
-* Workflow replay CLI (`movate run --replay <workflow-run-id>`).
+1. `workflow/compilers/langgraph.py` — alternative compiler from the IR.
+2. Workflow checkpointer (memory / sqlite / postgres) with per-tenant
+   key isolation.
+3. `POST /workflows/{id}/resume` HTTP API + CLI counterpart.
+4. HITL nodes (`type: human`) — pauses + resumes through the API above.
+5. Conditional edges + JSONPath-like DSL.
+6. Parallel fan-out + reducer annotations.
+7. Branch-level failure invalidation.
+8. Tool registry with `side_effects: true|false` declaration.
+9. Cached-LLM-response replay mode (`movate run --replay-cached`).
+10. Workflow replay CLI.
 
-The shape of these is sketched in
+The shape of each is sketched in
 [`docs/langgraph-seam.md`](./langgraph-seam.md) — that doc records what
-the LangGraph spike learned about the IR additions each one needs.
+the LangGraph spike learned about the IR additions each one needs. The
+BACKLOG entries cite this doc + the seam doc so reviewers can trace
+each item from "documented promise" to "queued work" to "shipped".
 
 ---
 
