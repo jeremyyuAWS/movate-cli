@@ -1,0 +1,46 @@
+api_version: movate/v1
+kind: Agent
+
+name: case-reasoner
+version: 0.1.0
+description: >-
+  Customer-facing reason generator for warranty / RMA triage. Takes a
+  validator decision + indicators and writes a human-friendly headline,
+  body, and concrete next steps. Replaces hard-coded template lookups
+  with context-aware copy: empathetic for human_review, specific about
+  what failed for auto_reject.
+owner: platform-team
+
+model:
+  provider: openai/gpt-4o-mini-2024-07-18
+  params:
+    temperature: 0.2
+    max_tokens: 512
+  fallback:
+    - provider: anthropic/claude-haiku-4-5-20251001
+      params:
+        temperature: 0.2
+        max_tokens: 512
+
+prompt: ./prompt.md
+
+schema:
+  input: ./schema/input.json
+  output: ./schema/output.json
+
+evals:
+  dataset: ./evals/dataset.jsonl
+
+timeouts:
+  call_ms: 20000
+  total_ms: 30000
+
+budget:
+  # Each call is ~600 in + ~200 out tokens of gpt-4o-mini = ~$0.0002.
+  # Cap well above that so a runaway prompt fails loud before billing.
+  max_cost_usd_per_run: 0.05
+
+tags:
+  - warranty
+  - triage
+  - customer-comms
