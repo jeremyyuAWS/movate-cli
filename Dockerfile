@@ -62,11 +62,18 @@ RUN uv sync --all-extras --no-dev --frozen
 # container if an operator shells in. Production runs ignore this.
 COPY src/movate/templates/ /opt/movate/.venv/lib/python3.11/site-packages/movate/templates/
 
-# Place for the operator-provided agents/ directory. ACA mounts a
-# volume here in stage-2 multi-tenant deployments; for v1.0 the image
-# ships an empty dir and the operator either bakes agents in at
-# build time (with a derived image) or accepts an empty registry.
-RUN mkdir -p /app/agents
+# Operator-provided agents/ directory. ACA can mount a volume here
+# for dynamic multi-agent loading (post-v1.0), but the default
+# pattern bakes the repo's agents/ into the image so the runtime
+# ships with a known catalog. Empty if the repo has no agents/ yet.
+#
+# The COPY uses the directory itself + `--parents`-free trick: COPYing
+# a directory creates the destination if it doesn't exist, so we don't
+# need a separate mkdir. If `agents/` is missing in the build context,
+# Docker errors out — that's intentional, since shipping zero agents
+# is almost always a mistake. To deploy with no agents (volume-mount
+# pattern), add an empty `agents/.keep` file.
+COPY agents/ /app/agents/
 ENV MOVATE_AGENTS_PATH=/app/agents
 
 # Default tracer goes to stdout — Container Apps captures stdout to
