@@ -78,11 +78,19 @@ def test_validate_rejects_unwired_runtime_by_simulating_missing_extra(
 
 
 @pytest.mark.unit
-def test_validate_accepts_native_anthropic_when_installed(tmp_path: Path) -> None:
+def test_validate_accepts_native_anthropic_when_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Once the ``anthropic`` extra is installed (Tier-2 #6 landed),
     ``runtime: native_anthropic`` should pass validate — same code
-    path as the LiteLLM happy case."""
+    path as the LiteLLM happy case.
+
+    ``monkeypatch.chdir`` isolates this test from the repo's own
+    ``movate.yaml`` which now declares ``runtime.allowed: [litellm]``
+    as the project-wide stance. Running from tmp_path picks up no
+    project config, so the validate flow uses the permissive default."""
     pytest.importorskip("anthropic")
+    monkeypatch.chdir(tmp_path)
     agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
     _set_runtime(agent_dir, AgentRuntime.NATIVE_ANTHROPIC)
     result = runner.invoke(cli_app, ["validate", str(agent_dir)])
@@ -91,10 +99,14 @@ def test_validate_accepts_native_anthropic_when_installed(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_validate_accepts_native_openai_when_installed(tmp_path: Path) -> None:
+def test_validate_accepts_native_openai_when_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Once the ``openai`` extra is installed (Tier-2 #7 landed),
-    ``runtime: native_openai`` should pass validate."""
+    ``runtime: native_openai`` should pass validate (when not gated
+    by RuntimePolicy)."""
     pytest.importorskip("openai")
+    monkeypatch.chdir(tmp_path)
     agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
     _set_runtime(agent_dir, AgentRuntime.NATIVE_OPENAI)
     result = runner.invoke(cli_app, ["validate", str(agent_dir)])
@@ -103,7 +115,9 @@ def test_validate_accepts_native_openai_when_installed(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_validate_accepts_langchain_when_installed(tmp_path: Path) -> None:
+def test_validate_accepts_langchain_when_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Once the ``langchain`` extra is installed (Tier-2 #8 landed),
     ``runtime: langchain`` should pass validate. NOTE: the agent's
     ``model.provider`` field on this runtime is an entry-point spec
@@ -111,11 +125,51 @@ def test_validate_accepts_langchain_when_installed(tmp_path: Path) -> None:
     yet (that happens at execute time), so the agent passes even if
     the entry-point doesn't exist."""
     pytest.importorskip("langchain_core")
+    monkeypatch.chdir(tmp_path)
     agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
     _set_runtime(agent_dir, AgentRuntime.LANGCHAIN)
     result = runner.invoke(cli_app, ["validate", str(agent_dir)])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "runtime:     langchain" in result.stdout
+
+
+@pytest.mark.unit
+def test_validate_runtime_policy_blocks_native_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``movate.yaml: runtime.allowed: [litellm]`` enforces 'A by default' —
+    an agent that opts into a native runtime is rejected at validate
+    time with a clear policy-violation message."""
+    pytest.importorskip("anthropic")
+    monkeypatch.chdir(tmp_path)
+    # Drop a movate.yaml that locks the project to LiteLLM only.
+    (tmp_path / "movate.yaml").write_text("runtime:\n  allowed: [litellm]\n")
+
+    agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
+    _set_runtime(agent_dir, AgentRuntime.NATIVE_ANTHROPIC)
+    result = runner.invoke(cli_app, ["validate", str(agent_dir)])
+    assert result.exit_code == 2, result.stdout + result.stderr
+    assert "runtime policy violation" in result.stdout
+    # The error names both the agent's runtime and the allowed set.
+    assert "native_anthropic" in result.stdout
+    assert "litellm" in result.stdout
+
+
+@pytest.mark.unit
+def test_validate_runtime_policy_permissive_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a ``runtime.allowed`` block in movate.yaml, any
+    installed runtime is permitted — backwards-compatible default."""
+    pytest.importorskip("anthropic")
+    monkeypatch.chdir(tmp_path)
+    # movate.yaml exists but says nothing about runtime.
+    (tmp_path / "movate.yaml").write_text("agents_dir: ./agents\n")
+
+    agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
+    _set_runtime(agent_dir, AgentRuntime.NATIVE_ANTHROPIC)
+    result = runner.invoke(cli_app, ["validate", str(agent_dir)])
+    assert result.exit_code == 0, result.stdout + result.stderr
 
 
 @pytest.mark.unit

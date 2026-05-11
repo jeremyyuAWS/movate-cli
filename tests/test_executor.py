@@ -319,6 +319,81 @@ def test_executor_rejects_both_provider_and_registry(
         )
 
 
+@pytest.mark.unit
+async def test_executor_enforces_runtime_policy_at_execute_time(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """A bundle that opts into a banned runtime should fail at execute
+    time with a policy_violation error — even if validate was skipped.
+    Defense-in-depth: a worker that loaded an agent over HTTP can't
+    bypass the project's 'A by default' stance."""
+    import yaml  # noqa: PLC0415
+
+    from movate.core.config import RuntimePolicy  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "demo")
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.NATIVE_ANTHROPIC.value
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+    bundle = load_agent(bundle_dir)
+
+    # Build a registry that DOES have native_anthropic wired — so the
+    # rejection is from the policy, not from "runtime missing".
+    registry = ProviderRegistry(default_litellm=MockProvider())
+    registry.register(AgentRuntime.NATIVE_ANTHROPIC, MockProvider())
+
+    executor = Executor(
+        registry=registry,
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+        runtime_policy=RuntimePolicy(allowed=[AgentRuntime.LITELLM]),
+    )
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    assert response.status == "error"
+    assert response.error is not None
+    assert response.error.type == "policy_violation"
+    assert "native_anthropic" in response.error.message
+    assert "litellm" in response.error.message
+
+
+@pytest.mark.unit
+async def test_executor_runtime_policy_permissive_by_default(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """Without an explicit ``runtime_policy=``, the executor lets every
+    registered runtime through — matches the v0.5 baseline behavior so
+    existing tests / code paths aren't affected."""
+    import yaml  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "demo")
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.NATIVE_ANTHROPIC.value
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+    bundle = load_agent(bundle_dir)
+
+    registry = ProviderRegistry(default_litellm=MockProvider())
+    registry.register(AgentRuntime.NATIVE_ANTHROPIC, MockProvider())
+
+    executor = Executor(
+        registry=registry,
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+        # No runtime_policy — permissive default.
+    )
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    assert response.status == "success"
+
+
 # ---------------------------------------------------------------------------
 # Schema failures
 # ---------------------------------------------------------------------------

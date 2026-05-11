@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from jsonschema import ValidationError as JsonSchemaError
 
-from movate.core.config import ModelPolicy
+from movate.core.config import ModelPolicy, RuntimePolicy
 from movate.core.failures import (
     DEFAULT_RETRY,
     BudgetExceededError,
@@ -72,6 +72,7 @@ class Executor:
         tracer: Tracer,
         tenant_id: str = "local",
         policy: ModelPolicy | None = None,
+        runtime_policy: RuntimePolicy | None = None,
     ) -> None:
         """One of ``provider`` (legacy single-runtime) OR ``registry``
         (multi-runtime, v0.6+) must be set. Passing ``provider`` is
@@ -97,6 +98,10 @@ class Executor:
         # nothing, preserving v0.1-style behavior for callers that haven't
         # opted in yet (tests, downstream embedders).
         self._policy = policy or ModelPolicy()
+        # RuntimePolicy gates which AgentRuntime values are permitted —
+        # belt-and-braces against an agent.yaml that skipped `movate
+        # validate` (e.g. loaded over HTTP by a worker). Permissive default.
+        self._runtime_policy = runtime_policy or RuntimePolicy()
 
     async def execute(
         self,
@@ -149,10 +154,19 @@ class Executor:
 
         started = time.monotonic()
         try:
-            # Runtime dispatch FIRST — if the agent declared a runtime
-            # we don't have an adapter for (native_anthropic /
-            # native_openai / langchain in v0.5), fail fast with a clear
-            # message before doing any side effects or budget checks.
+            # Runtime POLICY check first — if the project bans this
+            # runtime (e.g. movate.yaml: runtime.allowed: [litellm]),
+            # surface as PolicyViolationError so the failure trail
+            # matches model-policy violations.
+            runtime_violation = self._runtime_policy.check_agent(spec)
+            if runtime_violation is not None:
+                raise PolicyViolationError(runtime_violation)
+
+            # Runtime AVAILABILITY check — if the agent declared a
+            # runtime we don't have an adapter for (e.g. opted into a
+            # native runtime whose optional extra isn't installed),
+            # fail fast with a SchemaError before doing any side
+            # effects or budget checks.
             try:
                 provider_for_run = self._registry.get(spec.runtime)
             except UnregisteredRuntimeError as exc:
