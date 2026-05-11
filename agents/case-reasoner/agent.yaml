@@ -11,6 +11,11 @@ description: >-
   what failed for auto_reject.
 owner: platform-team
 
+# Validated tier: passes the real-LLM eval gate (4/4 at subset_match).
+# Not certified — would require a sign-off review of the rubric +
+# customer-facing copy before going to that tier.
+lifecycle: validated
+
 model:
   provider: openai/gpt-4o-mini-2024-07-18
   params:

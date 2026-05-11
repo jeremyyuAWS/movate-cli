@@ -6,6 +6,21 @@ version: 0.1.0
 description: A new movate agent
 owner: ""
 
+# lifecycle state — gates promotion to higher environments and CI checks.
+#
+# Scaffolds start `draft`. Graduate explicitly as the agent earns trust:
+#
+#   draft        — actively under development (default)
+#   experimental — trialing; OK in dev / staging only
+#   validated    — passed evals + manual review; OK in any env
+#   certified    — passed strict CI gate + sign-off; the "regulated" tier
+#   deprecated   — still works; new uses discouraged; surfaces a warning
+#   archived     — no longer functional; loader refuses
+#
+# `movate validate --strict` fails on `draft` so CI gates don't accidentally
+# ship a half-written agent. Promote to at least `validated` before merging.
+lifecycle: draft
+
 # runtime selects which execution path movate uses to talk to the model.
 # Default is `litellm` (provider-portable via LiteLLM). Uncomment one of
 # the others when their adapters ship (v0.6+):

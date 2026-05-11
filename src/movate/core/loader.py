@@ -17,7 +17,7 @@ from jinja2 import Environment, StrictUndefined, select_autoescape
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
-from movate.core.models import AgentSpec
+from movate.core.models import AgentLifecycle, AgentSpec
 
 
 class AgentLoadError(Exception):
@@ -124,6 +124,17 @@ def load_agent(path: str | Path) -> AgentBundle:
         spec = AgentSpec.model_validate(raw)
     except ValidationError as exc:
         raise AgentLoadError(f"agent.yaml validation failed:\n{exc}") from exc
+
+    # Lifecycle gate. Archived agents are non-functional by definition —
+    # surface as a load error so callers can't silently run them. Draft /
+    # experimental / deprecated all load fine; `movate validate` surfaces
+    # the soft warnings for those.
+    if spec.lifecycle is AgentLifecycle.ARCHIVED:
+        raise AgentLoadError(
+            f"agent {spec.name!r} is lifecycle: archived — refusing to load. "
+            f"Restore by editing agent.yaml (e.g. ``lifecycle: deprecated``) "
+            f"if you need to read its config without running it."
+        )
 
     prompt_path = (agent_dir / spec.prompt).resolve()
     if not prompt_path.exists():

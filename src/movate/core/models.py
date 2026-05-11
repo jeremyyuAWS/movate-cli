@@ -146,6 +146,42 @@ class AgentRuntime(StrEnum):
     LANGCHAIN = "langchain"
 
 
+class AgentLifecycle(StrEnum):
+    """Maturity state of an agent — gates deployment promotion and CI checks.
+
+    GitOps-style state machine applied to AI artifacts. Scaffolds start
+    ``draft``; operators promote explicitly as they earn confidence:
+
+    * ``draft`` — under active development. Default for ``movate init``
+      scaffolds. ``movate validate --strict`` warns. No prod deploys.
+    * ``experimental`` — being trialed. OK for dev / staging. Not prod.
+    * ``validated`` — passed evals + manual review. Cleared for any env.
+    * ``certified`` — passed the strict CI gate AND a sign-off review.
+      The "ship to regulated tenant" tier.
+    * ``deprecated`` — still works but new uses are discouraged. Validate
+      surfaces a warning so downstream consumers know to migrate.
+    * ``archived`` — no longer functional. Loader refuses to load — running
+      an archived agent is a programming error, not a soft warning.
+
+    Enforcement points (v1.0):
+      * :mod:`movate.core.loader` — raises ``AgentLoadError`` on archived.
+      * ``movate validate`` — surfaces lifecycle row; warns on draft + deprecated.
+      * ``movate show`` — surfaces lifecycle row.
+
+    Deferred to v1.1+:
+      * Runtime gate ("deploy prod requires validated/certified") — needs the
+        target-env-aware deployment plumbing that lands with multi-env config.
+      * ``movate lifecycle promote <agent> validated`` CLI for explicit transitions.
+    """
+
+    DRAFT = "draft"
+    EXPERIMENTAL = "experimental"
+    VALIDATED = "validated"
+    CERTIFIED = "certified"
+    DEPRECATED = "deprecated"
+    ARCHIVED = "archived"
+
+
 class AgentSpec(BaseModel):
     """Parsed ``agent.yaml`` contents (api_version: movate/v1, kind: Agent)."""
 
@@ -168,6 +204,16 @@ class AgentSpec(BaseModel):
             "official SDK directly (unlocks tool-use, structured "
             "outputs, etc.) or ``langchain`` to delegate to a "
             "LangChain Runnable."
+        ),
+    )
+
+    lifecycle: AgentLifecycle = Field(
+        default=AgentLifecycle.DRAFT,
+        description=(
+            "Agent maturity state — gates deployment promotion + CI checks. "
+            "Scaffolds start ``draft``; promote explicitly as evals + reviews "
+            "earn confidence. See :class:`AgentLifecycle` for the full state "
+            "matrix."
         ),
     )
 

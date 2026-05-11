@@ -6,6 +6,11 @@ version: 0.1.0
 description: An FAQ assistant. Answers questions concisely with a confidence score.
 owner: ""
 
+# Validated tier: passes eval gate, used as the canonical scaffold example.
+# Not certified — that requires a sign-off review which this demo agent
+# doesn't warrant.
+lifecycle: validated
+
 model:
   provider: openai/gpt-4o-mini-2024-07-18
   params:

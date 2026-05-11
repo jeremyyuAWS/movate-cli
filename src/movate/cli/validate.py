@@ -12,11 +12,12 @@ import typer
 from rich.console import Console
 
 from movate.cli._completion import complete_agent_path
+from movate.cli._lifecycle import lifecycle_cell
 from movate.cli._workflow_path import is_workflow_path
 from movate.core.config import load_project_config
 from movate.core.cost_forecast import estimate_eval_cost
 from movate.core.loader import AgentLoadError, load_agent
-from movate.core.models import AgentRuntime
+from movate.core.models import AgentLifecycle, AgentRuntime
 from movate.core.prompt_linter import LintIssue, lint_prompt
 from movate.core.workflow import (
     WorkflowCompileError,
@@ -159,6 +160,7 @@ def _validate_agent(path: Path, *, strict: bool, run_linter: bool) -> None:
     console.print(f"[green]✓[/green] {spec.name} [dim]v{spec.version}[/dim] [dim](agent)[/dim]")
     console.print(f"  api_version: {spec.api_version}")
     console.print(f"  runtime:     {spec.runtime.value}")
+    console.print(f"  lifecycle:   {lifecycle_cell(spec.lifecycle)}")
     console.print(f"  provider:    {spec.model.provider}")
     console.print(f"  prompt:      {bundle.prompt_hash[:12]}…")
     if spec.model.fallback:
@@ -184,11 +186,31 @@ def _validate_agent(path: Path, *, strict: bool, run_linter: bool) -> None:
             f"~{forecast.output_tokens_per_call} out tokens)[/dim]"
         )
 
+    # Lifecycle warnings — deprecated is always surfaced (downstream
+    # callers need to know to migrate); draft is surfaced only under
+    # --strict, where the gate is meant for production-readiness CI.
+    lifecycle_warned = False
+    if spec.lifecycle is AgentLifecycle.DEPRECATED:
+        console.print(
+            "  [yellow]⚠ lifecycle: deprecated[/yellow] "
+            "[dim]— new uses discouraged; plan migration[/dim]"
+        )
+        lifecycle_warned = True
+    elif strict and spec.lifecycle is AgentLifecycle.DRAFT:
+        console.print(
+            "  [yellow]⚠ lifecycle: draft[/yellow] "
+            "[dim]— promote to validated or certified before relying on "
+            "this agent in CI / production[/dim]"
+        )
+        lifecycle_warned = True
+
     # Exit non-zero if there are real errors (always) or warnings
-    # under --strict (CI gate mode).
+    # under --strict (CI gate mode). The lifecycle warnings above are
+    # included in --strict so a draft agent fails a strict CI gate the
+    # same way a TINY_PROMPT or NO_OUTPUT_SCHEMA_REFERENCE warning would.
     has_errors = any(i.severity == "error" for i in lint_issues)
     has_warnings = any(i.severity == "warning" for i in lint_issues)
-    if has_errors or (strict and has_warnings):
+    if has_errors or (strict and (has_warnings or lifecycle_warned)):
         raise typer.Exit(code=2)
 
 
