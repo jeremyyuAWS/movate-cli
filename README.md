@@ -40,7 +40,11 @@ that v1.0 builds on.
 | HTTP runtime | `movate serve` | ✓ v0.5 |
 | Background worker | `movate worker` | ✓ v0.5 |
 | Postgres backend | `MOVATE_DB_URL=postgresql://...` | ✓ v0.5 |
-| Azure deploy | `movate deploy` | ⚠️ stub; v1.0 |
+| Submit jobs to a deployed runtime | `movate submit <agent>` (with `--wait` + `--notify`) | ✓ v0.5+ |
+| Inspect jobs on a deployed runtime | `movate jobs show | wait | list-agents` | ✓ v0.5+ |
+| Manage deployment targets | `movate config add-target | use | list-targets` | ✓ v0.5+ |
+| Azure deploy (Bicep IaC) | `infra/azure/main.bicep` (manual `az deployment`) | ✓ v1.0 stage 1 |
+| Azure deploy CLI | `movate deploy` | ⚠️ stub; v1.0 stage 2 |
 
 ## Prerequisites
 
@@ -175,6 +179,45 @@ queryable directly:
 ```sql
 SELECT job_id, status, output->>'message' FROM runs WHERE agent = 'alpha';
 ```
+
+## Quickstart — submit jobs to a deployed runtime
+
+Once you have a runtime running (locally via `movate serve` + `movate
+worker`, or remotely on Azure), submit jobs from any machine without
+hand-crafting `curl` calls.
+
+```bash
+# One-time: register a target. The bearer token lives in an env var,
+# NOT in the config file.
+export MOVATE_PROD_KEY=mvt_live_...   # from `movate auth create-key`
+movate config add-target prod \
+    --url https://movate-prod-api.eastus2.azurecontainerapps.io \
+    --key-env MOVATE_PROD_KEY \
+    --set-active
+
+# Fire-and-forget — prints {job_id, status} on stdout (pipe-friendly).
+movate submit faq-agent '{"question": "what is movate?"}'
+
+# Wait for completion + desktop notification when done.
+# Use this for long evals / bench runs — walk away, come back to a chime.
+movate submit faq-agent '{"question": "..."}' --wait --notify
+
+# Inspect a previously-submitted job.
+movate jobs show <job-id>
+movate jobs wait <job-id> --timeout 600    # block until terminal
+
+# What can this runtime run?
+movate jobs list-agents
+
+# Switch targets mid-session.
+movate submit faq-agent '{...}' --target staging
+movate config use staging  # or set a new default
+```
+
+The `--notify` desktop fallback uses `terminal-notifier` / `osascript`
+on macOS, `notify-send` on Linux, and is a no-op on Windows. Server-side
+SMS / email notifications (per-job `notify_target`, fired by the worker)
+are tracked in [BACKLOG.md](BACKLOG.md) for post-v1.0.
 
 ## Available templates
 

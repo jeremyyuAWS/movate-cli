@@ -1,0 +1,141 @@
+"""``movate config`` — manage the user-level CLI config (~/.movate/config.yaml).
+
+Subcommands:
+
+* ``movate config add-target`` — register a deployment + bearer-token env var
+* ``movate config list-targets`` — show what's registered
+* ``movate config use`` — pick the default target
+* ``movate config show`` — dump the current config (for debugging)
+* ``movate config remove-target`` — delete a target
+
+Bearer tokens are NEVER stored in the config file — only the name of
+an env var that holds them. See :mod:`movate.core.user_config` for the
+file layout.
+"""
+
+from __future__ import annotations
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from movate.core.user_config import (
+    TargetConfig,
+    UserConfigError,
+    config_path,
+    load_user_config,
+    save_user_config,
+)
+
+stdout = Console()
+err = Console(stderr=True)
+
+config_app = typer.Typer(
+    name="config",
+    help="Manage user-level movate config (deployment targets, active target).",
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+)
+
+
+@config_app.command("add-target")
+def add_target(
+    name: str = typer.Argument(..., help="Friendly target name, e.g. 'prod', 'staging'."),
+    url: str = typer.Option(..., "--url", help="Base URL of the runtime."),
+    key_env: str = typer.Option(
+        ...,
+        "--key-env",
+        help="Name of the env var that holds the bearer token (e.g. MOVATE_PROD_KEY).",
+    ),
+    set_active: bool = typer.Option(
+        False,
+        "--set-active",
+        help="Make this the default target (saves you a `config use` step).",
+    ),
+) -> None:
+    """Register a deployment target.
+
+    [bold]Examples:[/bold]
+
+      [dim]# Local dev runtime[/dim]
+      $ movate config add-target local --url http://127.0.0.1:8000 --key-env MOVATE_LOCAL_KEY
+
+      [dim]# Prod, and make it the default[/dim]
+      $ movate config add-target prod \\
+            --url https://movate-prod-api.eastus2.azurecontainerapps.io \\
+            --key-env MOVATE_PROD_KEY \\
+            --set-active
+    """
+    cfg = load_user_config()
+    cfg.targets[name] = TargetConfig(url=url, key_env=key_env)
+    if set_active or cfg.active is None:
+        cfg.active = name
+    path = save_user_config(cfg)
+    err.print(f"[green]✓[/green] added target {name!r} → {url}")
+    if cfg.active == name:
+        err.print(f"[dim]  (active target is now {name!r})[/dim]")
+    err.print(f"[dim]config: {path}[/dim]")
+
+
+@config_app.command("list-targets")
+def list_targets() -> None:
+    """Show all registered targets, highlighting the active one."""
+    cfg = load_user_config()
+    if not cfg.targets:
+        err.print("[dim]no targets registered — run `movate config add-target` first[/dim]")
+        return
+
+    table = Table(title="movate targets")
+    table.add_column("name", style="bold")
+    table.add_column("url")
+    table.add_column("key_env", style="dim")
+    table.add_column("active")
+    for name, t in sorted(cfg.targets.items()):
+        active = "[green]●[/green]" if name == cfg.active else ""
+        table.add_row(name, t.url, t.key_env, active)
+    stdout.print(table)
+
+
+@config_app.command("use")
+def use_target(
+    name: str = typer.Argument(..., help="Name of an already-registered target."),
+) -> None:
+    """Set the active target — CLI commands default to it when --target is omitted."""
+    cfg = load_user_config()
+    if name not in cfg.targets:
+        available = ", ".join(sorted(cfg.targets)) or "(none)"
+        err.print(f"[red]✗[/red] target {name!r} not found. Available: {available}")
+        raise typer.Exit(code=2)
+    cfg.active = name
+    save_user_config(cfg)
+    err.print(f"[green]✓[/green] active target → {name!r}")
+
+
+@config_app.command("show")
+def show() -> None:
+    """Dump the resolved config (useful for debugging)."""
+    cfg = load_user_config()
+    stdout.print(cfg.model_dump_json(indent=2))
+    err.print(f"[dim]config path: {config_path()}[/dim]")
+
+
+@config_app.command("remove-target")
+def remove_target(
+    name: str = typer.Argument(..., help="Name of a registered target."),
+) -> None:
+    """Delete a target. If it was active, the active pointer is cleared
+    (next CLI call will require --target until you `config use` again).
+    """
+    cfg = load_user_config()
+    if name not in cfg.targets:
+        err.print(f"[red]✗[/red] target {name!r} not found")
+        raise typer.Exit(code=2)
+    del cfg.targets[name]
+    if cfg.active == name:
+        cfg.active = None
+    save_user_config(cfg)
+    err.print(f"[green]✓[/green] removed target {name!r}")
+
+
+# Re-export the error type so callers don't have to reach into core.
+__all__ = ["UserConfigError", "config_app"]

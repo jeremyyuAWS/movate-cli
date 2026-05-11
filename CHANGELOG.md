@@ -5,6 +5,59 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Remote-runtime CLI: targets, `submit`, `jobs`
+
+**The dev-team intuitive workflow for deployed runtimes.** Stop typing
+`curl http://... -H "Authorization: Bearer ..." -d '{...}'`; start
+typing `movate submit alpha '{...}'`. Targets, bearer tokens, and
+fire-and-forget vs --wait modes all bundled.
+
+- **`core/user_config.py`** — `~/.movate/config.yaml` schema:
+  ```yaml
+  targets:
+    local: {url: http://127.0.0.1:8000, key_env: MOVATE_LOCAL_KEY}
+    prod:  {url: https://..., key_env: MOVATE_PROD_KEY}
+  active: local
+  ```
+  Bearer tokens NEVER in the file — only the name of the env var that
+  holds them. Config file is dotfile-safe to commit. Path overrideable
+  via `MOVATE_CONFIG_PATH` for tests + CI.
+- **`core/client.py`** — `MovateClient` async httpx wrapper with
+  `submit_job`, `get_job`, `list_agents`, `healthz`, `wait_for_terminal`.
+  Translates non-2xx responses into structured `MovateClientError`
+  with `status_code` + `code` + `message`. Accepts an optional
+  `transport` kwarg so tests can route through `httpx.ASGITransport`
+  for hermetic in-process testing — no real network, no port.
+- **`movate config add-target | list-targets | use | show | remove-target`**
+  — manage the user-level config. First add auto-promotes to active
+  for first-run UX.
+- **`movate submit <agent> [INPUT]`** — queue a job at the active
+  (or `--target`-named) runtime. Default is fire-and-forget: bare
+  JSON `{job_id, status}` to stdout, "queued + how to poll" hint to
+  stderr. `--wait` polls with a Rich spinner until terminal; `--notify`
+  pops a desktop notification (macOS osascript / Linux notify-send /
+  no-op on Windows). `--output json` for scripting. Exit code 1 on
+  terminal-but-failed, 124 on `--wait` timeout (conventional
+  `timeout` exit code so bash scripts can branch).
+- **`movate jobs show <id>` / `wait <id>` / `list-agents`** — inspect
+  job state on a deployed runtime. Distinct from `movate logs` (which
+  reads the LOCAL sqlite for post-mortem). Same `--target` / `--output`
+  conventions as submit.
+- 29 new tests cover: user-config round-trip, MovateClient over
+  ASGITransport (auth, 401 / 404 / timeout paths, poll-until-terminal),
+  CLI integration (config CRUD, submit fire-and-forget + show
+  round-trip, error UX for unset bearer-token env vars).
+- End-to-end real-binary smoke validated: scaffold agent → start
+  `movate serve` + `movate worker` → `movate config add-target` →
+  `movate submit --wait --output json` round-trips through the wire
+  in ~135ms.
+
+The 90% dev-team case for "kick off a long eval, get notified when
+it's done" is now `movate submit ... --wait --notify`. **Server-side
+SMS/email notifications** are tracked in BACKLOG for post-v1.0; that
+needs an ACS / Twilio / SendGrid decision and per-job `notify_target`
+column on the `jobs` table.
+
 ### Added — Azure Bicep IaC (v1.0 stage 1)
 
 **Foundation for `git push release/* → ACA-deployed service`.** Stage 1

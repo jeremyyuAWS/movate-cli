@@ -27,9 +27,12 @@ from movate.cli import pricing as pricing_cmd  # noqa: E402
 from movate.cli import run as run_cmd  # noqa: E402
 from movate.cli import serve as serve_cmd  # noqa: E402
 from movate.cli import show as show_cmd  # noqa: E402
+from movate.cli import submit as submit_cmd  # noqa: E402
 from movate.cli import validate as validate_cmd  # noqa: E402
 from movate.cli import worker as worker_cmd  # noqa: E402
 from movate.cli.auth import auth_app  # noqa: E402
+from movate.cli.config_cmd import config_app  # noqa: E402
+from movate.cli.jobs import jobs_app  # noqa: E402
 from movate.cli.trace import trace_app  # noqa: E402
 
 PANEL_DEVELOP = "Develop"
@@ -117,6 +120,15 @@ app.command("eval", rich_help_panel=PANEL_RUN)(eval_cmd.eval_)
 app.command("logs", rich_help_panel=PANEL_RUN)(logs_cmd.logs)
 app.add_typer(trace_app, name="trace", rich_help_panel=PANEL_RUN)
 
+# ----- Remote (talk to a deployed runtime) ----------------------------------
+
+app.command(
+    "submit",
+    rich_help_panel=PANEL_RUN,
+    help="Queue a job at a deployed runtime (see `movate config add-target`).",
+)(submit_cmd.submit)
+app.add_typer(jobs_app, name="jobs", rich_help_panel=PANEL_RUN)
+
 # ----- Diagnose -------------------------------------------------------------
 
 app.command("doctor", rich_help_panel=PANEL_DIAGNOSE)(doctor_cmd.doctor)
@@ -131,6 +143,7 @@ app.command("deploy", rich_help_panel=PANEL_DEPLOY)(deploy_cmd.deploy)
 # ----- Manage ---------------------------------------------------------------
 
 app.add_typer(auth_app, name="auth", rich_help_panel=PANEL_MANAGE)
+app.add_typer(config_app, name="config", rich_help_panel=PANEL_MANAGE)
 
 
 if __name__ == "__main__":
