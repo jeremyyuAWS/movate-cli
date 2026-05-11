@@ -102,6 +102,7 @@ async def build_local_runtime(*, mock: bool) -> LocalRuntime:
         tracer=tracer,
         tenant_id="local",
         policy=project_cfg.policy,
+        runtime_policy=project_cfg.runtime,
     )
     return LocalRuntime(executor=executor, provider=provider, storage=storage, tracer=tracer)
 

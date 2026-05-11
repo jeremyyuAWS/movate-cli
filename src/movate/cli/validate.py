@@ -116,11 +116,25 @@ def _validate_agent(path: Path, *, strict: bool, run_linter: bool) -> None:
             console.print("[dim]  Install with: uv add 'movate-cli[langchain]'[/dim]")
         raise typer.Exit(code=2)
 
+    # Project-wide runtime policy. Distinct from the model policy below —
+    # this gate is "may this AGENT use this RUNTIME?" rather than "may this
+    # model+budget combo run?". Default is permissive; setting
+    # ``runtime.allowed: [litellm]`` in movate.yaml enforces 'A by default'.
+    project_cfg = load_project_config()
+    runtime_violation = project_cfg.runtime.check_agent(spec)
+    if runtime_violation is not None:
+        console.print(f"[red]✗ runtime policy violation:[/red] {runtime_violation}")
+        console.print(
+            "[dim]  fix: relax movate.yaml: runtime.allowed, or change the "
+            "agent's runtime field.[/dim]"
+        )
+        raise typer.Exit(code=2)
+
     # Project-wide model policy. ``check_agent`` returns an empty list
     # if the project has no policy or the agent is compliant. Reported
     # AFTER the load succeeds so the operator gets both the load error
     # (if any) and the policy error in the order they'd hit at runtime.
-    policy = load_project_config().policy
+    policy = project_cfg.policy
     if not policy.is_permissive():
         violations = policy.check_agent(spec)
         if violations:
