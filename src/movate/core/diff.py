@@ -291,8 +291,7 @@ def render_diff_json(d: AgentDiff) -> str:
             "prompt_hash": d.b_prompt_hash,
         },
         "fields": [
-            {"name": x.name, "a": x.a, "b": x.b, "changed": x.changed}
-            for x in d.field_deltas
+            {"name": x.name, "a": x.a, "b": x.b, "changed": x.changed} for x in d.field_deltas
         ],
         "prompt_changed": d.prompt_changed,
         "input_schema_changed": d.input_schema_changed,

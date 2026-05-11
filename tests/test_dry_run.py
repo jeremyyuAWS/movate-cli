@@ -112,9 +112,7 @@ def test_dry_run_does_not_write_to_sqlite(
         return
     conn = sqlite3.connect(db_path)
     try:
-        cur = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='runs'"
-        )
+        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runs'")
         if cur.fetchone() is None:
             return  # no runs table created — nothing to assert
         cur = conn.execute("SELECT COUNT(*) FROM runs")

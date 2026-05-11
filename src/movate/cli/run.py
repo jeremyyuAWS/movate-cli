@@ -127,9 +127,7 @@ def run(
     """
     if dry_run:
         if replay_id is not None or stream:
-            console.print(
-                "[red]✗[/red] --dry-run is mutually exclusive with --replay and --stream"
-            )
+            console.print("[red]✗[/red] --dry-run is mutually exclusive with --replay and --stream")
             raise typer.Exit(code=2)
         if is_workflow_path(path):
             console.print(
@@ -383,9 +381,7 @@ def _emit_dry_run_text(
             f"[dim]({estimate.model_provider})[/dim]"
         )
     else:
-        out.print(
-            f"  cost:    [dim]not in pricing table for {estimate.model_provider}[/dim]"
-        )
+        out.print(f"  cost:    [dim]not in pricing table for {estimate.model_provider}[/dim]")
     out.print()
     out.print("[green]✓ dry-run — no provider calls were made.[/green]")
     out.print()

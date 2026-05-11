@@ -53,9 +53,14 @@ jobs:
         run: uv python install 3.11
 
       - name: Sync deps
-        # --dev for movate itself; no --all-extras because we don't run
-        # any provider call here — pure Pydantic + Jinja + JSON-schema work.
-        run: uv sync --dev
+        # --all-extras pulls in the runtime + provider deps. We don't make
+        # any provider CALL in this workflow (pure schema/topology work),
+        # but `cli/main.py` eagerly imports every command module including
+        # `serve.py`, which imports uvicorn at module level. Without
+        # --all-extras the import chain fails before validate even runs.
+        # This is a latent CLI layering bug (validate shouldn't need the
+        # serve deps); tracked separately. For now mirror agents.yml.
+        run: uv sync --all-extras --dev
 
       - name: Validate every agent
         id: agents

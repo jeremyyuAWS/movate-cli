@@ -297,17 +297,13 @@ def test_cli_diff_with_changes_exits_0_by_default(agent_a: Path, agent_b: Path) 
 
 @pytest.mark.unit
 def test_cli_diff_fail_on_change_exits_1(agent_a: Path, agent_b: Path) -> None:
-    r = runner.invoke(
-        cli_app, ["diff", str(agent_a), str(agent_b), "--fail-on-change"]
-    )
+    r = runner.invoke(cli_app, ["diff", str(agent_a), str(agent_b), "--fail-on-change"])
     assert r.exit_code == 1
 
 
 @pytest.mark.unit
 def test_cli_diff_fail_on_change_no_change_still_0(agent_a: Path) -> None:
-    r = runner.invoke(
-        cli_app, ["diff", str(agent_a), str(agent_a), "--fail-on-change"]
-    )
+    r = runner.invoke(cli_app, ["diff", str(agent_a), str(agent_a), "--fail-on-change"])
     assert r.exit_code == 0
 
 
@@ -335,7 +331,8 @@ def test_cli_diff_load_failure_exits_2(tmp_path: Path, agent_a: Path) -> None:
 
 @pytest.mark.unit
 def test_cli_diff_prompt_only_and_schemas_only_mutually_exclusive(
-    agent_a: Path, agent_b: Path,
+    agent_a: Path,
+    agent_b: Path,
 ) -> None:
     r = runner.invoke(
         cli_app,

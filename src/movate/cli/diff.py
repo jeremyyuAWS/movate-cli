@@ -55,8 +55,7 @@ def diff(
         "--output",
         "-o",
         help=(
-            "Output format. table = human review; json = pipe-friendly; "
-            "markdown = PR description."
+            "Output format. table = human review; json = pipe-friendly; markdown = PR description."
         ),
     ),
     verbose: bool = typer.Option(
@@ -144,10 +143,7 @@ def _render_rich(
         )
         return
 
-    header = (
-        f"[bold]{d.a_name}[/bold] v{d.a_version}  →  "
-        f"[bold]{d.b_name}[/bold] v{d.b_version}"
-    )
+    header = f"[bold]{d.a_name}[/bold] v{d.a_version}  →  [bold]{d.b_name}[/bold] v{d.b_version}"
     console.print(Panel(header, expand=False))
 
     if not prompt_only and not schemas_only:
