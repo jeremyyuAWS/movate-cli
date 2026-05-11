@@ -407,9 +407,14 @@ def test_cli_submit_requires_input(cli_env) -> None:
 
 @pytest.mark.unit
 def test_cli_submit_rejects_unknown_kind(cli_env) -> None:
+    """``--kind`` is a JobKind enum option, so Typer rejects unknown
+    values at parse time (exit 2) — we no longer hand-roll a ValueError
+    inside the command body."""
     result = runner.invoke(cli_app, ["submit", "alpha", "{}", "--kind", "ritual"])
     assert result.exit_code == 2
-    assert "kind must be" in result.stderr
+    combined = result.stdout + result.stderr
+    assert "Invalid value" in combined
+    assert "--kind" in combined or "-k" in combined
 
 
 @pytest.mark.unit
