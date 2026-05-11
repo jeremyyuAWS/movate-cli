@@ -320,6 +320,53 @@ def test_cli_config_use_flips_active(tmp_path: Path, monkeypatch) -> None:
 
 
 @pytest.mark.unit
+def test_cli_config_current_prints_active_target(tmp_path: Path, monkeypatch) -> None:
+    """``movate config current`` prints one TSV line: name<TAB>url<TAB>key_env.
+    Easy to consume with ``awk`` / ``cut`` for shell prompts."""
+    cfg_path = tmp_path / "cfg.yaml"
+    monkeypatch.setenv("MOVATE_CONFIG_PATH", str(cfg_path))
+    save_user_config(
+        UserConfig(
+            targets={
+                "prod": TargetConfig(url="https://prod.movate.io", key_env="MOVATE_PROD_KEY"),
+                "dev": TargetConfig(url="https://dev.movate.io", key_env="MOVATE_DEV_KEY"),
+            },
+            active="prod",
+        )
+    )
+    result = runner.invoke(cli_app, ["config", "current"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    line = result.stdout.strip()
+    # TSV: name, url, key_env — same order as `list-targets`.
+    assert line == "prod\thttps://prod.movate.io\tMOVATE_PROD_KEY"
+
+
+@pytest.mark.unit
+def test_cli_config_current_no_active_exits_1(tmp_path: Path, monkeypatch) -> None:
+    """No active target → exit 1 + a stderr message pointing to next step."""
+    cfg_path = tmp_path / "cfg.yaml"
+    monkeypatch.setenv("MOVATE_CONFIG_PATH", str(cfg_path))
+    # No save_user_config call → empty config file → no active target.
+    result = runner.invoke(cli_app, ["config", "current"])
+    assert result.exit_code == 1
+    assert "no active target" in result.stderr
+
+
+@pytest.mark.unit
+def test_cli_pricing_json_output_has_no_ansi_escapes() -> None:
+    """When stdout isn't a TTY (e.g. piped to `jq`), Rich must suppress
+    ANSI escape codes — otherwise `movate pricing -o json | jq .` chokes
+    on stray color bytes. This is Rich's default behaviour; the test
+    just locks the contract so a future refactor that wraps stdout
+    differently can't silently break it."""
+    result = runner.invoke(cli_app, ["pricing", "-o", "json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    # ANSI escape sequences always start with ESC (0x1b) followed by `[`.
+    # A clean JSON dump has neither.
+    assert "\x1b[" not in result.stdout, "Rich is leaking ANSI codes into piped output"
+
+
+@pytest.mark.unit
 def test_cli_config_use_unknown_target_fails(tmp_path: Path, monkeypatch) -> None:
     cfg_path = tmp_path / "cfg.yaml"
     monkeypatch.setenv("MOVATE_CONFIG_PATH", str(cfg_path))
