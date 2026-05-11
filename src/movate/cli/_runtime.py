@@ -52,6 +52,17 @@ def _try_register_native_adapters(registry: ProviderRegistry, *, mock: bool) -> 
         registry.register(AgentRuntime.NATIVE_OPENAI, OpenAIProvider())
     except ImportError:
         pass
+    try:
+        # LangChain provider needs no constructor args — the user's
+        # Runnable entry-point is resolved per-request from the
+        # agent's model.provider field.
+        import langchain_core  # noqa: F401, PLC0415
+
+        from movate.providers.langchain_native import LangChainProvider  # noqa: PLC0415
+
+        registry.register(AgentRuntime.LANGCHAIN, LangChainProvider())
+    except ImportError:
+        pass
 
 
 async def build_local_runtime(*, mock: bool) -> LocalRuntime:
