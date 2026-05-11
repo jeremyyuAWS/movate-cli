@@ -50,6 +50,17 @@ param tags object = {
   managedBy: 'bicep'
 }
 
+@description('''
+Deploy the API + worker Container Apps. Set to ``false`` on the
+FIRST pass of a fresh environment — the apps reference Key Vault
+secrets that don't exist yet, and ACA validates the secret URLs at
+create time. First pass with ``enableApiWorker = false`` provisions
+Log Analytics + ACR + KV + Postgres + Container Apps Environment,
+operator populates KV secrets, second pass flips the flag to
+``true`` and the api/worker land.
+''')
+param enableApiWorker bool = true
+
 // ---------------------------------------------------------------------------
 // Per-env defaults — keep in sync with docs/v1.0-azure-design §4
 // ---------------------------------------------------------------------------
@@ -158,7 +169,10 @@ module cae 'modules/containerapp-env.bicep' = {
   // also creates an implicit edge.
 }
 
-module api 'modules/containerapp-api.bicep' = {
+// Both Container Apps are gated on ``enableApiWorker`` so a fresh
+// deployment can run "infra-only" first, the operator populates KV
+// secrets, then the second pass deploys the apps. See param doc above.
+module api 'modules/containerapp-api.bicep' = if (enableApiWorker) {
   name: 'api-${env}'
   params: {
     name: apiName
@@ -179,7 +193,7 @@ module api 'modules/containerapp-api.bicep' = {
   }
 }
 
-module worker 'modules/containerapp-worker.bicep' = {
+module worker 'modules/containerapp-worker.bicep' = if (enableApiWorker) {
   name: 'worker-${env}'
   params: {
     name: workerName
@@ -234,41 +248,46 @@ resource kvResource 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
 // outputs are known. Instead, build the GUID from static names + the
 // role id; the LIVE principalId still flows into ``properties.principalId``.
 
-resource apiAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+// Role assignments are also gated on enableApiWorker — they
+// reference api/worker module outputs that don't exist when the apps
+// are skipped. The second-pass deploy creates the assignments on the
+// same RG; idempotent if they already exist.
+
+resource apiAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableApiWorker) {
   scope: acrResource
   name: guid(acrResource.id, apiName, acrPullRoleId)
   properties: {
-    principalId: api.outputs.principalId
+    principalId: api!.outputs.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
   }
 }
 
-resource workerAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource workerAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableApiWorker) {
   scope: acrResource
   name: guid(acrResource.id, workerName, acrPullRoleId)
   properties: {
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
   }
 }
 
-resource apiKvRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource apiKvRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableApiWorker) {
   scope: kvResource
   name: guid(kvResource.id, apiName, kvSecretsUserRoleId)
   properties: {
-    principalId: api.outputs.principalId
+    principalId: api!.outputs.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsUserRoleId)
   }
 }
 
-resource workerKvRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource workerKvRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableApiWorker) {
   scope: kvResource
   name: guid(kvResource.id, workerName, kvSecretsUserRoleId)
   properties: {
-    principalId: worker.outputs.principalId
+    principalId: worker!.outputs.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsUserRoleId)
   }
@@ -278,8 +297,8 @@ resource workerKvRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 // Outputs
 // ---------------------------------------------------------------------------
 
-@description('Public URL of the movate API.')
-output apiUrl string = 'https://${api.outputs.fqdn}'
+@description('Public URL of the movate API. Empty string on first-pass deploys (enableApiWorker=false).')
+output apiUrl string = enableApiWorker ? 'https://${api!.outputs.fqdn}' : ''
 
 @description('ACR login server (operators push images here).')
 output acrLoginServer string = acr.outputs.loginServer
