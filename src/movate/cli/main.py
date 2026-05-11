@@ -34,6 +34,7 @@ from movate.cli import validate as validate_cmd  # noqa: E402
 from movate.cli import watch as watch_cmd  # noqa: E402
 from movate.cli import worker as worker_cmd  # noqa: E402
 from movate.cli.auth import auth_app  # noqa: E402
+from movate.cli.ci import ci_app  # noqa: E402
 from movate.cli.config_cmd import config_app  # noqa: E402
 from movate.cli.jobs import jobs_app  # noqa: E402
 from movate.cli.scaffold import scaffold_app  # noqa: E402
@@ -145,6 +146,7 @@ app.command("run", rich_help_panel=PANEL_RUN)(run_cmd.run)
 app.command("chat", rich_help_panel=PANEL_RUN)(chat_cmd.chat)
 app.command("bench", rich_help_panel=PANEL_RUN)(bench_cmd.bench)
 app.command("eval", rich_help_panel=PANEL_RUN)(eval_cmd.eval_)
+app.add_typer(ci_app, name="ci", rich_help_panel=PANEL_RUN)
 app.command("logs", rich_help_panel=PANEL_RUN)(logs_cmd.logs)
 app.add_typer(trace_app, name="trace", rich_help_panel=PANEL_RUN)
 

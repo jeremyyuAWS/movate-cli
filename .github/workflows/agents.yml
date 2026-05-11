@@ -1,10 +1,12 @@
 # Per-agent pre-flight gate. Distinct from ``ci.yml`` (lint + unit tests)
 # because operators want a SEPARATE PR check that says "every agent in
-# this repo validates + scores against its committed baseline." Running
-# ``movate validate`` and ``movate eval --mock`` against each shipped
-# agent catches issues unit tests don't surface (policy violations from
-# the project's movate.yaml, schema drift between input.json and
-# prompt.md, regression past the eval-baseline tolerance).
+# this repo validates + scores against its committed baseline."
+#
+# Originally this workflow used a per-agent matrix with shell-glue. The
+# matrix moved into the ``movate ci eval`` command so the YAML stays a
+# one-liner — the command iterates over every agent in agents_dir, runs
+# each through the eval engine, gates against committed baselines, and
+# appends a markdown summary to $GITHUB_STEP_SUMMARY for PR visibility.
 #
 # Mock-mode keeps the gate hermetic — no API keys, $0 cost, deterministic
 # scoring. For real-LLM eval (which IS what you want for an actual
@@ -30,14 +32,6 @@ on:
 jobs:
   validate-and-eval:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false  # one failing agent shouldn't hide failures in others
-      matrix:
-        # Every agent shipped in this repo. Add new agents here as they
-        # land in agents/<name>/.
-        agent:
-          - faq-agent
-          - case-reasoner
 
     steps:
       - uses: actions/checkout@v4
@@ -51,43 +45,31 @@ jobs:
         run: uv python install 3.11
 
       - name: Sync deps
-        # --dev covers ruff/mypy/pytest, --all-extras pulls in
-        # litellm/openai/anthropic/langchain so every runtime is wired
-        # for the validate step's runtime-availability probe.
+        # --all-extras pulls in litellm/openai/anthropic/langchain so
+        # every runtime is wired for the validate step's
+        # runtime-availability probe.
         run: uv sync --all-extras --dev
 
-      - name: Validate agent
-        # Catches: bad agent.yaml, policy violations from movate.yaml,
-        # prompt-linter warnings (--strict promotes them to errors).
-        run: uv run movate validate "agents/${{ matrix.agent }}" --strict
-
-      - name: Eval (mock-mode, hermetic)
-        # Mock-mode means no API keys + deterministic scoring. The eval
-        # baseline gate runs ONLY when a committed baseline exists at
-        # .movate/<agent>/baseline.json — otherwise we skip-with-notice
-        # so a new agent without a baseline isn't blocked on landing.
+      - name: Validate every agent
+        # `find` rather than hardcoding agent names so adding a new
+        # agent under agents/<name>/ is automatic.
         run: |
-          baseline=".movate/${{ matrix.agent }}/baseline.json"
-          if [ -f "$baseline" ]; then
-            echo "::notice::gating ${{ matrix.agent }} against $baseline"
-            uv run movate eval "agents/${{ matrix.agent }}" \
-              --mock \
-              --baseline-file "$baseline" \
-              --regression-tolerance 0.0 \
-              --output json \
-              > /tmp/eval-result.json
-            # Append a compact diff to the PR step-summary.
-            jq -r '
-              "## eval — \(.agent)",
-              "",
-              "- mean_score: \(.mean_score)",
-              "- pass_rate:  \(.pass_rate)",
-              if .baseline then
-                "- baseline:   mean=\(.baseline.mean_score) / pass=\(.baseline.pass_rate)",
-                "- regression: \(.baseline.regression // false)"
-              else empty end
-            ' /tmp/eval-result.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-          else
-            echo "::warning::no baseline at $baseline — skipping eval gate for ${{ matrix.agent }}."
-            echo "::warning::to lock in a baseline, run: movate eval agents/${{ matrix.agent }} --mock --output-baseline $baseline"
-          fi
+          set -e
+          for agent in agents/*/; do
+            if [ -f "$agent/agent.yaml" ]; then
+              echo "::group::validate $agent"
+              uv run movate validate "$agent" --strict
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: Eval every agent (gated against committed baselines)
+        # `movate ci eval` discovers all agents, runs each through the
+        # eval engine, gates on per-agent baselines at
+        # .movate/<agent>/baseline.json. The same command works locally
+        # for pre-flight: `movate ci eval --mock` before pushing.
+        run: |
+          uv run movate ci eval \
+            --mock \
+            --regression-tolerance 0.0 \
+            --summary-file "$GITHUB_STEP_SUMMARY"
