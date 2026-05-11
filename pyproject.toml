@@ -49,6 +49,9 @@ dev = [
 anthropic = [
     "anthropic>=0.40,<1",
 ]
+openai = [
+    "openai>=1.40,<2",
+]
 
 [dependency-groups]
 dev = [

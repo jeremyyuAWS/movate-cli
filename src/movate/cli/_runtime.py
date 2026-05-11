@@ -46,6 +46,12 @@ def _try_register_native_adapters(registry: ProviderRegistry, *, mock: bool) -> 
         registry.register(AgentRuntime.NATIVE_ANTHROPIC, AnthropicProvider())
     except ImportError:
         pass
+    try:
+        from movate.providers.openai_native import OpenAIProvider  # noqa: PLC0415
+
+        registry.register(AgentRuntime.NATIVE_OPENAI, OpenAIProvider())
+    except ImportError:
+        pass
 
 
 async def build_local_runtime(*, mock: bool) -> LocalRuntime:
