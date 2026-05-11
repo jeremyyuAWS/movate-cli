@@ -32,7 +32,7 @@ from rich.console import Console
 from rich.table import Table
 
 from movate.cli._completion import complete_agent_name
-from movate.cli._console import get_global_target, hint
+from movate.cli._console import error, get_global_target, hint, warn
 from movate.cli._output import TableJson
 from movate.cli._progress import spinner
 from movate.core.client import MovateClient, MovateClientError
@@ -129,7 +129,7 @@ def submit(
     # '--kind'"), so we don't need a defensive JobKind(kind) cast.
     raw = input_flag or input_arg
     if raw is None:
-        err.print("[red]✗[/red] provide input as a positional arg, --input, or '-' for stdin")
+        error("provide input as a positional arg, --input, or '-' for stdin")
         raise typer.Exit(code=2)
     payload = _coerce_input(raw)
 
@@ -141,7 +141,7 @@ def submit(
         target_name, target_cfg = resolve_target(target or get_global_target())
         token = resolve_bearer_token(target_cfg)
     except UserConfigError as exc:
-        err.print(f"[red]✗[/red] {exc}")
+        error(str(exc))
         raise typer.Exit(code=2) from None
 
     asyncio.run(
@@ -192,7 +192,7 @@ async def _submit(
                     notify_email=notify_email,
                 )
         except MovateClientError as exc:
-            err.print(f"[red]✗ submit failed:[/red] {exc}")
+            error(str(exc), context="submit")
             raise typer.Exit(code=1) from None
 
         if not wait:
@@ -215,12 +215,12 @@ async def _submit(
                     max_wait_seconds=timeout,
                 )
         except TimeoutError as exc:
-            err.print(f"[yellow]⏱[/yellow] {exc}")
+            warn(str(exc), icon="⏱")
             # 124 is the conventional `timeout` exit code; reuse it so
             # bash scripts can branch on it.
             raise typer.Exit(code=124) from None
         except MovateClientError as exc:
-            err.print(f"[red]✗ poll failed:[/red] {exc}")
+            error(str(exc), context="poll")
             raise typer.Exit(code=1) from None
 
         # Fetch the run record so we can show the actual LLM output —

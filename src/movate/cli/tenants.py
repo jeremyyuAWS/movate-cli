@@ -29,7 +29,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from movate.cli._console import hint
+from movate.cli._console import error, hint, success
 from movate.core.models import TenantBudget
 from movate.storage import build_storage
 
@@ -81,11 +81,11 @@ def set_budget(
       $ movate tenants set-budget 4f1a7c... --monthly-usd 1000
     """
     if monthly_usd < 0:
-        err.print(f"[red]✗[/red] monthly-usd must be >= 0, got {monthly_usd}")
+        error(f"monthly-usd must be >= 0, got {monthly_usd}")
         raise typer.Exit(code=2)
 
     asyncio.run(_upsert(TenantBudget(tenant_id=tenant_id, monthly_usd_limit=monthly_usd)))
-    err.print(f"[green]✓[/green] budget for {tenant_id} set to ${monthly_usd:.2f}/month")
+    success(f"budget for {tenant_id} set to ${monthly_usd:.2f}/month")
 
 
 @tenants_app.command("clear-budget")
@@ -98,7 +98,7 @@ def clear_budget(
     ``updated_at``) is preserved — the limit just becomes ``NULL``.
     """
     asyncio.run(_upsert(TenantBudget(tenant_id=tenant_id, monthly_usd_limit=None)))
-    err.print(f"[green]✓[/green] cleared budget for {tenant_id} (now unlimited)")
+    success(f"cleared budget for {tenant_id} (now unlimited)")
 
 
 @tenants_app.command("show")
