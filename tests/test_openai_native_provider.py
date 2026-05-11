@@ -127,6 +127,21 @@ class _FakeClient:
 
 
 @pytest.mark.unit
+def test_pricing_key_prepends_openai_prefix() -> None:
+    """Native-OpenAI agents declare bare model ids in agent.yaml
+    (``gpt-4o-mini-2024-07-18``), but pricing.yaml uses LiteLLM-style
+    keys (``openai/gpt-4o-mini-2024-07-18``). The adapter bridges.
+
+    ``azure/...`` prefixes pass through unchanged because Azure-OpenAI
+    deployments use the same pricing table entries with the azure prefix."""
+    provider = OpenAIProvider(client=_FakeClient())  # type: ignore[arg-type]
+    assert provider.pricing_key("gpt-4o-mini-2024-07-18") == "openai/gpt-4o-mini-2024-07-18"
+    assert provider.pricing_key("openai/gpt-4o") == "openai/gpt-4o"
+    # Azure deployments use the azure/ prefix in pricing.yaml.
+    assert provider.pricing_key("azure/gpt-4.1") == "azure/gpt-4.1"
+
+
+@pytest.mark.unit
 async def test_complete_happy_path() -> None:
     fake = _FakeClient()
     fake.chat.completions.create_response = _FakeChatCompletion(

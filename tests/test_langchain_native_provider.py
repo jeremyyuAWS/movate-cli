@@ -128,6 +128,16 @@ def _register_test_module() -> None:
 
 
 @pytest.mark.unit
+def test_pricing_key_returns_none_because_model_is_opaque() -> None:
+    """LangChain Runnables wrap an arbitrary chain — movate can't see
+    which model the Runnable will invoke, so pricing isn't applicable.
+    The adapter returns None and the executor records cost=0."""
+    provider = LangChainProvider()
+    assert provider.pricing_key("myapp.chains:build_chain") is None
+    assert provider.pricing_key("anything_else") is None
+
+
+@pytest.mark.unit
 async def test_complete_string_runnable() -> None:
     provider = LangChainProvider()
     resp = await provider.complete(

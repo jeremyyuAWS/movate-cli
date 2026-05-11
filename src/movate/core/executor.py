@@ -254,7 +254,29 @@ class Executor:
                 assert last_error is not None
                 raise last_error
 
-            cost = self._pricing.cost_for(provider=chosen_provider, tokens=completion.tokens)
+            # Pricing-key dance: each adapter knows the canonical key for
+            # its provider strings (LiteLLM passes the agent's
+            # ``model.provider`` through unchanged; native_anthropic /
+            # native_openai prepend the family prefix; langchain returns
+            # None because the model is opaque). When None or the lookup
+            # misses we record cost=0 with an event — better than
+            # crashing on a runtime where pricing isn't applicable.
+            pricing_key = provider_for_run.pricing_key(chosen_provider)
+            if pricing_key is None:
+                cost = 0.0
+                self._tracer.log_event(
+                    span,
+                    {"cost_skipped": True, "reason": "runtime has no pricing key"},
+                )
+            else:
+                try:
+                    cost = self._pricing.cost_for(provider=pricing_key, tokens=completion.tokens)
+                except KeyError:
+                    cost = 0.0
+                    self._tracer.log_event(
+                        span,
+                        {"cost_skipped": True, "reason": f"no pricing for {pricing_key!r}"},
+                    )
             self._check_cost_drift(span, completion, cost)
 
             # The effective ceiling is the MIN of the agent's declared

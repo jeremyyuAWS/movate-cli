@@ -254,6 +254,88 @@ async def test_executor_dispatches_via_registry_when_runtime_registered(
 
 
 @pytest.mark.unit
+async def test_executor_uses_pricing_key_translation_for_native_runtimes(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """Native-runtime agents declare bare model ids; the executor must
+    ask the adapter for its pricing-table key and use that, not the
+    bare id (which would KeyError).
+
+    Regression test for a real bug: before this fix, a working
+    ``runtime: native_anthropic`` agent crashed on the first run with
+    ``KeyError: 'claude-haiku-4-5-20251001'`` because pricing.yaml uses
+    the ``anthropic/`` prefix."""
+    import yaml  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "native-cost-demo")
+    # Bare-id native_anthropic agent.
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.NATIVE_ANTHROPIC.value
+    spec_dict["model"]["provider"] = "claude-haiku-4-5-20251001"
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+
+    bundle = load_agent(bundle_dir)
+
+    class FakeAnthropic(MockProvider):
+        """Mock that reports its pricing key the way AnthropicProvider does."""
+
+        def pricing_key(self, provider: str) -> str:
+            return f"anthropic/{provider}" if not provider.startswith("anthropic/") else provider
+
+    registry = ProviderRegistry(default_litellm=MockProvider())
+    registry.register(AgentRuntime.NATIVE_ANTHROPIC, FakeAnthropic())
+    executor = Executor(
+        registry=registry,
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+    )
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    # Run succeeded — no KeyError mid-flight.
+    assert response.status == "success"
+    # Cost > 0 — pricing lookup found the prefixed key. (Mock's tokens
+    # are non-zero; if the pricing_key translation had been skipped,
+    # this would have been 0.0 from the KeyError fallback.)
+    assert response.metrics.cost_usd > 0
+
+
+@pytest.mark.unit
+async def test_executor_records_zero_cost_when_pricing_key_is_none(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """LangChain adapter returns ``pricing_key=None`` because the model
+    is hidden inside the Runnable. The executor should record cost=0
+    rather than crash with KeyError."""
+    import yaml  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "langchain-demo")
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.LANGCHAIN.value
+    spec_dict["model"]["provider"] = "fake.module:fake_factory"
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+    bundle = load_agent(bundle_dir)
+
+    class OpaqueModelProvider(MockProvider):
+        def pricing_key(self, provider: str) -> str | None:
+            return None
+
+    registry = ProviderRegistry(default_litellm=MockProvider())
+    registry.register(AgentRuntime.LANGCHAIN, OpaqueModelProvider())
+    executor = Executor(registry=registry, pricing=pricing, storage=storage, tracer=tracer)
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    assert response.status == "success"
+    assert response.metrics.cost_usd == 0.0
+
+
+@pytest.mark.unit
 async def test_executor_rejects_unregistered_runtime_at_execute_time(
     tmp_path: Path,
     pricing: PricingTable,
@@ -271,6 +353,9 @@ async def test_executor_rejects_unregistered_runtime_at_execute_time(
     yaml_path = bundle_dir / "agent.yaml"
     spec_dict = yaml.safe_load(yaml_path.read_text())
     spec_dict["runtime"] = AgentRuntime.LANGCHAIN.value
+    # LangChain agents use entry-point specs (must contain a colon) —
+    # the AgentSpec cross-field validator rejects bare strings.
+    spec_dict["model"] = {"provider": "fake.module:fake_factory"}
     yaml_path.write_text(yaml.safe_dump(spec_dict))
 
     bundle = load_agent(bundle_dir)

@@ -20,7 +20,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 API_VERSION = "movate/v1"
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
@@ -41,16 +41,21 @@ class ModelFallback(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    """Provider + params. ``provider`` is a LiteLLM model string.
+    """Provider + params. Shape depends on the parent :class:`AgentSpec`'s
+    ``runtime``:
 
-    Examples:
+    * ``runtime: litellm`` (default) → ``provider`` is a LiteLLM-style
+      string: ``openai/gpt-4o-mini-2024-07-18`` / ``azure/gpt-4.1`` /
+      ``anthropic/claude-sonnet-4-6``.
+    * ``runtime: native_anthropic`` → bare Anthropic model id
+      (``claude-sonnet-4-6``).
+    * ``runtime: native_openai`` → bare OpenAI model id
+      (``gpt-4o-mini-2024-07-18``).
+    * ``runtime: langchain`` → entry-point spec (``package.module:function``).
 
-        provider: openai/gpt-4o-mini-2024-07-18
-        provider: azure/gpt-4.1
-        provider: anthropic/claude-sonnet-4-6
-
-    Floating tags (``latest``, ``stable``) are rejected at parse time so a
-    silent provider rotation can't change a deployed agent's behavior.
+    Floating tags (``latest``, ``stable``) are rejected at parse time
+    regardless of runtime — a silent provider rotation can't change a
+    deployed agent's behavior.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -62,11 +67,13 @@ class ModelConfig(BaseModel):
     @field_validator("provider")
     @classmethod
     def _reject_floating_tags(cls, v: str) -> str:
-        if "/" not in v:
-            raise ValueError(
-                f"provider {v!r} must be a LiteLLM model string in '<provider>/<model>' form"
-            )
-        _, model = v.split("/", 1)
+        """Always reject -latest / -stable / -newest tags. The
+        LiteLLM-style "<provider>/<model>" requirement is runtime-specific
+        and lives on :class:`AgentSpec.validate_runtime_provider_shape`
+        because it depends on the agent's ``runtime`` field."""
+        # Reject the floating tag in the model part (after the slash if
+        # present, else the whole string).
+        model = v.split("/", 1)[1] if "/" in v else v
         floating = {"latest", "stable", "newest"}
         if model.lower() in floating or model.endswith("-latest"):
             raise ValueError(f"floating model tag rejected: {v!r}; pin to a dated revision")
@@ -186,6 +193,38 @@ class AgentSpec(BaseModel):
         if not SEMVER_RE.match(v):
             raise ValueError(f"agent version {v!r} must be semver (MAJOR.MINOR.PATCH)")
         return v
+
+    @model_validator(mode="after")
+    def _validate_runtime_provider_shape(self) -> AgentSpec:
+        """Cross-field check: ``model.provider`` shape depends on
+        ``runtime``. We enforce here (instead of on :class:`ModelConfig`)
+        because the constraint involves both fields.
+
+        * LiteLLM agents need the ``<provider>/<model>`` slash form so
+          LiteLLM can route the call.
+        * Native-anthropic / native-openai agents take a bare model id
+          — the adapter prepends the family prefix for pricing.
+        * LangChain agents use an entry-point spec ``package.module:func``
+          which must contain a colon (the adapter rejects no-colon
+          values, but failing here gives a nicer parse-time error)."""
+        provider = self.model.provider
+        if self.runtime == AgentRuntime.LITELLM:
+            if "/" not in provider:
+                raise ValueError(
+                    f"provider {provider!r} must be a LiteLLM string in "
+                    f"'<provider>/<model>' form (or set "
+                    f"`runtime: native_anthropic` / `native_openai` / "
+                    f"`langchain` to use a different naming convention)"
+                )
+        elif self.runtime == AgentRuntime.LANGCHAIN:
+            if ":" not in provider:
+                raise ValueError(
+                    f"provider {provider!r} for runtime: langchain must be a "
+                    f"Python entry-point spec like 'package.module:function'"
+                )
+        # Native runtimes (anthropic / openai) accept bare or prefixed —
+        # adapters tolerate both via pricing_key() normalization.
+        return self
 
 
 # ---------------------------------------------------------------------------

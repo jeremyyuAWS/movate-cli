@@ -129,6 +129,18 @@ class _FakeClient:
 
 
 @pytest.mark.unit
+def test_pricing_key_prepends_anthropic_prefix() -> None:
+    """Native-Anthropic agents declare bare model ids in agent.yaml
+    (``claude-sonnet-4-6``), but pricing.yaml uses LiteLLM-style
+    keys (``anthropic/claude-sonnet-4-6``). The adapter bridges."""
+    provider = AnthropicProvider(client=_FakeClient())  # type: ignore[arg-type]
+    assert provider.pricing_key("claude-sonnet-4-6") == "anthropic/claude-sonnet-4-6"
+    # Already prefixed — idempotent (operators who pass the LiteLLM
+    # form still get a working lookup).
+    assert provider.pricing_key("anthropic/claude-sonnet-4-6") == "anthropic/claude-sonnet-4-6"
+
+
+@pytest.mark.unit
 async def test_complete_happy_path_extracts_text_and_tokens() -> None:
     """Text from the first text content block + tokens from usage."""
     fake = _FakeClient()

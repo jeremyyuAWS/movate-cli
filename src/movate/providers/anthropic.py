@@ -139,6 +139,16 @@ class AnthropicProvider(BaseLLMProvider):
             "use a separate embedding provider (Voyage AI is the recommended companion)."
         )
 
+    def pricing_key(self, provider: str) -> str:
+        """Native-Anthropic agents declare bare model ids (``claude-sonnet-4-6``)
+        in ``agent.yaml: model.provider``, but ``pricing.yaml`` is keyed by
+        LiteLLM-style strings (``anthropic/claude-sonnet-4-6``). Prepend
+        the family prefix to bridge — same model id, two naming
+        conventions."""
+        if provider.startswith("anthropic/"):
+            return provider
+        return f"anthropic/{provider}"
+
 
 # ---------------------------------------------------------------------------
 # Helpers

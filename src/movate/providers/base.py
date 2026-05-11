@@ -91,3 +91,23 @@ class BaseLLMProvider(Protocol):
     async def embed(self, text: str, *, model: str) -> list[float]:
         """Embed is reserved for v0.5+ (retrieval); raise NotImplementedError until then."""
         ...
+
+    def pricing_key(self, provider: str) -> str | None:
+        """Map the agent's ``model.provider`` string to a key in the
+        :mod:`movate.providers.pricing` table.
+
+        Different runtimes use different naming for the same model:
+
+        * LiteLLM agents use the prefixed form (``anthropic/claude-haiku-4-5``)
+          which IS the pricing-table key — default impl returns it unchanged.
+        * Native Anthropic / OpenAI agents use bare model ids
+          (``claude-haiku-4-5``) — their adapters override this to prepend
+          the family prefix so cost lookups succeed.
+        * LangChain agents wrap an opaque Runnable — the underlying model
+          isn't visible to movate, so the adapter returns ``None`` and the
+          executor records ``cost_usd=0`` with a note.
+
+        Default impl is the LiteLLM-style pass-through — adapters that need
+        a translation override.
+        """
+        return provider

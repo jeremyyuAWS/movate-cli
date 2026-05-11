@@ -23,9 +23,24 @@ runner = CliRunner(mix_stderr=False)
 
 
 def _set_runtime(agent_dir: Path, runtime: AgentRuntime) -> None:
+    """Promote a scaffolded agent to a different runtime. Because the
+    AgentSpec cross-field validator now ties ``model.provider``'s
+    expected shape to the runtime, we also patch the provider field
+    to match the runtime's convention:
+
+    * ``native_anthropic`` / ``native_openai`` — bare model id
+    * ``langchain`` — entry-point spec
+    * anything else — leave the default LiteLLM-style provider alone
+    """
     yaml_path = agent_dir / "agent.yaml"
     spec = yaml.safe_load(yaml_path.read_text())
     spec["runtime"] = runtime.value
+    if runtime == AgentRuntime.NATIVE_ANTHROPIC:
+        spec["model"]["provider"] = "claude-haiku-4-5-20251001"
+    elif runtime == AgentRuntime.NATIVE_OPENAI:
+        spec["model"]["provider"] = "gpt-4o-mini-2024-07-18"
+    elif runtime == AgentRuntime.LANGCHAIN:
+        spec["model"]["provider"] = "fake.module:fake_factory"
     yaml_path.write_text(yaml.safe_dump(spec))
 
 

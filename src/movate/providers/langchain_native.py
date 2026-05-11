@@ -136,6 +136,16 @@ class LangChainProvider(BaseLLMProvider):
             "Embeddings primitive directly inside your Runnable."
         )
 
+    def pricing_key(self, provider: str) -> str | None:
+        """LangChain Runnables hide the underlying model from movate — we
+        can't look up pricing for ``myapp.chains:build_chain``. Return
+        ``None`` so the executor skips cost calculation and records 0.
+
+        Operators who care about cost on this runtime should either wire
+        LangChain's BaseCallbackHandler to capture usage out-of-band, or
+        use LangSmith pricing reports (which see what movate can't)."""
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Entry-point loading

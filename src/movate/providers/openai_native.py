@@ -134,6 +134,16 @@ class OpenAIProvider(BaseLLMProvider):
             "directly in your agent code if you need embeddings."
         )
 
+    def pricing_key(self, provider: str) -> str:
+        """Native-OpenAI agents declare bare model ids
+        (``gpt-4o-mini-2024-07-18``) in ``agent.yaml: model.provider``,
+        but ``pricing.yaml`` is keyed by LiteLLM-style strings
+        (``openai/gpt-4o-mini-2024-07-18``). Prepend the family prefix
+        to bridge."""
+        if provider.startswith(("openai/", "azure/")):
+            return provider
+        return f"openai/{provider}"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
