@@ -21,7 +21,7 @@ import typer
 import uvicorn
 from rich.console import Console
 
-from movate.cli._console import hint
+from movate.cli._console import hint, success
 from movate.runtime.app import build_app
 from movate.runtime.registry import scan_agents
 from movate.storage import build_storage
@@ -110,7 +110,7 @@ async def _run_serve(
             f"(GET /agents will return empty)"
         )
     else:
-        err.print(f"[green]✓[/green] loaded {len(agents)} agent(s) from {agents_path}")
+        success(f"loaded {len(agents)} agent(s) from {agents_path}")
         for b in agents:
             err.print(f"  - {b.spec.name} v{b.spec.version}")
 

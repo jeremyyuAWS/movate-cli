@@ -19,7 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from movate.cli._console import get_global_target, hint
+from movate.cli._console import error, get_global_target, hint, warn
 from movate.cli._output import TableJson
 from movate.cli._progress import spinner
 from movate.core.client import MovateClient, MovateClientError
@@ -182,7 +182,7 @@ async def _fetch_one(*, job_id: str, target: str | None) -> JobView:
             with spinner("fetching job state..."):
                 return await client.get_job(job_id)
     except MovateClientError as exc:
-        err.print(f"[red]✗ fetch failed:[/red] {exc}")
+        error(str(exc), context="fetch")
         raise typer.Exit(code=exc.status_code // 100) from None
 
 
@@ -199,10 +199,10 @@ async def _wait_terminal(
                     max_wait_seconds=timeout,
                 )
     except TimeoutError as exc:
-        err.print(f"[yellow]⏱[/yellow] {exc}")
+        warn(str(exc), icon="⏱")
         raise typer.Exit(code=124) from None
     except MovateClientError as exc:
-        err.print(f"[red]✗ poll failed:[/red] {exc}")
+        error(str(exc), context="poll")
         raise typer.Exit(code=exc.status_code // 100) from None
 
 
@@ -212,7 +212,7 @@ async def _fetch_agents(*, target: str | None) -> AgentListView:
         async with client:
             return await client.list_agents()
     except MovateClientError as exc:
-        err.print(f"[red]✗ list-agents failed:[/red] {exc}")
+        error(str(exc), context="list-agents")
         raise typer.Exit(code=exc.status_code // 100) from None
 
 
@@ -223,7 +223,7 @@ async def _fetch_list(*, target: str | None, status: JobStatus | None, limit: in
             with spinner("fetching jobs..."):
                 return await client.list_jobs(status=status, limit=limit)
     except MovateClientError as exc:
-        err.print(f"[red]✗ list failed:[/red] {exc}")
+        error(str(exc), context="list")
         raise typer.Exit(code=exc.status_code // 100) from None
 
 
@@ -239,7 +239,7 @@ def _build_client(target: str | None) -> MovateClient:
         _, target_cfg = resolve_target(target or get_global_target())
         token = resolve_bearer_token(target_cfg)
     except UserConfigError as exc:
-        err.print(f"[red]✗[/red] {exc}")
+        error(str(exc))
         raise typer.Exit(code=2) from None
     return MovateClient(base_url=target_cfg.url, api_key=token)
 

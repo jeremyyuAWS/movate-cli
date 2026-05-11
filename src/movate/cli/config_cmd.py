@@ -19,7 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from movate.cli._console import hint
+from movate.cli._console import error, hint, success
 from movate.core.user_config import (
     TargetConfig,
     UserConfigError,
@@ -108,7 +108,7 @@ def add_target(
     if set_active or cfg.active is None:
         cfg.active = name
     path = save_user_config(cfg)
-    err.print(f"[green]✓[/green] added target {name!r} → {url}")
+    success(f"added target {name!r} → {url}")
     if cfg.active == name:
         hint(f"[dim]  (active target is now {name!r})[/dim]")
     # Surface which capabilities are configured so the operator sees
@@ -151,11 +151,11 @@ def use_target(
     cfg = load_user_config()
     if name not in cfg.targets:
         available = ", ".join(sorted(cfg.targets)) or "(none)"
-        err.print(f"[red]✗[/red] target {name!r} not found. Available: {available}")
+        error(f"target {name!r} not found. Available: {available}")
         raise typer.Exit(code=2)
     cfg.active = name
     save_user_config(cfg)
-    err.print(f"[green]✓[/green] active target → {name!r}")
+    success(f"active target → {name!r}")
 
 
 @config_app.command("show")
@@ -175,13 +175,13 @@ def remove_target(
     """
     cfg = load_user_config()
     if name not in cfg.targets:
-        err.print(f"[red]✗[/red] target {name!r} not found")
+        error(f"target {name!r} not found")
         raise typer.Exit(code=2)
     del cfg.targets[name]
     if cfg.active == name:
         cfg.active = None
     save_user_config(cfg)
-    err.print(f"[green]✓[/green] removed target {name!r}")
+    success(f"removed target {name!r}")
 
 
 # Re-export the error type so callers don't have to reach into core.

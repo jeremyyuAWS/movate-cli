@@ -32,7 +32,7 @@ import typer
 from rich.console import Console
 
 import movate
-from movate.cli._console import hint
+from movate.cli._console import error, hint, success
 from movate.cli._progress import spinner
 from movate.core.user_config import (
     TargetConfig,
@@ -128,13 +128,13 @@ def deploy(
         raise typer.Exit(code=2)
 
     if only is not None and only not in ("api", "worker"):
-        err.print(f"[red]✗[/red] --only must be 'api' or 'worker'; got {only!r}")
+        error(f"--only must be 'api' or 'worker'; got {only!r}")
         raise typer.Exit(code=2)
 
     try:
         target_name, target_cfg = resolve_target(target)
     except UserConfigError as exc:
-        err.print(f"[red]✗[/red] {exc}")
+        error(str(exc))
         raise typer.Exit(code=2) from None
 
     try:
@@ -146,7 +146,7 @@ def deploy(
             only=only,
         )
     except DeployConfigError as exc:
-        err.print(f"[red]✗[/red] {exc}")
+        error(str(exc))
         raise typer.Exit(code=2) from None
 
     _print_plan(plan, dry_run=dry_run)
@@ -173,7 +173,7 @@ def deploy(
             timeout=wait_timeout,
         )
     )
-    err.print(f"[green]✓[/green] {target_name} is now serving {plan.image_tag}")
+    success(f"{target_name} is now serving {plan.image_tag}")
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +375,7 @@ def _run_az(cmd: list[str], *, what: str) -> None:
         result = subprocess.run(cmd, check=False)
     except FileNotFoundError as exc:
         # Caught upstream by shutil.which check, but defensive.
-        err.print(f"[red]✗[/red] command not found: {cmd[0]}")
+        error(f"command not found: {cmd[0]}")
         raise typer.Exit(code=2) from exc
 
     if result.returncode != 0:

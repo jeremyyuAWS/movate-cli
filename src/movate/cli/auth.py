@@ -22,7 +22,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from movate.cli._console import hint
+from movate.cli._console import error, hint, success
 from movate.core.auth import mint_api_key
 from movate.core.models import ApiKeyEnv, ApiKeyRecord
 from movate.storage import build_storage
@@ -67,13 +67,13 @@ def create_key(
     try:
         env_enum = ApiKeyEnv(env)
     except ValueError as exc:
-        err.print(f"[red]✗[/red] env must be 'live' or 'test'; got {env!r}")
+        error(f"env must be 'live' or 'test'; got {env!r}")
         raise typer.Exit(code=2) from exc
 
     try:
         minted = mint_api_key(tenant_id=tenant_id, env=env_enum, label=label)
     except ValueError as exc:
-        err.print(f"[red]✗[/red] {exc}")
+        error(str(exc))
         raise typer.Exit(code=2) from exc
 
     asyncio.run(_persist(minted.record))
@@ -142,7 +142,7 @@ def revoke_key(
 ) -> None:
     """Revoke an API key. Idempotent — re-revoking is a silent no-op."""
     asyncio.run(_revoke(key_id))
-    err.print(f"[green]✓[/green] revoked {key_id}")
+    success(f"revoked {key_id}")
 
 
 # ---------------------------------------------------------------------------

@@ -82,18 +82,65 @@ def hint(message: str) -> None:
     but should NOT appear when stderr is being captured or piped.
 
     Hard rule: NEVER use this for error or warning messages. Those
-    go through ``stderr.print(...)`` directly so they survive
-    ``--quiet``."""
+    go through :func:`error` / :func:`warn` instead, which always
+    survive ``--quiet``."""
     if _quiet:
         return
     stderr.print(message)
 
 
+def error(message: str, *, context: str | None = None) -> None:
+    """Print a red ``✗``-prefixed error to stderr. Always rendered,
+    even under ``--quiet`` — operators must see failure.
+
+    With ``context`` we get ``✗ <context>:`` as the prefix, which is
+    the right shape for "operation X failed because: <reason>":
+
+      error("connection refused", context="submit")
+      # → ✗ submit failed: connection refused
+
+      error("env must be 'live' or 'test'; got 'foo'")
+      # → ✗ env must be 'live' or 'test'; got 'foo'
+
+    Doesn't raise ``typer.Exit`` — leaves the caller in control of
+    exit code semantics (different commands map errors to different
+    codes; the exit-code policy lives at each call site)."""
+    if context:
+        stderr.print(f"[red]✗ {context} failed:[/red] {message}")
+    else:
+        stderr.print(f"[red]✗[/red] {message}")
+
+
+def warn(message: str, *, icon: str = "⚠") -> None:
+    """Print a yellow warning to stderr. Always rendered, even under
+    ``--quiet`` — warnings are usually "thing degraded but proceeded"
+    information the operator wants to know.
+
+    ``icon`` defaults to ``⚠`` (general warning); pass ``⏱`` for
+    timeouts so they're scannable in a log. Other icons stay free
+    for new shapes (e.g. ``⊘`` for safety-blocked) without growing
+    the function surface."""
+    stderr.print(f"[yellow]{icon}[/yellow] {message}")
+
+
+def success(message: str) -> None:
+    """Print a green ``✓``-prefixed success line to stderr.
+
+    Distinct from :func:`hint`: success lines are confirmation that
+    a destructive / state-changing op completed, so the operator
+    must see them regardless of ``--quiet``. Examples:
+    ``✓ revoked <key_id>``, ``✓ active target → 'prod'``."""
+    stderr.print(f"[green]✓[/green] {message}")
+
+
 __all__ = [
+    "error",
     "get_global_target",
     "hint",
     "is_quiet",
     "set_global_target",
     "set_quiet",
     "stderr",
+    "success",
+    "warn",
 ]

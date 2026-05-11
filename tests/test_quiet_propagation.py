@@ -20,10 +20,13 @@ from __future__ import annotations
 import pytest
 
 from movate.cli._console import (
+    error,
     get_global_target,
     is_quiet,
     set_global_target,
     set_quiet,
+    success,
+    warn,
 )
 
 
@@ -48,6 +51,97 @@ def test_is_quiet_reflects_set_quiet() -> None:
     assert is_quiet() is True
     set_quiet(False)
     assert is_quiet() is False
+
+
+@pytest.mark.unit
+def test_error_helper_prefix_with_context(capsys: pytest.CaptureFixture[str]) -> None:
+    """``error(msg, context="submit")`` renders ``✗ submit failed: <msg>``."""
+    # Use a fresh Rich Console wired at stderr capture so we can read it
+    # back without fighting the module-global one.
+    from rich.console import Console  # noqa: PLC0415
+
+    from movate.cli import _console  # noqa: PLC0415
+
+    buf_console = Console(file=__import__("io").StringIO(), force_terminal=False, no_color=True)
+    original = _console.stderr
+    _console.stderr = buf_console  # type: ignore[misc]
+    try:
+        error("connection refused", context="submit")
+    finally:
+        _console.stderr = original  # type: ignore[misc]
+
+    out = buf_console.file.getvalue()  # type: ignore[union-attr]
+    assert "submit failed" in out
+    assert "connection refused" in out
+    assert "✗" in out
+
+
+@pytest.mark.unit
+def test_error_helper_no_context_just_marker() -> None:
+    """``error(msg)`` without context renders just ``✗ <msg>``."""
+    from rich.console import Console  # noqa: PLC0415
+
+    from movate.cli import _console  # noqa: PLC0415
+
+    buf_console = Console(file=__import__("io").StringIO(), force_terminal=False, no_color=True)
+    original = _console.stderr
+    _console.stderr = buf_console  # type: ignore[misc]
+    try:
+        error("env must be 'live' or 'test'")
+    finally:
+        _console.stderr = original  # type: ignore[misc]
+
+    out = buf_console.file.getvalue()  # type: ignore[union-attr]
+    assert "env must be" in out
+    assert "failed" not in out  # no "failed" verb when no context
+
+
+@pytest.mark.unit
+def test_warn_and_success_render_correct_marker() -> None:
+    """``warn`` uses yellow + ⚠ by default (or custom icon like ⏱);
+    ``success`` uses green + ✓."""
+    from rich.console import Console  # noqa: PLC0415
+
+    from movate.cli import _console  # noqa: PLC0415
+
+    buf_console = Console(file=__import__("io").StringIO(), force_terminal=False, no_color=True)
+    original = _console.stderr
+    _console.stderr = buf_console  # type: ignore[misc]
+    try:
+        warn("disk almost full")
+        warn("timed out after 30s", icon="⏱")
+        success("revoked key abc")
+    finally:
+        _console.stderr = original  # type: ignore[misc]
+
+    out = buf_console.file.getvalue()  # type: ignore[union-attr]
+    assert "⚠" in out
+    assert "disk almost full" in out
+    assert "⏱" in out
+    assert "timed out" in out
+    assert "✓" in out
+    assert "revoked key abc" in out
+
+
+@pytest.mark.unit
+def test_error_helper_not_suppressed_by_quiet() -> None:
+    """``--quiet`` only gates ``hint()``. ``error`` / ``warn`` /
+    ``success`` always render — operators must see failure."""
+    from rich.console import Console  # noqa: PLC0415
+
+    from movate.cli import _console  # noqa: PLC0415
+
+    buf_console = Console(file=__import__("io").StringIO(), force_terminal=False, no_color=True)
+    original = _console.stderr
+    _console.stderr = buf_console  # type: ignore[misc]
+    set_quiet(True)
+    try:
+        error("the world is on fire")
+    finally:
+        _console.stderr = original  # type: ignore[misc]
+
+    out = buf_console.file.getvalue()  # type: ignore[union-attr]
+    assert "world is on fire" in out
 
 
 @pytest.mark.unit
