@@ -8,8 +8,10 @@ shape, handles the documented error codes, and returns a clean
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
+import movate.providers.lyzr as lyzr_mod
 from movate.core.failures import (
     AuthError,
     ModelUnavailableError,
@@ -19,8 +21,7 @@ from movate.core.failures import (
 )
 from movate.core.models import TokenUsage
 from movate.providers.base import CompletionRequest, Message
-from movate.providers.lyzr import LyzrProvider, _DEFAULT_BASE, _INFERENCE_PATH
-
+from movate.providers.lyzr import _DEFAULT_BASE, _INFERENCE_PATH, LyzrProvider
 
 # ---------------------------------------------------------------------------
 # Fake httpx.AsyncClient used as a drop-in via monkeypatch
@@ -65,7 +66,6 @@ class _FakeAsyncClient:
 
 def _patch_httpx(monkeypatch, client: _FakeAsyncClient) -> None:
     """Replace httpx.AsyncClient with a factory that returns our fake."""
-    import movate.providers.lyzr as lyzr_mod
 
     def _factory(*_args, **_kwargs):
         return client
@@ -135,24 +135,18 @@ async def test_complete_caller_supplies_session_id(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_api_key_raises_auth_error() -> None:
+async def test_missing_api_key_raises_auth_error(monkeypatch) -> None:
     """No LYZR_API_KEY at construction OR env → clean AuthError, no HTTP."""
-    provider = LyzrProvider(api_key=None)
     # Make sure env doesn't supply one for this test
-    import os
-
-    backup = os.environ.pop("LYZR_API_KEY", None)
-    try:
-        with pytest.raises(AuthError, match="LYZR_API_KEY"):
-            await provider.complete(
-                CompletionRequest(
-                    provider="lyzr/abc",
-                    messages=[Message(role="user", content="hi")],
-                )
+    monkeypatch.delenv("LYZR_API_KEY", raising=False)
+    provider = LyzrProvider(api_key=None)
+    with pytest.raises(AuthError, match="LYZR_API_KEY"):
+        await provider.complete(
+            CompletionRequest(
+                provider="lyzr/abc",
+                messages=[Message(role="user", content="hi")],
             )
-    finally:
-        if backup is not None:
-            os.environ["LYZR_API_KEY"] = backup
+        )
 
 
 @pytest.mark.asyncio
@@ -222,8 +216,6 @@ async def test_400_raises_schema_error(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_timeout_raises_movate_timeout(monkeypatch) -> None:
-    import httpx
-
     client = _FakeAsyncClient(
         response=_FakeResponse(status_code=200, json_data={"response": "x"}),
         raise_exc=httpx.TimeoutException("slow"),

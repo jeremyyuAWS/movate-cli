@@ -11,7 +11,6 @@ Two layers:
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
@@ -22,7 +21,6 @@ from movate.cli.import_lyzr import (
     _LyzrImportError,
     _parse_examples,
     _slugify_name,
-    import_app,
 )
 from movate.cli.main import app
 

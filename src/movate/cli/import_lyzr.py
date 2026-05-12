@@ -514,7 +514,7 @@ def _render_summary(
     if plan["runtime"] == "lyzr":
         console.print("[dim]Next:[/dim]")
         console.print(
-            f"  export LYZR_API_KEY=sk-default-...   "
+            "  export LYZR_API_KEY=sk-default-...   "
             "[dim](from Lyzr Studio → Agent → API Key)[/dim]"
         )
         console.print(f"  mdk validate {agent_dir}")
@@ -524,9 +524,9 @@ def _render_summary(
         )
         if plan["managed_agents"]:
             console.print(
-                f"\n  [dim]Migration tip:[/dim] re-import with "
-                f"[bold]--runtime litellm[/bold] to generate an MDK-native "
-                f"version, then run the same eval against both."
+                "\n  [dim]Migration tip:[/dim] re-import with "
+                "[bold]--runtime litellm[/bold] to generate an MDK-native "
+                "version, then run the same eval against both."
             )
     else:
         console.print("[dim]Next:[/dim]")

@@ -67,6 +67,16 @@ from movate.providers.base import (
 _DEFAULT_BASE = "https://agent-prod.studio.lyzr.ai"
 _INFERENCE_PATH = "/v3/inference/chat/"
 
+# HTTP status code constants — named so the status-handling branch
+# reads as intent ("if response was unauthenticated") rather than as
+# magic numbers. Lint rule PLR2004 flags raw HTTP ints; this is the
+# canonical fix.
+_HTTP_UNAUTHORIZED = 401
+_HTTP_FORBIDDEN = 403
+_HTTP_TOO_MANY_REQUESTS = 429
+_HTTP_BAD_REQUEST = 400
+_HTTP_INTERNAL_SERVER_ERROR = 500
+
 
 class LyzrProvider(BaseLLMProvider):
     """``BaseLLMProvider`` implementation that calls Lyzr Studio's
@@ -154,22 +164,22 @@ class LyzrProvider(BaseLLMProvider):
                 f"Lyzr API request failed: {exc}"
             ) from exc
 
-        if resp.status_code == 401 or resp.status_code == 403:
+        if resp.status_code in {_HTTP_UNAUTHORIZED, _HTTP_FORBIDDEN}:
             raise AuthError(
                 f"Lyzr returned {resp.status_code} — check LYZR_API_KEY "
                 f"is correct and authorized for agent {agent_id!r}"
             )
-        if resp.status_code == 429:
+        if resp.status_code == _HTTP_TOO_MANY_REQUESTS:
             raise RateLimitError(
                 f"Lyzr rate-limited ({resp.status_code}); inspect "
                 f"Lyzr Studio for the account's request quota",
                 retry_after=_parse_retry_after(resp.headers),
             )
-        if resp.status_code >= 500:
+        if resp.status_code >= _HTTP_INTERNAL_SERVER_ERROR:
             raise ModelUnavailableError(
                 f"Lyzr returned {resp.status_code}: {resp.text[:200]}"
             )
-        if resp.status_code >= 400:
+        if resp.status_code >= _HTTP_BAD_REQUEST:
             raise SchemaError(
                 f"Lyzr returned {resp.status_code}: {resp.text[:200]}"
             )
@@ -211,6 +221,10 @@ class LyzrProvider(BaseLLMProvider):
             "Run with --no-stream or switch the agent to runtime: "
             "litellm (or another native runtime) for streaming."
         )
+        # Unreachable yield — makes this an async generator so the
+        # method signature matches the BaseLLMProvider Protocol
+        # contract (AsyncIterator[StreamChunk], not a coroutine).
+        yield
 
     async def embed(
         self, text: str, *, model: str
