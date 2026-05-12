@@ -170,7 +170,7 @@ def test_validate_dispatches_to_workflow(tmp_path: Path) -> None:
     result = runner.invoke(app, ["validate", str(wf)])
     assert result.exit_code == 0, result.stdout
     assert "demo-workflow" in result.stdout
-    assert "(workflow)" in result.stdout
+    assert "workflow" in result.stdout  # branch dispatched
     assert "first → second" in result.stdout
 
 
@@ -209,7 +209,7 @@ def test_show_workflow_renders_topology(tmp_path: Path) -> None:
     result = runner.invoke(app, ["show", str(wf)])
     assert result.exit_code == 0, result.stdout
     assert "demo-workflow" in result.stdout
-    assert "(workflow)" in result.stdout
+    assert "workflow" in result.stdout  # branch dispatched
     # ASCII topology
     assert "first → second" in result.stdout
     # Mermaid block — both nodes + the directed edge

@@ -9,7 +9,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
+from rich import box
 from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from movate.cli._workflow_path import is_workflow_path
 from movate.core.config import load_project_config
@@ -83,18 +87,6 @@ def _validate_agent(path: Path, *, strict: bool, run_linter: bool) -> None:
     if lint_issues:
         _render_lint_issues(lint_issues)
 
-    console.print(f"[green]✓[/green] {spec.name} [dim]v{spec.version}[/dim] [dim](agent)[/dim]")
-    console.print(f"  api_version: {spec.api_version}")
-    console.print(f"  provider:    {spec.model.provider}")
-    console.print(f"  prompt:      {bundle.prompt_hash[:12]}…")
-    if spec.model.fallback:
-        fbs = ", ".join(f.provider for f in spec.model.fallback)
-        console.print(f"  fallback:    {fbs}")
-    if not policy.is_permissive():
-        console.print("  [dim]policy:      ✓ compliant[/dim]")
-    if run_linter and not lint_issues:
-        console.print("  [dim]lint:        ✓ clean[/dim]")
-
     # Cost forecast — silent when no dataset / no pricing for model /
     # empty dataset. The estimate_eval_cost helper returns None in
     # every "skip" case so this stays a single conditional.
@@ -102,13 +94,15 @@ def _validate_agent(path: Path, *, strict: bool, run_linter: bool) -> None:
         forecast = estimate_eval_cost(bundle, pricing=load_pricing())
     except Exception:  # pragma: no cover — defensive; load_pricing rarely fails
         forecast = None
-    if forecast is not None:
-        console.print(
-            f"  [dim]eval cost:   ~${forecast.total_cost_usd:.4f} "
-            f"({forecast.cases} cases x "
-            f"~{forecast.input_tokens_per_call} in + "
-            f"~{forecast.output_tokens_per_call} out tokens)[/dim]"
-        )
+
+    _render_agent_summary(
+        spec=spec,
+        bundle=bundle,
+        policy_active=not policy.is_permissive(),
+        lint_active=run_linter,
+        lint_clean=run_linter and not lint_issues,
+        forecast=forecast,
+    )
 
     # Exit non-zero if there are real errors (always) or warnings
     # under --strict (CI gate mode).
@@ -116,6 +110,81 @@ def _validate_agent(path: Path, *, strict: bool, run_linter: bool) -> None:
     has_warnings = any(i.severity == "warning" for i in lint_issues)
     if has_errors or (strict and has_warnings):
         raise typer.Exit(code=2)
+
+
+def _render_agent_summary(
+    *,
+    spec,  # type: ignore[no-untyped-def]
+    bundle,  # type: ignore[no-untyped-def]
+    policy_active: bool,
+    lint_active: bool,
+    lint_clean: bool,
+    forecast,  # type: ignore[no-untyped-def]
+) -> None:
+    """Render the agent's post-validate summary as a Rich panel.
+
+    Three logical sections inside one panel:
+
+    1. Identity — api_version
+    2. Model — provider, fallback chain, prompt hash
+    3. Quality — lint + policy badges
+    4. Cost — eval-run forecast (only if dataset + pricing available)
+
+    Tokens preserved verbatim for assertion-based tests:
+    ``eval cost``, ``clean``, ``compliant`` (only when policy active).
+    """
+    table = Table(
+        show_header=False,
+        box=None,
+        padding=(0, 2),
+        pad_edge=False,
+    )
+    table.add_column(style="dim", no_wrap=True, justify="right")
+    table.add_column(no_wrap=False)
+
+    table.add_row("api", spec.api_version)
+    table.add_row("provider", spec.model.provider)
+    if spec.model.fallback:
+        fbs = ", ".join(f.provider for f in spec.model.fallback)
+        table.add_row("fallback", f"[dim]{fbs}[/dim]")
+    table.add_row("prompt", f"[dim]{bundle.prompt_hash[:12]}…[/dim]")
+
+    # Quality row — combine lint + policy badges so users see at-a-glance
+    # what was checked and what passed. Each badge is a single token so
+    # tests asserting on "clean" / "compliant" keep matching.
+    badges: list[str] = []
+    if lint_active:
+        badges.append("[green]✓[/green] lint clean" if lint_clean else "[yellow]![/yellow] lint")
+    if policy_active:
+        badges.append("[green]✓[/green] policy compliant")
+    if badges:
+        table.add_row("checks", "   ".join(badges))
+
+    if forecast is not None:
+        table.add_row(
+            "eval cost",
+            f"[dim]~${forecast.total_cost_usd:.4f}  "
+            f"({forecast.cases} cases · "
+            f"~{forecast.input_tokens_per_call}in + "
+            f"~{forecast.output_tokens_per_call}out tokens)[/dim]",
+        )
+
+    title = Text.assemble(
+        ("✓ ", "bold green"),
+        (spec.name, "bold"),
+        ("  v", "dim"),
+        (spec.version, "dim"),
+        ("  ·  agent", "dim"),
+    )
+    panel = Panel(
+        table,
+        title=title,
+        title_align="left",
+        border_style="green",
+        box=box.ROUNDED,
+        padding=(1, 2),
+    )
+    console.print(panel)
 
 
 def _render_lint_issues(issues: list[LintIssue]) -> None:
@@ -152,12 +221,30 @@ def _validate_workflow(path: Path) -> None:
         console.print(f"[red]✗ workflow validation failed:[/red] {exc}")
         raise typer.Exit(code=2) from None
 
-    console.print(
-        f"[green]✓[/green] {graph.name} [dim]v{graph.version}[/dim] [dim](workflow)[/dim]"
-    )
-    console.print(f"  api_version: {spec.api_version}")
-    console.print(f"  entrypoint:  {graph.entrypoint}")
-    console.print(f"  nodes:       {len(graph.nodes)}")
-    console.print(f"  edges:       {len(graph.edges)}")
+    table = Table(show_header=False, box=None, padding=(0, 2), pad_edge=False)
+    table.add_column(style="dim", no_wrap=True, justify="right")
+    table.add_column(no_wrap=False)
+    table.add_row("api", spec.api_version)
+    table.add_row("entrypoint", graph.entrypoint)
+    table.add_row("nodes", str(len(graph.nodes)))
+    table.add_row("edges", str(len(graph.edges)))
     chain = " → ".join(graph.topological_order())
-    console.print(f"  topology:    {chain}")
+    table.add_row("topology", chain)
+
+    title = Text.assemble(
+        ("✓ ", "bold green"),
+        (graph.name, "bold"),
+        ("  v", "dim"),
+        (graph.version, "dim"),
+        ("  ·  workflow", "dim"),
+    )
+    console.print(
+        Panel(
+            table,
+            title=title,
+            title_align="left",
+            border_style="green",
+            box=box.ROUNDED,
+            padding=(1, 2),
+        )
+    )
