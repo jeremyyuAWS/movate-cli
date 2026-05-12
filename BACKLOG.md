@@ -302,11 +302,20 @@ Strategic direction shift: position movate-cli as **MDK — Movate Development K
 > see [docs/license-posture.md](docs/license-posture.md) (TBD).
 > Future additions must clear the same bar.
 >
-> **Open questions for leadership before committing engineering weeks:**
-> 1. Multi-cloud requirement (GCP/AWS) — hard requirement or eventual?
-> 2. Multi-tenant — hosted SaaS or self-hosted by customer?
-> 3. Lyzr adapter — strategic partnership or example of many? **License-check Lyzr first.**
-> 4. Knowledge graphs — concrete customer use case or aspirational?
+> **Strategic answers from leadership (May 2026):**
+> 1. **Multi-cloud (GCP/AWS): eventual.** Stay Azure-first; new infrastructure
+>    decisions must be cloud-portable in principle. ADR captures the rule.
+> 2. **Multi-tenant: both — SaaS AND self-hosted.** Most building blocks
+>    already in place. Need Helm chart for K8s self-hosting; SaaS onboarding
+>    flow. v1.0 work.
+> 3. **Lyzr adapter: STRATEGIC + TIME-BOXED.** Most current customer agents
+>    are on Lyzr. Build a read-only adapter + `mdk import lyzr <id>` →
+>    `agent.yaml` migration tool. Bridge to migrate OFF Lyzr, not stay
+>    integrated. Bump to v0.7-v0.8 priority (not v1.0). License-check first.
+> 4. **Knowledge graph: aspirational, visualization-first.** Use Apache AGE
+>    for storage (cheap, Postgres-native). The actual value is d3.js
+>    interactive visualization of the graph + simple search/filter.
+>    Becomes the demo "wow moment" in v0.9. Not a deep-query system.
 
 ### Tier 0 — Brand + naming (v0.6, ~1 week)
 
@@ -345,9 +354,11 @@ Strategic direction shift: position movate-cli as **MDK — Movate Development K
 - [ ] **Evaluate open-source vector DB candidates** `[HIGH] [v0.8] [3d]` — `pgvector` (recommended; already have Postgres; PostgreSQL License — permissive), `Qdrant` (Apache 2.0), `Chroma` (Apache 2.0), `Weaviate` (BSD-3), `LanceDB` (Apache 2.0). All license-clean for customer resale. Write a 1-page decision doc.
 - [ ] **Integrate pgvector (or chosen VDB)** `[HIGH] [v0.8] [1-2w]` — `MemoryProvider.vector_search()` + ingestion pipeline. `knowledge.yaml: vector_db:` config.
 - [ ] **Evaluate open-source knowledge graph candidates** `[HIGH] [v0.9] [3d]` — `Apache AGE` (**recommended**; Postgres extension; Apache 2.0). **EXCLUDE**: Neo4j Community (GPLv3 — copyleft); Memgraph (BSL — service-competition restrictions). Acceptable alternatives: Kuzu (MIT), TerminusDB (Apache 2.0). Decision doc must explicitly state license + resale safety.
-- [ ] **Integrate KG (Apache AGE or chosen)** `[HIGH] [v0.9] [1-2w]` — graph queries via Cypher; entity + relationship extraction at ingest.
+- [ ] **Integrate KG (Apache AGE)** `[HIGH] [v0.9] [1w]` — entity + relationship extraction at ingest; keep schema simple — this is a demo/visualization layer, not a deep-query system.
 - [ ] **Canonical KB ingestion pipeline** `[HIGH] [v0.9] [2w]` — `mdk knowledge ingest <path>` runs: chunking → metadata → embedding → entity extraction → graph relationships. Configurable via `knowledge.yaml`.
 - [ ] **Hybrid retrieval (vector + KG)** `[HIGH] [v0.9] [1w]` — query fans out to both; merge by score with configurable weights.
+- [ ] **`mdk knowledge graph --serve` (d3.js visualization)** `[HIGH] [v0.9] [1-2w]` — HTTP endpoint returns `{nodes, edges}`; static HTML page renders a force-directed d3.js graph. Click a node → metadata + related KB chunks. **This is the demo wow-moment per Deva.** Showcases what the agent "knows" visually.
+- [ ] **KG subgraph search + highlight** `[HIGH] [v0.9] [1w]` — search box on the d3.js page: "show me everything related to eval gates" → highlights the relevant subgraph + shows top-k KB chunks. Powered by hybrid retrieval (vector for KB chunks; graph traversal for entity neighborhoods).
 - [ ] **Avoid cloud-native proprietary services** `[MED] [v0.9] [—]` — already done at model layer (LiteLLM). Infra layer (Azure) — scope a separate Terraform/Helm pass for GCP/AWS if/when business case is clear.
 
 ### Tier 5 — Memory architecture (v0.8, ~4 weeks parallel with VDB work)
@@ -362,8 +373,10 @@ Strategic direction shift: position movate-cli as **MDK — Movate Development K
 ### Tier 6 — Adapter architecture (v1.0, ~4 weeks)
 
 - [ ] **Generic HTTP agent adapter** `[HIGH] [v1.0] [1w]` — POST to URL, expect JSON; black-box testing for any HTTP-served agent.
-- [ ] **Lyzr adapter** `[MED] [v1.0] [1w]` — gated on confirmation Lyzr matters. Spec out before committing.
-- [ ] **Browser/Playwright adapter** `[LOW] [v1.0] [2w]` — evaluate Web UIs. Gated on customer use case.
+- [ ] **Lyzr adapter (read-only, migration bridge)** `[HIGH] [v0.7] [3-5d]` — invoke a Lyzr-hosted agent from MDK for eval/bench. License-check first (confirm Lyzr SDK is Apache 2.0 / MIT). Time-boxed: this is a bridge to migrate customer agents OFF Lyzr, not stay integrated.
+- [ ] **`mdk import lyzr <agent-id>`** `[HIGH] [v0.8] [1w]` — pulls a Lyzr agent definition and synthesizes the equivalent MDK `agent.yaml`. Powers the migration story.
+- [ ] **`docs/migrate-from-lyzr.md`** `[HIGH] [v0.8] [2d]` — walks customers through importing existing Lyzr agents into MDK-native. Critical because most current customer agents live on Lyzr.
+- [ ] **Browser/Playwright adapter** `[LOW] [v1.0+] [2w]` — evaluate Web UIs. Gated on customer use case.
 - [ ] **Trace replay adapter** `[—] [done]` — already shipped as `mdk run --replay` and `mdk trace replay`.
 
 ### Tier 7 — Comprehensive reporting + reconciliation (v1.0, ~3 weeks)
@@ -389,8 +402,11 @@ Strategic direction shift: position movate-cli as **MDK — Movate Development K
 
 - [ ] **Reusable enterprise policy enforcement** `[HIGH] [v1.0] [1w]` — `mdk policy export/import` so teams can share `policy.yaml` snippets. Marketplace later.
 - [ ] **Multi-tenant deployments (formalize)** `[HIGH] [v1.0] [—]` — mostly shipped; add tenant-creation API, per-tenant config overrides.
-- [ ] **Portable/open deployment architecture** `[MED] [v1.0+] [2w]` — scope after multi-cloud answer from Deva.
-- [ ] **Enterprise governance compliance (SOC2 / audit logs)** `[MED] [v1.0+] [—]` — depends on commercialization answer.
+- [ ] **Helm chart for self-hosted K8s deployment** `[HIGH] [v1.0] [1w]` — alternative to Bicep; gives customers a "self-host on your cluster" path. Works on EKS / GKE / AKS / on-prem K8s.
+- [ ] **SaaS tenant onboarding flow** `[HIGH] [v1.0] [1w]` — `mdk tenants create` API + provisioning runbook for hosted-by-Movate customers.
+- [ ] **`docs/adr/001-cloud-portability.md`** `[HIGH] [v0.6] [≤2h]` — captures the principle: stay Azure-first today, but every new infrastructure decision must be cloud-portable in principle. Lists what we won't add (Cosmos DB, Azure-only auth, etc). Cheap, prevents future lock-in regret.
+- [ ] **GCP / AWS deployment runbooks** `[MED] [v1.1+] [1w each]` — Terraform modules for AWS (ECS + RDS) and GCP (Cloud Run + CloudSQL). Deferred until a real customer asks. Architecture's already portable; just need the IaC.
+- [ ] **Enterprise governance compliance (SOC2 audit trail)** `[LOW] [v1.1+] [—]` — most building blocks shipped (audit log via failures table, RunRecord, OTel). Formal SOC2 scoping when first enterprise customer asks.
 
 ---
 
