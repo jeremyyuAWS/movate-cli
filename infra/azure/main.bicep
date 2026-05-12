@@ -82,6 +82,25 @@ provisioning pass.
 param acsFromNumber string = ''
 
 @description('''
+Wire Telegram operator-alert env vars into the worker. Off by default —
+flip to ``true`` when you want personal job-completion pings via a
+Telegram bot. Setup: @BotFather creates the bot + token; you grab your
+chat_id from the bot's getUpdates URL; paste the token into KV as
+``telegram-bot-token`` and the chat_id into ``telegramChatId`` below.
+Unlike SMS (per-job opt-in), Telegram is operator-wide: pings on every
+terminal job. Designed for the personal dev-loop use case.
+''')
+param enableTelegram bool = false
+
+@description('''
+Telegram chat_id the worker pings on every terminal job. Numeric
+string (e.g. ``987654321``). Non-secret; lives alongside ``image`` in
+the bicepparam. Empty string disables the env var even when
+``enableTelegram`` is true.
+''')
+param telegramChatId string = ''
+
+@description('''
 Short suffix appended to globally-unique resource names (Key Vault,
 ACR, Postgres, ACS) to avoid collisions with other Azure tenants that
 picked the same "movate" branding. KV names live in a global Azure
@@ -274,6 +293,13 @@ module worker 'modules/containerapp-worker.bicep' = if (enableApiWorker) {
     // MOVATE_ACS_FROM_NUMBER is the non-secret E.164 from the bicepparam.
     enableSms: enableSms
     acsFromNumber: acsFromNumber
+    // Telegram env-var wiring. Same shape as SMS: enableTelegram gates
+    // both env vars; when true the worker reads MOVATE_TELEGRAM_BOT_TOKEN
+    // from KV secret ``telegram-bot-token`` (operator pastes once) and
+    // MOVATE_TELEGRAM_CHAT_ID from the bicepparam. Designed for personal
+    // alerts ("ping me when my job's done"); operator-wide trigger.
+    enableTelegram: enableTelegram
+    telegramChatId: telegramChatId
     tags: tags
   }
 }

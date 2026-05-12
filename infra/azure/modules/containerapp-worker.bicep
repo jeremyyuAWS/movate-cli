@@ -86,6 +86,28 @@ during the provisioning pass before the number is purchased.
 ''')
 param acsFromNumber string = ''
 
+@description('''
+Wire Telegram operator-alert env vars into the worker. When true, the
+worker gets:
+  - MOVATE_TELEGRAM_BOT_TOKEN from KV secret ``telegram-bot-token``
+  - MOVATE_TELEGRAM_CHAT_ID from the ``telegramChatId`` param below
+Both must be set together; python build_telegram_backend() refuses
+partial config. Unlike SMS (per-job opt-in), Telegram is operator-wide:
+it pings on every terminal job — designed for personal dev-loop
+alerts ("my job's done").
+''')
+param enableTelegram bool = false
+
+@description('''
+Telegram chat_id the worker pings on every terminal job. Non-secret;
+lives alongside ``image`` in the bicepparam. Numeric string (e.g.
+``987654321``). Get it from
+https://api.telegram.org/bot<TOKEN>/getUpdates after sending /start to
+your bot. Empty string disables the env var even when
+``enableTelegram`` is true.
+''')
+param telegramChatId string = ''
+
 @description('Common tags.')
 param tags object = {}
 
@@ -161,6 +183,18 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = {
                 identity: 'system'
               }
             ]
+          : [],
+        // Telegram bot token — only wired when enableTelegram is true.
+        // Operator pastes the bot token (from @BotFather) into KV under
+        // this exact name once: az keyvault secret set --name telegram-bot-token
+        enableTelegram
+          ? [
+              {
+                name: 'telegram-bot-token'
+                keyVaultUrl: '${keyVaultUri}secrets/telegram-bot-token'
+                identity: 'system'
+              }
+            ]
           : []
       )
     }
@@ -227,6 +261,22 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = {
                   {
                     name: 'MOVATE_ACS_FROM_NUMBER'
                     value: acsFromNumber
+                  }
+                ]
+              : [],
+            // Telegram env wiring — only when enableTelegram AND chat_id
+            // is populated. Same two-phase pattern as SMS: operator can
+            // flip the flag during provisioning before they've grabbed
+            // their chat_id from @BotFather's getUpdates URL.
+            enableTelegram && !empty(telegramChatId)
+              ? [
+                  {
+                    name: 'MOVATE_TELEGRAM_BOT_TOKEN'
+                    secretRef: 'telegram-bot-token'
+                  }
+                  {
+                    name: 'MOVATE_TELEGRAM_CHAT_ID'
+                    value: telegramChatId
                   }
                 ]
               : []
