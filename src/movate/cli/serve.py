@@ -21,6 +21,7 @@ import typer
 import uvicorn
 from rich.console import Console
 
+from movate.cli._console import hint, success
 from movate.runtime.app import build_app
 from movate.runtime.registry import scan_agents
 from movate.storage import build_storage
@@ -109,7 +110,7 @@ async def _run_serve(
             f"(GET /agents will return empty)"
         )
     else:
-        err.print(f"[green]✓[/green] loaded {len(agents)} agent(s) from {agents_path}")
+        success(f"loaded {len(agents)} agent(s) from {agents_path}")
         for b in agents:
             err.print(f"  - {b.spec.name} v{b.spec.version}")
 
@@ -120,9 +121,9 @@ async def _run_serve(
     )
     err.print(f"[bold]movate[/bold] serving on http://{host}:{port}")
     if rate_limit_per_minute > 0:
-        err.print(f"[dim]  rate limit: {rate_limit_per_minute} req/min per API key[/dim]")
+        hint(f"[dim]  rate limit: {rate_limit_per_minute} req/min per API key[/dim]")
     else:
-        err.print("[dim]  rate limit: [yellow]DISABLED[/yellow][/dim]")
+        hint("[dim]  rate limit: [yellow]DISABLED[/yellow][/dim]")
 
     config = uvicorn.Config(
         app,

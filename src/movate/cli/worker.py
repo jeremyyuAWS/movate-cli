@@ -21,6 +21,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from movate.cli._console import hint, success
 from movate.cli._runtime import build_local_runtime, shutdown_runtime
 from movate.core.models import JobRecord, JobStatus
 from movate.core.notify import build_dispatcher
@@ -107,11 +108,11 @@ async def _run_worker(
         )
     else:
         if agents:
-            err.print(f"[green]✓[/green] {len(agents)} agent(s) loaded:")
+            success(f"{len(agents)} agent(s) loaded:")
             for b in agents:
                 err.print(f"  - {b.spec.name} v{b.spec.version}")
         if workflows:
-            err.print(f"[green]✓[/green] {len(workflows)} workflow(s) loaded:")
+            success(f"{len(workflows)} workflow(s) loaded:")
             for name in sorted(workflows):
                 err.print(f"  - {name}")
 
@@ -145,7 +146,7 @@ async def _run_worker(
         )
 
     notifier = build_dispatcher()
-    err.print(f"[dim]notifications: {notifier.name} backend[/dim]")
+    hint(f"[dim]notifications: {notifier.name} backend[/dim]")
 
     worker_obj = Worker(
         storage=rt.storage,
@@ -159,7 +160,7 @@ async def _run_worker(
 
     def _handle_signal(*_: object) -> None:
         err.print()  # newline after ^C
-        err.print("[dim]received shutdown signal — finishing current job...[/dim]")
+        hint("[dim]received shutdown signal — finishing current job...[/dim]")
         stop_event.set()
 
     loop = asyncio.get_running_loop()
@@ -174,4 +175,4 @@ async def _run_worker(
         await worker_obj.run_forever(stop_event)
     finally:
         await shutdown_runtime(rt.storage, rt.tracer)
-        err.print("[green]✓[/green] worker stopped cleanly")
+        success("worker stopped cleanly")

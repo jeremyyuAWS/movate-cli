@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from movate import __version__  # noqa: E402
+from movate.cli import _console  # noqa: E402
 from movate.cli import bench as bench_cmd  # noqa: E402
 from movate.cli import deploy as deploy_cmd  # noqa: E402
 from movate.cli import doctor as doctor_cmd  # noqa: E402
@@ -82,6 +83,18 @@ def _main(
         "-q",
         help="Suppress INFO logging; print only warnings and errors.",
     ),
+    target: str = typer.Option(
+        None,
+        "--target",
+        "-t",
+        envvar="MOVATE_TARGET",
+        help=(
+            "Default deployment target for remote commands "
+            "(submit, jobs *). Overridden by a per-command --target. "
+            "Falls back to MOVATE_TARGET env var, then to the active "
+            "config target."
+        ),
+    ),
     version: bool = typer.Option(
         False,
         "--version",
@@ -102,6 +115,13 @@ def _main(
         level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    # Suppress dim "FYI" stderr hints (the kind of "queued j-1 on dev,
+    # poll with..." line that's friendly interactively but a nuisance
+    # when piping). Error / warning prints stay on regardless.
+    _console.set_quiet(quiet)
+    # Stash the global --target / MOVATE_TARGET so remote subcommands
+    # can fall back to it when their own --target wasn't passed.
+    _console.set_global_target(target)
 
 
 # ----- Develop --------------------------------------------------------------
@@ -109,31 +129,24 @@ def _main(
 app.command("init", rich_help_panel=PANEL_DEVELOP)(init_cmd.init)
 app.command("validate", rich_help_panel=PANEL_DEVELOP)(validate_cmd.validate)
 app.command("show", rich_help_panel=PANEL_DEVELOP)(show_cmd.show)
-app.command(
-    "watch",
-    rich_help_panel=PANEL_DEVELOP,
-    help="Re-run validate on every save (TDD-style hot-reload).",
-)(watch_cmd.watch)
+# NOTE: do NOT pass `help=` here — Typer/Click then ignores the function's
+# docstring, which is where each command's [bold]Examples:[/bold] block
+# lives. The docstring's first line becomes the panel summary; the full
+# docstring becomes `movate <cmd> --help`. Anything you'd put in `help=`
+# belongs in the docstring instead.
+app.command("watch", rich_help_panel=PANEL_DEVELOP)(watch_cmd.watch)
 
 # ----- Run & evaluate -------------------------------------------------------
 
 app.command("run", rich_help_panel=PANEL_RUN)(run_cmd.run)
-app.command(
-    "bench",
-    rich_help_panel=PANEL_RUN,
-    help="Benchmark an agent across multiple models (cost / latency / quality).",
-)(bench_cmd.bench)
+app.command("bench", rich_help_panel=PANEL_RUN)(bench_cmd.bench)
 app.command("eval", rich_help_panel=PANEL_RUN)(eval_cmd.eval_)
 app.command("logs", rich_help_panel=PANEL_RUN)(logs_cmd.logs)
 app.add_typer(trace_app, name="trace", rich_help_panel=PANEL_RUN)
 
 # ----- Remote (talk to a deployed runtime) ----------------------------------
 
-app.command(
-    "submit",
-    rich_help_panel=PANEL_RUN,
-    help="Queue a job at a deployed runtime (see `movate config add-target`).",
-)(submit_cmd.submit)
+app.command("submit", rich_help_panel=PANEL_RUN)(submit_cmd.submit)
 app.add_typer(jobs_app, name="jobs", rich_help_panel=PANEL_RUN)
 
 # ----- Diagnose -------------------------------------------------------------

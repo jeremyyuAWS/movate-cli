@@ -31,6 +31,8 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from movate.cli._completion import complete_agent_path
+from movate.cli._console import hint, warn
 from movate.core.loader import AgentLoadError, load_agent
 
 stdout = Console()
@@ -38,7 +40,11 @@ err = Console(stderr=True)
 
 
 def watch(
-    path: Path = typer.Argument(..., help="Path to an agent directory."),
+    path: Path = typer.Argument(
+        ...,
+        help="Path to an agent directory.",
+        shell_complete=complete_agent_path,
+    ),
     poll_interval: float = typer.Option(
         0.5,
         "--poll-interval",
@@ -75,8 +81,8 @@ def watch(
         # here don't exit; the watcher continues so they can fix it.
         watched = _compute_watched_paths(path)
     except AgentLoadError as exc:
-        err.print(f"[yellow]⚠[/yellow] couldn't read agent at start: {exc}")
-        err.print("[dim]watching anyway — fix the file and the watcher will re-run[/dim]")
+        warn(f"couldn't read agent at start: {exc}")
+        hint("[dim]watching anyway — fix the file and the watcher will re-run[/dim]")
         watched = _WatchedSet(agent_dir=path)
 
     err.print(

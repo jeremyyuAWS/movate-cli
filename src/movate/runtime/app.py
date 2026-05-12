@@ -34,10 +34,12 @@ from movate.runtime.schemas import (
     AgentListView,
     AgentView,
     HealthView,
+    JobListView,
     JobView,
     ReadyView,
     RunAccepted,
     RunSubmission,
+    RunView,
 )
 from movate.storage.base import StorageProvider
 
@@ -214,6 +216,30 @@ def build_app(
     # ------------------------------------------------------------------
     # GET /jobs/{id} — poll
     # ------------------------------------------------------------------
+    @app.get("/jobs", response_model=JobListView, tags=["jobs"])
+    async def list_jobs(
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+        status: JobStatus | None = None,
+        limit: int = 20,
+    ) -> JobListView:
+        """Return this tenant's recent jobs, newest first.
+
+        Always tenant-scoped — there's no cross-tenant variant on
+        this endpoint. ``status`` filters to one terminal/transient
+        state; omit for "all states". ``limit`` is hard-capped at 100
+        to keep the response bounded; deeper history goes through
+        ``movate logs`` against the local sqlite (operator path)."""
+        capped_limit = max(1, min(limit, 100))
+        store: StorageProvider = request.app.state.storage
+        records = await store.list_jobs(
+            tenant_id=ctx.tenant_id,
+            status=status,
+            limit=capped_limit,
+        )
+        views = [JobView.from_record(r) for r in records]
+        return JobListView(jobs=views, count=len(views))
+
     @app.get("/jobs/{job_id}", response_model=JobView, tags=["jobs"])
     async def get_job(
         job_id: str,
@@ -229,6 +255,26 @@ def build_app(
         if record is None:
             raise not_found("job", job_id)
         return JobView.from_record(record)
+
+    @app.get("/runs/{run_id}", response_model=RunView, tags=["runs"])
+    async def get_run(
+        run_id: str,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> RunView:
+        """Return a single run including its ``output``.
+
+        Companion to ``GET /jobs/{id}`` — ``JobView`` only carries the
+        ``result_run_id`` pointer, not the actual agent output. Callers
+        that want to *see* what the agent produced fetch the job, read
+        ``result_run_id``, then hit this endpoint. Same tenant-scoping
+        story as jobs: 404 on cross-tenant access (never 403, which
+        would leak that the id exists)."""
+        store: StorageProvider = request.app.state.storage
+        record = await store.get_run(run_id, tenant_id=ctx.tenant_id)
+        if record is None:
+            raise not_found("run", run_id)
+        return RunView.from_record(record)
 
     return app
 

@@ -391,7 +391,9 @@ def test_cli_clear_budget_makes_tenant_unlimited(cli_db) -> None:
     """``clear-budget`` flips the cap to None; ``show`` reports unlimited."""
     tid = uuid4().hex
     runner.invoke(cli_app, ["tenants", "set-budget", tid, "--monthly-usd", "100"])
-    r = runner.invoke(cli_app, ["tenants", "clear-budget", tid])
+    # `-y` skips the destructive-op confirm prompt that gates clear-budget
+    # (it can cost real money if it's a misclick).
+    r = runner.invoke(cli_app, ["tenants", "clear-budget", tid, "-y"])
     assert r.exit_code == 0
     assert "unlimited" in r.stderr
 

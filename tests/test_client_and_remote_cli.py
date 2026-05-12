@@ -19,6 +19,7 @@ path end-to-end without subprocess gymnastics.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC
 from pathlib import Path
 from uuid import uuid4
 
@@ -107,6 +108,80 @@ async def test_client_get_job_unknown_id_404(auth_pair) -> None:
     async with _client_for(app, key) as client:
         with pytest.raises(MovateClientError) as exc_info:
             await client.get_job("no-such-job")
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.code == "not_found"
+
+
+@pytest.mark.unit
+async def test_client_list_jobs_round_trip(auth_pair) -> None:
+    """Submit two jobs, list them back, verify both appear."""
+    _, app, key, _ = auth_pair
+    async with _client_for(app, key) as client:
+        a = await client.submit_job(kind=JobKind.AGENT, target="alpha", input={"i": 1})
+        b = await client.submit_job(kind=JobKind.AGENT, target="beta", input={"i": 2})
+        listing = await client.list_jobs()
+    assert listing.count == 2
+    ids = {j.job_id for j in listing.jobs}
+    assert ids == {a.job_id, b.job_id}
+
+
+@pytest.mark.unit
+async def test_client_list_jobs_status_filter(auth_pair) -> None:
+    """``status=queued`` returns only queued; ``status=error`` returns none
+    when nothing has errored."""
+    _, app, key, _ = auth_pair
+    async with _client_for(app, key) as client:
+        await client.submit_job(kind=JobKind.AGENT, target="alpha", input={})
+        queued = await client.list_jobs(status=JobStatus.QUEUED)
+        errored = await client.list_jobs(status=JobStatus.ERROR)
+    assert queued.count == 1
+    assert errored.count == 0
+
+
+@pytest.mark.unit
+async def test_client_get_run_round_trip(auth_pair) -> None:
+    """End-to-end: client.get_run() fetches a persisted run and returns
+    its ``output`` — the field ``JobView`` deliberately omits."""
+    from movate.core.models import Metrics, RunRecord, TokenUsage  # noqa: PLC0415
+
+    storage, app, key, tenant_id = auth_pair
+    run = RunRecord(
+        run_id="r-42",
+        job_id="j-42",
+        tenant_id=tenant_id,
+        agent="alpha",
+        agent_version="0.1.0",
+        prompt_hash="sha256:cafebabe",
+        provider="openai/gpt-4o-mini",
+        provider_version="v1",
+        pricing_version="2024-09",
+        status=JobStatus.SUCCESS,
+        input={"q": "hi"},
+        output={"answer": "hello"},
+        metrics=Metrics(
+            latency_ms=42,
+            tokens=TokenUsage(input=5, output=3),
+            cost_usd=0.00042,
+            provider="openai/gpt-4o-mini",
+            pricing_version="2024-09",
+        ),
+    )
+    await storage.save_run(run)
+
+    async with _client_for(app, key) as client:
+        view = await client.get_run("r-42")
+    assert view.run_id == "r-42"
+    assert view.output == {"answer": "hello"}
+    assert view.metrics.cost_usd == 0.00042
+
+
+@pytest.mark.unit
+async def test_client_get_run_unknown_id_404(auth_pair) -> None:
+    """A run id that doesn't exist surfaces as a clean MovateClientError."""
+    _, app, key, _ = auth_pair
+    async with _client_for(app, key) as client:
+        with pytest.raises(MovateClientError) as exc_info:
+            await client.get_run("no-such-run")
     assert exc_info.value.status_code == 404
     assert exc_info.value.code == "not_found"
 
@@ -245,6 +320,53 @@ def test_cli_config_use_flips_active(tmp_path: Path, monkeypatch) -> None:
 
 
 @pytest.mark.unit
+def test_cli_config_current_prints_active_target(tmp_path: Path, monkeypatch) -> None:
+    """``movate config current`` prints one TSV line: name<TAB>url<TAB>key_env.
+    Easy to consume with ``awk`` / ``cut`` for shell prompts."""
+    cfg_path = tmp_path / "cfg.yaml"
+    monkeypatch.setenv("MOVATE_CONFIG_PATH", str(cfg_path))
+    save_user_config(
+        UserConfig(
+            targets={
+                "prod": TargetConfig(url="https://prod.movate.io", key_env="MOVATE_PROD_KEY"),
+                "dev": TargetConfig(url="https://dev.movate.io", key_env="MOVATE_DEV_KEY"),
+            },
+            active="prod",
+        )
+    )
+    result = runner.invoke(cli_app, ["config", "current"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    line = result.stdout.strip()
+    # TSV: name, url, key_env — same order as `list-targets`.
+    assert line == "prod\thttps://prod.movate.io\tMOVATE_PROD_KEY"
+
+
+@pytest.mark.unit
+def test_cli_config_current_no_active_exits_1(tmp_path: Path, monkeypatch) -> None:
+    """No active target → exit 1 + a stderr message pointing to next step."""
+    cfg_path = tmp_path / "cfg.yaml"
+    monkeypatch.setenv("MOVATE_CONFIG_PATH", str(cfg_path))
+    # No save_user_config call → empty config file → no active target.
+    result = runner.invoke(cli_app, ["config", "current"])
+    assert result.exit_code == 1
+    assert "no active target" in result.stderr
+
+
+@pytest.mark.unit
+def test_cli_pricing_json_output_has_no_ansi_escapes() -> None:
+    """When stdout isn't a TTY (e.g. piped to `jq`), Rich must suppress
+    ANSI escape codes — otherwise `movate pricing -o json | jq .` chokes
+    on stray color bytes. This is Rich's default behaviour; the test
+    just locks the contract so a future refactor that wraps stdout
+    differently can't silently break it."""
+    result = runner.invoke(cli_app, ["pricing", "-o", "json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    # ANSI escape sequences always start with ESC (0x1b) followed by `[`.
+    # A clean JSON dump has neither.
+    assert "\x1b[" not in result.stdout, "Rich is leaking ANSI codes into piped output"
+
+
+@pytest.mark.unit
 def test_cli_config_use_unknown_target_fails(tmp_path: Path, monkeypatch) -> None:
     cfg_path = tmp_path / "cfg.yaml"
     monkeypatch.setenv("MOVATE_CONFIG_PATH", str(cfg_path))
@@ -264,7 +386,9 @@ def test_cli_config_remove_target_clears_active_if_needed(tmp_path: Path, monkey
             active="prod",
         )
     )
-    result = runner.invoke(cli_app, ["config", "remove-target", "prod"])
+    # `-y` skips the destructive-op confirm prompt added in the
+    # confirmation-prompts pass.
+    result = runner.invoke(cli_app, ["config", "remove-target", "prod", "-y"])
     assert result.exit_code == 0
     from movate.core.user_config import load_user_config  # noqa: PLC0415
 
@@ -358,9 +482,39 @@ def test_cli_submit_requires_input(cli_env) -> None:
 
 @pytest.mark.unit
 def test_cli_submit_rejects_unknown_kind(cli_env) -> None:
+    """``--kind`` is a JobKind enum option, so Typer rejects unknown
+    values at parse time (exit 2) — we no longer hand-roll a ValueError
+    inside the command body."""
     result = runner.invoke(cli_app, ["submit", "alpha", "{}", "--kind", "ritual"])
     assert result.exit_code == 2
-    assert "kind must be" in result.stderr
+    combined = result.stdout + result.stderr
+    assert "Invalid value" in combined
+    assert "--kind" in combined or "-k" in combined
+
+
+@pytest.mark.unit
+def test_cli_submit_accepts_long_inline_json(cli_env) -> None:
+    """A JSON input >255 chars on the CLI used to crash with
+    ``OSError: [Errno 63] File name too long`` because the
+    file-or-JSON detection called ``Path(arg).is_file()`` first and
+    macOS's ``stat()`` rejects oversized path strings.
+
+    The fix is to peek at the first non-whitespace char: if it's
+    ``{`` or ``[`` the arg is JSON and the file check is skipped.
+
+    Build an input string clearly over the 255-char NAME_MAX boundary
+    so the regression is real even on filesystems with shorter limits.
+    """
+    import json  # noqa: PLC0415
+
+    big_input = {
+        "text": "hi",
+        "padding": "x" * 300,  # forces total JSON well past 255 chars
+    }
+    result = runner.invoke(cli_app, ["submit", "alpha", json.dumps(big_input)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "queued"
 
 
 @pytest.mark.unit
@@ -439,6 +593,50 @@ def test_cli_jobs_show_unknown_id_404(cli_env) -> None:
 
 
 @pytest.mark.unit
+def test_cli_jobs_list_empty(cli_env) -> None:
+    """`movate jobs list` with no jobs prints the empty-list hint and exits 0."""
+    result = runner.invoke(cli_app, ["jobs", "list", "--output", "json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    import json  # noqa: PLC0415
+
+    payload = json.loads(result.stdout)
+    assert payload == {"jobs": [], "count": 0}
+
+
+@pytest.mark.unit
+def test_cli_jobs_list_returns_submitted_jobs(cli_env) -> None:
+    """Submit one job, then `movate jobs list` returns it in the page."""
+    import json  # noqa: PLC0415
+
+    submit = runner.invoke(cli_app, ["submit", "alpha", "{}"])
+    assert submit.exit_code == 0
+    job_id = json.loads(submit.stdout)["job_id"]
+
+    result = runner.invoke(cli_app, ["jobs", "list", "--output", "json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["count"] == 1
+    assert payload["jobs"][0]["job_id"] == job_id
+
+
+@pytest.mark.unit
+def test_cli_jobs_list_status_filter(cli_env) -> None:
+    """`--status error` returns zero jobs when none have failed; rejects
+    invalid status values at parse time."""
+    import json  # noqa: PLC0415
+
+    runner.invoke(cli_app, ["submit", "alpha", "{}"])
+
+    ok = runner.invoke(cli_app, ["jobs", "list", "--status", "error", "--output", "json"])
+    assert ok.exit_code == 0
+    assert json.loads(ok.stdout)["count"] == 0
+
+    bad = runner.invoke(cli_app, ["jobs", "list", "--status", "broken"])
+    assert bad.exit_code == 2
+    assert "Invalid value" in (bad.stdout + bad.stderr)
+
+
+@pytest.mark.unit
 def test_cli_jobs_list_agents(cli_env) -> None:
     """List-agents should render an empty table when no agents are
     registered — CLI doesn't crash on an empty catalog."""
@@ -448,6 +646,149 @@ def test_cli_jobs_list_agents(cli_env) -> None:
 
     payload = json.loads(result.stdout)
     assert "agents" in payload
+
+
+@pytest.mark.unit
+def test_emit_terminal_json_wraps_job_and_run() -> None:
+    """``submit --wait --output json`` returns a single ``{job, run}``
+    envelope so script consumers see both the job-level state AND the
+    actual agent output in one parse. ``run`` is ``null`` when no run
+    record was produced (dispatch-time failure)."""
+    import io  # noqa: PLC0415
+    import json  # noqa: PLC0415
+    from contextlib import redirect_stdout  # noqa: PLC0415
+    from datetime import datetime  # noqa: PLC0415
+
+    from movate.cli.submit import _emit_terminal  # noqa: PLC0415
+    from movate.core.models import JobKind, JobStatus, Metrics, TokenUsage  # noqa: PLC0415
+    from movate.runtime.schemas import JobView, RunView  # noqa: PLC0415
+
+    job = JobView(
+        job_id="j-1",
+        kind=JobKind.AGENT,
+        target="alpha",
+        status=JobStatus.SUCCESS,
+        input={"q": "hi"},
+        result_run_id="r-1",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    run = RunView(
+        run_id="r-1",
+        job_id="j-1",
+        agent="alpha",
+        agent_version="0.1.0",
+        prompt_hash="sha256:abc",
+        provider="openai/gpt-4o-mini",
+        provider_version="v1",
+        pricing_version="2024-09",
+        status=JobStatus.SUCCESS,
+        input={"q": "hi"},
+        output={"answer": "hello"},
+        metrics=Metrics(
+            latency_ms=10,
+            tokens=TokenUsage(input=3, output=2),
+            cost_usd=0.0001,
+            provider="openai/gpt-4o-mini",
+            pricing_version="2024-09",
+        ),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _emit_terminal(job, run=run, output_format="json")
+
+    envelope = json.loads(buf.getvalue())
+    assert envelope["job"]["job_id"] == "j-1"
+    assert envelope["job"]["status"] == "success"
+    assert envelope["run"]["run_id"] == "r-1"
+    assert envelope["run"]["output"] == {"answer": "hello"}
+
+
+@pytest.mark.unit
+def test_emit_terminal_json_null_run_when_no_run_record() -> None:
+    """A job that errored before producing a run record (e.g. dispatch
+    failure) emits ``run: null`` — callers can branch on that without
+    rescuing a KeyError."""
+    import io  # noqa: PLC0415
+    import json  # noqa: PLC0415
+    from contextlib import redirect_stdout  # noqa: PLC0415
+    from datetime import datetime  # noqa: PLC0415
+
+    from movate.cli.submit import _emit_terminal  # noqa: PLC0415
+    from movate.core.models import ErrorInfo, JobKind, JobStatus  # noqa: PLC0415
+    from movate.runtime.schemas import JobView  # noqa: PLC0415
+
+    job = JobView(
+        job_id="j-2",
+        kind=JobKind.AGENT,
+        target="alpha",
+        status=JobStatus.ERROR,
+        input={},
+        error=ErrorInfo(type="DispatchError", message="agent not found"),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _emit_terminal(job, run=None, output_format="json")
+
+    envelope = json.loads(buf.getvalue())
+    assert envelope["job"]["status"] == "error"
+    assert envelope["run"] is None
+
+
+@pytest.mark.unit
+def test_emit_terminal_table_includes_output_panel(capsys) -> None:
+    """Table mode appends an output panel below the summary so the
+    operator sees what the agent actually wrote without a second command."""
+    from datetime import datetime  # noqa: PLC0415
+
+    from movate.cli.submit import _emit_terminal  # noqa: PLC0415
+    from movate.core.models import JobKind, JobStatus, Metrics, TokenUsage  # noqa: PLC0415
+    from movate.runtime.schemas import JobView, RunView  # noqa: PLC0415
+
+    job = JobView(
+        job_id="j-3",
+        kind=JobKind.AGENT,
+        target="alpha",
+        status=JobStatus.SUCCESS,
+        input={},
+        result_run_id="r-3",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    run = RunView(
+        run_id="r-3",
+        job_id="j-3",
+        agent="alpha",
+        agent_version="0.1.0",
+        prompt_hash="sha256:abc",
+        provider="openai/gpt-4o-mini",
+        provider_version="v1",
+        pricing_version="2024-09",
+        status=JobStatus.SUCCESS,
+        input={},
+        output={"headline": "Approved", "body": "All set."},
+        metrics=Metrics(
+            latency_ms=10,
+            tokens=TokenUsage(input=3, output=2),
+            cost_usd=0.0001,
+            provider="openai/gpt-4o-mini",
+            pricing_version="2024-09",
+        ),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    _emit_terminal(job, run=run, output_format="table")
+    out = capsys.readouterr().out
+    # Output panel header + JSON content both present in the rendered
+    # table — assert on substrings since Rich may wrap or color the
+    # exact whitespace.
+    assert "output" in out
+    assert "Approved" in out
+    assert "All set." in out
+    # Provider + cost rendered in the summary table.
+    assert "openai/gpt-4o-mini" in out
 
 
 @pytest.mark.unit

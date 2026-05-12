@@ -31,6 +31,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._completion import complete_agent_name
+from movate.cli._console import error, get_global_target, hint, warn
+from movate.cli._output import TableJson
 from movate.cli._progress import spinner
 from movate.core.client import MovateClient, MovateClientError
 from movate.core.models import JobKind, JobStatus
@@ -39,7 +42,7 @@ from movate.core.user_config import (
     resolve_bearer_token,
     resolve_target,
 )
-from movate.runtime.schemas import JobView
+from movate.runtime.schemas import JobView, RunView
 
 stdout = Console()
 err = Console(stderr=True)
@@ -52,6 +55,7 @@ def submit(
             "Agent or workflow name registered on the target runtime "
             "(see `movate jobs list-agents`)."
         ),
+        shell_complete=complete_agent_name,
     ),
     input_arg: str = typer.Argument(
         None,
@@ -60,7 +64,7 @@ def submit(
         "If the agent has exactly one required string field, a plain string is auto-wrapped.",
     ),
     input_flag: str = typer.Option(None, "--input", "-i", help="Alternative way to pass input."),
-    kind: str = typer.Option("agent", "--kind", "-k", help="`agent` or `workflow`."),
+    kind: JobKind = typer.Option(JobKind.AGENT, "--kind", "-k", case_sensitive=False),
     target: str = typer.Option(
         None,
         "--target",
@@ -102,7 +106,9 @@ def submit(
             "(MOVATE_SMTP_HOST + creds) or it falls back to logging only."
         ),
     ),
-    output_format: str = typer.Option("table", "--output", "-o", help="table | json"),
+    output_format: TableJson = typer.Option(
+        TableJson.TABLE, "--output", "-o", case_sensitive=False
+    ),
 ) -> None:
     """Queue a job at a deployed runtime and (optionally) wait for completion.
 
@@ -118,23 +124,24 @@ def submit(
       [dim]# Workflow kind, against prod[/dim]
       $ movate submit returns-pipeline -t prod -k workflow -i initial_state.json
     """
-    try:
-        kind_enum = JobKind(kind)
-    except ValueError as exc:
-        err.print(f"[red]✗[/red] kind must be 'agent' or 'workflow'; got {kind!r}")
-        raise typer.Exit(code=2) from exc
-
+    # `kind` is already a JobKind enum value — Typer validates choices
+    # at parse time (invalid values exit 2 with "Invalid value for
+    # '--kind'"), so we don't need a defensive JobKind(kind) cast.
     raw = input_flag or input_arg
     if raw is None:
-        err.print("[red]✗[/red] provide input as a positional arg, --input, or '-' for stdin")
+        error("provide input as a positional arg, --input, or '-' for stdin")
         raise typer.Exit(code=2)
     payload = _coerce_input(raw)
 
     try:
-        target_name, target_cfg = resolve_target(target)
+        # Per-command --target wins; otherwise fall through to the
+        # process-wide default set by `movate -t <name>` or the
+        # MOVATE_TARGET env var; otherwise resolve_target(None) uses
+        # the active config target.
+        target_name, target_cfg = resolve_target(target or get_global_target())
         token = resolve_bearer_token(target_cfg)
     except UserConfigError as exc:
-        err.print(f"[red]✗[/red] {exc}")
+        error(str(exc))
         raise typer.Exit(code=2) from None
 
     asyncio.run(
@@ -142,7 +149,7 @@ def submit(
             target_name=target_name,
             base_url=target_cfg.url,
             token=token,
-            kind=kind_enum,
+            kind=kind,
             agent=agent,
             input_payload=payload,
             wait=wait,
@@ -173,7 +180,7 @@ async def _submit(
     poll_interval: float,
     notify: bool,
     notify_email: str | None,
-    output_format: str,
+    output_format: TableJson,
 ) -> None:
     async with MovateClient(base_url=base_url, api_key=token) as client:
         try:
@@ -185,13 +192,13 @@ async def _submit(
                     notify_email=notify_email,
                 )
         except MovateClientError as exc:
-            err.print(f"[red]✗ submit failed:[/red] {exc}")
+            error(str(exc), context="submit")
             raise typer.Exit(code=1) from None
 
         if not wait:
             # Fire-and-forget: bare JSON on stdout (parsable; pipe-friendly).
             stdout.print(accepted.model_dump_json(), soft_wrap=True, highlight=False)
-            err.print(
+            hint(
                 f"[dim]queued {accepted.job_id} on {target_name}. "
                 f"Poll with: movate jobs show {accepted.job_id}"
                 + (f" -t {target_name}" if target_name != "local" else "")
@@ -208,15 +215,30 @@ async def _submit(
                     max_wait_seconds=timeout,
                 )
         except TimeoutError as exc:
-            err.print(f"[yellow]⏱[/yellow] {exc}")
+            warn(str(exc), icon="⏱")
             # 124 is the conventional `timeout` exit code; reuse it so
             # bash scripts can branch on it.
             raise typer.Exit(code=124) from None
         except MovateClientError as exc:
-            err.print(f"[red]✗ poll failed:[/red] {exc}")
+            error(str(exc), context="poll")
             raise typer.Exit(code=1) from None
 
-        _emit_terminal(final, output_format=output_format)
+        # Fetch the run record so we can show the actual LLM output —
+        # JobView only carries pointer state, never the agent's output.
+        # Best-effort: a 404 / transient error here doesn't invalidate
+        # the terminal job state we already have, just degrades the
+        # display.
+        run: RunView | None = None
+        if final.result_run_id:
+            try:
+                run = await client.get_run(final.result_run_id)
+            except MovateClientError as exc:
+                hint(
+                    f"[dim]could not fetch run {final.result_run_id} "
+                    f"({exc}); showing job-level summary only.[/dim]"
+                )
+
+        _emit_terminal(final, run=run, output_format=output_format)
 
         if notify:
             _desktop_notify(final, target_name=target_name)
@@ -231,9 +253,22 @@ async def _submit(
 # ---------------------------------------------------------------------------
 
 
-def _emit_terminal(view: JobView, *, output_format: str) -> None:
-    if output_format == "json":
-        stdout.print(view.model_dump_json(indent=2), soft_wrap=True, highlight=False)
+def _emit_terminal(
+    view: JobView,
+    *,
+    run: RunView | None,
+    output_format: TableJson,
+) -> None:
+    if output_format == TableJson.JSON:
+        # JSON mode: callers want a single parsable object. Wrap job
+        # + run so they can pick either; ``run`` is null when the job
+        # didn't produce one (e.g. dispatch-time failure before the
+        # worker created a RunRecord).
+        envelope: dict[str, Any] = {
+            "job": view.model_dump(mode="json"),
+            "run": run.model_dump(mode="json") if run else None,
+        }
+        stdout.print(json.dumps(envelope, indent=2), soft_wrap=True, highlight=False)
         return
 
     icon = {
@@ -251,9 +286,28 @@ def _emit_terminal(view: JobView, *, output_format: str) -> None:
     if view.completed_at and view.claimed_at:
         ms = int((view.completed_at - view.claimed_at).total_seconds() * 1000)
         table.add_row("duration", f"{ms}ms (claim → terminal)")
+    if run is not None:
+        # Provider/cost belongs on the same summary so operators see
+        # what model actually answered + what it cost without a
+        # second command. Round cost to 4 decimals — anything tighter
+        # is noise given pricing-table granularity.
+        table.add_row("provider", run.provider)
+        table.add_row(
+            "cost",
+            f"${run.metrics.cost_usd:.4f} "
+            f"({run.metrics.tokens.input}+{run.metrics.tokens.output} tok)",
+        )
     if view.error:
         table.add_row("error", f"{view.error.type}: {view.error.message}")
     stdout.print(table)
+
+    # Output panel under the table so the headline doesn't compete with
+    # the agent's actual response. Skip silently when no run / no
+    # output — partial errors fall back to the job-level error row.
+    if run is not None and run.output is not None:
+        stdout.print()
+        stdout.print("[bold]output[/bold]")
+        stdout.print(json.dumps(run.output, indent=2), soft_wrap=True, highlight=False)
 
 
 # ---------------------------------------------------------------------------
@@ -311,16 +365,16 @@ def _desktop_notify(view: JobView, *, target_name: str) -> None:
             # Windows toast notifications need a third-party package
             # (win10toast / windows-toasts). Out of scope for v0.5;
             # fall through to "no-op + hint".
-            err.print(
+            hint(
                 "[dim]--notify: Windows desktop notifications require "
                 "win10toast; install + integrate in a follow-up.[/dim]"
             )
             return
         else:
-            err.print("[dim]--notify: unsupported platform; skipping desktop notification.[/dim]")
+            hint("[dim]--notify: unsupported platform; skipping desktop notification.[/dim]")
             return
     except Exception as exc:  # courtesy notification; never fatal
-        err.print(f"[dim]--notify: desktop notification failed ({exc}); continuing.[/dim]")
+        hint(f"[dim]--notify: desktop notification failed ({exc}); continuing.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -331,12 +385,40 @@ def _desktop_notify(view: JobView, *, target_name: str) -> None:
 def _coerce_input(arg: str) -> dict[str, Any]:
     """Stdin / file / JSON-object. No string-auto-wrap here — the
     agent's input schema lives on the server side, not on the client,
-    so we can't safely auto-wrap; callers pass explicit JSON."""
+    so we can't safely auto-wrap; callers pass explicit JSON.
+
+    Detection order:
+
+    1. ``-`` → stdin
+    2. Looks like a JSON literal (starts with ``{`` or ``[``) → parse as JSON
+    3. ``Path(arg).is_file()`` → read the file and parse
+
+    The JSON-shape check comes BEFORE the file check because realistic
+    inputs (>255 chars) cause ``Path.is_file()`` to raise
+    ``OSError: [Errno 63] File name too long`` on macOS/Linux — the OS
+    rejects the stat() before is_file can return False. The leading-char
+    check is cheap, unambiguous (no filename starts with ``{`` or ``[``
+    on any sane FS), and lets us short-circuit before touching the
+    filesystem.
+    """
     if arg == "-":
         return _ensure_dict(json.loads(sys.stdin.read()))
-    p = Path(arg)
-    if p.is_file():
-        return _ensure_dict(json.loads(p.read_text()))
+    stripped = arg.lstrip()
+    if stripped.startswith(("{", "[")):
+        try:
+            return _ensure_dict(json.loads(arg))
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(f"input looks like JSON but failed to parse: {exc}") from exc
+    # File-path branch. Wrap is_file() in a try/except because OS-level
+    # name-length errors are not the caller's fault and shouldn't crash
+    # the CLI — just treat the arg as JSON and let json.loads fail loud
+    # if it's actually neither.
+    try:
+        is_file = Path(arg).is_file()
+    except OSError:
+        is_file = False
+    if is_file:
+        return _ensure_dict(json.loads(Path(arg).read_text()))
     try:
         parsed = json.loads(arg)
     except json.JSONDecodeError as exc:

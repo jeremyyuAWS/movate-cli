@@ -29,6 +29,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._console import confirm_destructive, error, hint, success
 from movate.core.models import TenantBudget
 from movate.storage import build_storage
 
@@ -80,24 +81,36 @@ def set_budget(
       $ movate tenants set-budget 4f1a7c... --monthly-usd 1000
     """
     if monthly_usd < 0:
-        err.print(f"[red]✗[/red] monthly-usd must be >= 0, got {monthly_usd}")
+        error(f"monthly-usd must be >= 0, got {monthly_usd}")
         raise typer.Exit(code=2)
 
     asyncio.run(_upsert(TenantBudget(tenant_id=tenant_id, monthly_usd_limit=monthly_usd)))
-    err.print(f"[green]✓[/green] budget for {tenant_id} set to ${monthly_usd:.2f}/month")
+    success(f"budget for {tenant_id} set to ${monthly_usd:.2f}/month")
 
 
 @tenants_app.command("clear-budget")
 def clear_budget(
     tenant_id: str = typer.Argument(..., help="Tenant id."),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirm prompt (use in scripts / CI).",
+    ),
 ) -> None:
     """Remove the budget cap for ``tenant_id`` (unlimited spend).
 
     The row stays in the table so the audit trail (``created_at`` /
     ``updated_at``) is preserved — the limit just becomes ``NULL``.
-    """
+
+    Prompts before clearing — this can cost real money if it's a
+    misclick — pass ``-y`` to bypass for scripts."""
+    confirm_destructive(
+        f"Clear budget for tenant {tenant_id}? This removes the cost ceiling.",
+        yes=yes,
+    )
     asyncio.run(_upsert(TenantBudget(tenant_id=tenant_id, monthly_usd_limit=None)))
-    err.print(f"[green]✓[/green] cleared budget for {tenant_id} (now unlimited)")
+    success(f"cleared budget for {tenant_id} (now unlimited)")
 
 
 @tenants_app.command("show")
@@ -132,7 +145,7 @@ def list_tenants() -> None:
     budgets, spends = asyncio.run(_load_all())
 
     if not budgets:
-        err.print("[dim]no tenant budgets configured[/dim]")
+        hint("[dim]no tenant budgets configured[/dim]")
         return
 
     table = Table(title="tenant budgets")

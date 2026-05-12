@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from movate.core.models import ErrorInfo, JobKind, JobRecord, JobStatus
+from movate.core.models import ErrorInfo, JobKind, JobRecord, JobStatus, Metrics, RunRecord
 
 
 class RunSubmission(BaseModel):
@@ -96,6 +96,72 @@ class JobView(BaseModel):
         )
 
 
+class RunView(BaseModel):
+    """``GET /runs/{id}`` response.
+
+    Mirror of :class:`RunRecord` minus ``tenant_id`` (audit-only,
+    never returned over the wire — same convention as ``JobView``
+    dropping ``api_key_id``). Includes ``output`` so callers can see
+    what the agent actually produced; this is the whole point of the
+    endpoint vs. ``GET /jobs/{id}`` which only carries pointer state.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    job_id: str
+    agent: str
+    agent_version: str
+    prompt_hash: str
+    provider: str
+    provider_version: str
+    pricing_version: str
+    status: JobStatus
+    input: dict[str, Any]
+    output: dict[str, Any] | None = None
+    metrics: Metrics
+    error: ErrorInfo | None = None
+    created_at: datetime
+    workflow_run_id: str | None = None
+    node_id: str | None = None
+
+    @classmethod
+    def from_record(cls, record: RunRecord) -> RunView:
+        return cls(
+            run_id=record.run_id,
+            job_id=record.job_id,
+            agent=record.agent,
+            agent_version=record.agent_version,
+            prompt_hash=record.prompt_hash,
+            provider=record.provider,
+            provider_version=record.provider_version,
+            pricing_version=record.pricing_version,
+            status=record.status,
+            input=record.input,
+            output=record.output,
+            metrics=record.metrics,
+            error=record.error,
+            created_at=record.created_at,
+            workflow_run_id=record.workflow_run_id,
+            node_id=record.node_id,
+        )
+
+
+class JobListView(BaseModel):
+    """``GET /jobs`` response — envelope around a page of JobViews.
+
+    Envelope (rather than a bare list) so we can grow the response in
+    a backwards-compatible way: paging cursors, total counts, filter
+    echoes. Right now ``count`` is the page size returned — useful for
+    a quick sanity check without re-counting on the client.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    jobs: list[JobView]
+    count: int
+
+
 class HealthView(BaseModel):
     """``GET /healthz`` response — boring on purpose."""
 
@@ -159,7 +225,10 @@ __all__ = [
     "AgentListView",
     "AgentView",
     "HealthView",
+    "JobListView",
     "JobView",
+    "ReadyView",
     "RunAccepted",
     "RunSubmission",
+    "RunView",
 ]

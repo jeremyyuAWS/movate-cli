@@ -22,6 +22,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._console import confirm_destructive, error, hint, success
 from movate.core.auth import mint_api_key
 from movate.core.models import ApiKeyEnv, ApiKeyRecord
 from movate.storage import build_storage
@@ -66,13 +67,13 @@ def create_key(
     try:
         env_enum = ApiKeyEnv(env)
     except ValueError as exc:
-        err.print(f"[red]✗[/red] env must be 'live' or 'test'; got {env!r}")
+        error(f"env must be 'live' or 'test'; got {env!r}")
         raise typer.Exit(code=2) from exc
 
     try:
         minted = mint_api_key(tenant_id=tenant_id, env=env_enum, label=label)
     except ValueError as exc:
-        err.print(f"[red]✗[/red] {exc}")
+        error(str(exc))
         raise typer.Exit(code=2) from exc
 
     asyncio.run(_persist(minted.record))
@@ -109,7 +110,7 @@ def list_keys(
     keys = asyncio.run(_load_keys(tenant_id=tenant_id, include_revoked=include_revoked))
 
     if not keys:
-        err.print("[dim]no keys found[/dim]")
+        hint("[dim]no keys found[/dim]")
         return
 
     table = Table(title=f"api keys{f' for tenant {tenant_id[:8]}…' if tenant_id else ''}")
@@ -138,10 +139,25 @@ def list_keys(
 @auth_app.command("revoke-key")
 def revoke_key(
     key_id: str = typer.Argument(..., help="Key id to revoke."),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirm prompt (use in scripts / CI).",
+    ),
 ) -> None:
-    """Revoke an API key. Idempotent — re-revoking is a silent no-op."""
+    """Revoke an API key. Idempotent — re-revoking is a silent no-op.
+
+    Prompts ``Revoke key <id>? Y/N`` before doing anything; pass
+    ``-y`` to bypass for scripts. In a non-TTY context without
+    ``-y`` we abort rather than block — so CI pipelines fail loud
+    when they forget the flag instead of hanging."""
+    confirm_destructive(
+        f"Revoke API key {key_id}? This cannot be undone.",
+        yes=yes,
+    )
     asyncio.run(_revoke(key_id))
-    err.print(f"[green]✓[/green] revoked {key_id}")
+    success(f"revoked {key_id}")
 
 
 # ---------------------------------------------------------------------------

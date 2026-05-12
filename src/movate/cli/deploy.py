@@ -32,6 +32,7 @@ import typer
 from rich.console import Console
 
 import movate
+from movate.cli._console import error, hint, success
 from movate.cli._progress import spinner
 from movate.core.user_config import (
     TargetConfig,
@@ -127,13 +128,13 @@ def deploy(
         raise typer.Exit(code=2)
 
     if only is not None and only not in ("api", "worker"):
-        err.print(f"[red]✗[/red] --only must be 'api' or 'worker'; got {only!r}")
+        error(f"--only must be 'api' or 'worker'; got {only!r}")
         raise typer.Exit(code=2)
 
     try:
         target_name, target_cfg = resolve_target(target)
     except UserConfigError as exc:
-        err.print(f"[red]✗[/red] {exc}")
+        error(str(exc))
         raise typer.Exit(code=2) from None
 
     try:
@@ -145,7 +146,7 @@ def deploy(
             only=only,
         )
     except DeployConfigError as exc:
-        err.print(f"[red]✗[/red] {exc}")
+        error(str(exc))
         raise typer.Exit(code=2) from None
 
     _print_plan(plan, dry_run=dry_run)
@@ -172,7 +173,7 @@ def deploy(
             timeout=wait_timeout,
         )
     )
-    err.print(f"[green]✓[/green] {target_name} is now serving {plan.image_tag}")
+    success(f"{target_name} is now serving {plan.image_tag}")
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +375,7 @@ def _run_az(cmd: list[str], *, what: str) -> None:
         result = subprocess.run(cmd, check=False)
     except FileNotFoundError as exc:
         # Caught upstream by shutil.which check, but defensive.
-        err.print(f"[red]✗[/red] command not found: {cmd[0]}")
+        error(f"command not found: {cmd[0]}")
         raise typer.Exit(code=2) from exc
 
     if result.returncode != 0:
@@ -391,7 +392,7 @@ async def _wait_for_healthz(*, url: str, expected_version: str, timeout: float) 
     ``timeout`` seconds, then bail with exit 124."""
     deadline = asyncio.get_event_loop().time() + timeout
     poll_interval = 5.0
-    err.print(f"[dim]waiting for /healthz to report version {expected_version}...[/dim]")
+    hint(f"[dim]waiting for /healthz to report version {expected_version}...[/dim]")
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             try:
@@ -401,9 +402,9 @@ async def _wait_for_healthz(*, url: str, expected_version: str, timeout: float) 
                     seen = body.get("version", "?")
                     if seen == expected_version:
                         return
-                    err.print(f"[dim]  still seeing version {seen}, retrying...[/dim]")
+                    hint(f"[dim]  still seeing version {seen}, retrying...[/dim]")
             except (httpx.HTTPError, ValueError):
-                err.print("[dim]  /healthz unreachable, retrying...[/dim]")
+                hint("[dim]  /healthz unreachable, retrying...[/dim]")
             if asyncio.get_event_loop().time() >= deadline:
                 err.print(
                     f"[yellow]⏱[/yellow] timed out after {timeout:.0f}s waiting "

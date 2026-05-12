@@ -19,6 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from movate.cli._console import confirm_destructive, error, hint, success
 from movate.core.user_config import (
     TargetConfig,
     UserConfigError,
@@ -107,20 +108,20 @@ def add_target(
     if set_active or cfg.active is None:
         cfg.active = name
     path = save_user_config(cfg)
-    err.print(f"[green]✓[/green] added target {name!r} → {url}")
+    success(f"added target {name!r} → {url}")
     if cfg.active == name:
-        err.print(f"[dim]  (active target is now {name!r})[/dim]")
+        hint(f"[dim]  (active target is now {name!r})[/dim]")
     # Surface which capabilities are configured so the operator sees
     # at registration time whether `movate deploy` will work.
     deploy_ready = all((azure_subscription, azure_resource_group, azure_acr_name, azure_env))
     if deploy_ready:
-        err.print(f"[dim]  (deploy enabled: env={azure_env}, rg={azure_resource_group})[/dim]")
+        hint(f"[dim]  (deploy enabled: env={azure_env}, rg={azure_resource_group})[/dim]")
     else:
-        err.print(
+        hint(
             "[dim]  (deploy NOT enabled — pass --azure-subscription / "
             "--azure-resource-group / --azure-acr / --azure-env to enable)[/dim]"
         )
-    err.print(f"[dim]config: {path}[/dim]")
+    hint(f"[dim]config: {path}[/dim]")
 
 
 @config_app.command("list-targets")
@@ -128,7 +129,7 @@ def list_targets() -> None:
     """Show all registered targets, highlighting the active one."""
     cfg = load_user_config()
     if not cfg.targets:
-        err.print("[dim]no targets registered — run `movate config add-target` first[/dim]")
+        hint("[dim]no targets registered — run `movate config add-target` first[/dim]")
         return
 
     table = Table(title="movate targets")
@@ -142,6 +143,39 @@ def list_targets() -> None:
     stdout.print(table)
 
 
+@config_app.command("current")
+def current() -> None:
+    """Print the active target as a single line (script-friendly).
+
+    Use in shell prompts ("which env am I pointing at?") or as a
+    sanity check before a destructive op:
+
+      $ movate config current
+      prod  https://movate-prod.azurecontainerapps.io  MOVATE_PROD_KEY
+
+      $ if [ "$(movate config current | awk '{print $1}')" = prod ]; then
+            echo "refusing to run dev tooling against prod"
+        fi
+
+    No target configured / no active pointer → exit 1 with a short
+    stderr message (distinct from "no config exists" since we don't
+    want to surface implementation detail to scripts)."""
+    cfg = load_user_config()
+    if not cfg.active or cfg.active not in cfg.targets:
+        error("no active target — run `movate config add-target` then `config use <name>`")
+        raise typer.Exit(code=1)
+    t = cfg.targets[cfg.active]
+    # Tab-separated for easy `awk` / `cut` consumption; the columns
+    # are name, url, key_env — same order as `config list-targets`.
+    # Write through sys.stdout directly because Rich's Console.print
+    # silently expands tabs to spaces (it's a renderer; tabs are a
+    # layout primitive for it). For machine-readable output we want
+    # the literal byte sequence.
+    import sys  # noqa: PLC0415
+
+    sys.stdout.write(f"{cfg.active}\t{t.url}\t{t.key_env}\n")
+
+
 @config_app.command("use")
 def use_target(
     name: str = typer.Argument(..., help="Name of an already-registered target."),
@@ -150,11 +184,11 @@ def use_target(
     cfg = load_user_config()
     if name not in cfg.targets:
         available = ", ".join(sorted(cfg.targets)) or "(none)"
-        err.print(f"[red]✗[/red] target {name!r} not found. Available: {available}")
+        error(f"target {name!r} not found. Available: {available}")
         raise typer.Exit(code=2)
     cfg.active = name
     save_user_config(cfg)
-    err.print(f"[green]✓[/green] active target → {name!r}")
+    success(f"active target → {name!r}")
 
 
 @config_app.command("show")
@@ -162,25 +196,33 @@ def show() -> None:
     """Dump the resolved config (useful for debugging)."""
     cfg = load_user_config()
     stdout.print(cfg.model_dump_json(indent=2))
-    err.print(f"[dim]config path: {config_path()}[/dim]")
+    hint(f"[dim]config path: {config_path()}[/dim]")
 
 
 @config_app.command("remove-target")
 def remove_target(
     name: str = typer.Argument(..., help="Name of a registered target."),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirm prompt (use in scripts / CI).",
+    ),
 ) -> None:
     """Delete a target. If it was active, the active pointer is cleared
     (next CLI call will require --target until you `config use` again).
-    """
+
+    Prompts before deleting; pass ``-y`` to bypass for scripts."""
     cfg = load_user_config()
     if name not in cfg.targets:
-        err.print(f"[red]✗[/red] target {name!r} not found")
+        error(f"target {name!r} not found")
         raise typer.Exit(code=2)
+    confirm_destructive(f"Remove target {name!r} from config?", yes=yes)
     del cfg.targets[name]
     if cfg.active == name:
         cfg.active = None
     save_user_config(cfg)
-    err.print(f"[green]✓[/green] removed target {name!r}")
+    success(f"removed target {name!r}")
 
 
 # Re-export the error type so callers don't have to reach into core.
