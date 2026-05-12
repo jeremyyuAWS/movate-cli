@@ -86,11 +86,21 @@ class NodeSpec(BaseModel):
 
 class EdgeKindYaml(StrEnum):
     """Mirrors :class:`movate.core.workflow.ir.EdgeKind` at the YAML
-    surface. Only ``sequential`` and ``conditional`` are accepted today;
-    parallel kinds land with v1.1's fan-out work."""
+    surface. All four kinds shipped:
+
+    * ``sequential`` — default; unconditional A→B transition.
+    * ``conditional`` — fires only when ``when:`` evaluates truthy.
+    * ``parallel_fan_out`` — multiple edges from one source run
+      concurrently. State keys written by parallel branches need
+      ``x-movate-reducer`` annotations in ``state_schema``.
+    * ``parallel_fan_in`` — multiple edges into one target. LangGraph
+      waits on all upstream branches before firing the target.
+    """
 
     SEQUENTIAL = "sequential"
     CONDITIONAL = "conditional"
+    PARALLEL_FAN_OUT = "parallel_fan_out"
+    PARALLEL_FAN_IN = "parallel_fan_in"
 
 
 class EdgeSpec(BaseModel):
@@ -133,13 +143,13 @@ class EdgeSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_kind_and_when(self) -> EdgeSpec:
-        """Cross-field: sequential edges can't carry ``when``; conditional
-        edges with no ``when`` are the explicit default (the compiler
-        enforces exactly-one-default per source separately)."""
-        if self.kind is EdgeKindYaml.SEQUENTIAL and self.when is not None:
+        """Cross-field: ``when:`` is only meaningful on conditional edges.
+        Sequential and parallel kinds reject it at YAML parse time so a
+        typo doesn't get silently ignored at runtime."""
+        if self.when is not None and self.kind is not EdgeKindYaml.CONDITIONAL:
             raise ValueError(
-                f"edge {self.from_id}→{self.to_id} has kind: sequential but "
-                f"declares `when:`; set `kind: conditional` or remove the "
+                f"edge {self.from_id}→{self.to_id} has kind: {self.kind.value} but "
+                f"declares `when:`; only `kind: conditional` accepts a "
                 f"`when:` clause."
             )
         return self

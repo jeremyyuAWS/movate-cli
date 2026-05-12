@@ -66,7 +66,9 @@ from movate.core.workflow.checkpointer import (
     TenantNamespacedCheckpointer,
     make_checkpointer,
 )
+from movate.core.workflow.compilers._typed_state import build_typed_state_class
 from movate.core.workflow.ir import EdgeKind, NodeType, WorkflowGraph
+from movate.core.workflow.reducers import extract_reducers
 from movate.storage.base import StorageProvider
 
 if TYPE_CHECKING:
@@ -90,18 +92,13 @@ class LangGraphCompileError(Exception):
 
 
 def can_compile(graph: WorkflowGraph) -> tuple[bool, str | None]:
-    """Return ``(supported, reason)`` for the v1.1 compiler.
+    """Return ``(supported, reason)`` for the v1.1.x compiler.
 
-    Used by the runner to surface a clean error before attempting the
-    compile, rather than letting the build fail halfway through.
-    Returning ``(False, reason)`` carries the operator-facing message
-    explaining WHY this graph can't go through LangGraph yet — usually
-    pointing at the v1.1.x feature that would unlock it.
-
-    Currently supported: AGENT nodes + SEQUENTIAL/CONDITIONAL edges.
-    Rejected: TOOL/HUMAN/FUNCTION/SUB_WORKFLOW nodes (v1.1.x) and
-    PARALLEL_FAN_OUT/PARALLEL_FAN_IN edges (v1.1.x). Conditional edges
-    must follow the structural rules enforced by ``validate_conditional``.
+    Currently supported: AGENT nodes + SEQUENTIAL / CONDITIONAL /
+    PARALLEL_FAN_OUT / PARALLEL_FAN_IN edges. Rejected:
+    TOOL / HUMAN / FUNCTION / SUB_WORKFLOW nodes (queued for v1.1.x).
+    Structural rules (e.g. conditional default-last, parallel
+    minimum-2-branches) are enforced by ``validate_dag``.
     """
     for nid, node in graph.nodes.items():
         if node.type is not NodeType.AGENT:
@@ -110,14 +107,6 @@ def can_compile(graph: WorkflowGraph) -> tuple[bool, str | None]:
                 f"node {nid!r} has type {node.type.value!r}; langgraph compiler "
                 "currently handles AGENT nodes only. TOOL / HUMAN / FUNCTION / "
                 "SUB_WORKFLOW support lands in v1.1.x.",
-            )
-    for e in graph.edges:
-        if e.kind in (EdgeKind.PARALLEL_FAN_OUT, EdgeKind.PARALLEL_FAN_IN):
-            return (
-                False,
-                f"edge {e.from_id}→{e.to_id} has kind {e.kind.value!r}; "
-                "langgraph compiler currently handles SEQUENTIAL and CONDITIONAL "
-                "edges only. Parallel fan-out / fan-in land in v1.1.x.",
             )
     return (True, None)
 
@@ -207,6 +196,22 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
     captured_runs: list[RunRecord] = []
     error_state: dict[str, Any] = {}  # {"node_id": ..., "error": ErrorInfo, "state_before": dict}
 
+    # Detect whether this workflow needs LangGraph's typed-state path
+    # (parallel branches with reducers) or the simpler dict path (pure
+    # sequential / conditional). The two paths differ in:
+    #   * State class: TypedDict vs dict
+    #   * Node-fn return shape: delta-only vs full-state
+    # Gating on actual parallel edges keeps existing linear / conditional
+    # workflows on the current behaviour so we don't regress them.
+    has_parallel = any(
+        e.kind in (EdgeKind.PARALLEL_FAN_OUT, EdgeKind.PARALLEL_FAN_IN) for e in graph.edges
+    )
+    reducers = extract_reducers(graph.state_schema)
+    use_typed_state = has_parallel or bool(reducers)
+    state_class: Any = (
+        build_typed_state_class(graph.state_schema, reducers) if use_typed_state else dict
+    )
+
     def _make_node_fn(
         node_id: str,
     ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
@@ -218,7 +223,10 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
             # we short-circuit by ignoring them, then the post-invoke
             # logic builds the WorkflowResult from `error_state`.
             if error_state:
-                return state
+                # Typed-state path: return an empty delta (no-op merge).
+                # Dict-state path: return the unchanged state so keys
+                # are preserved through replace-on-update.
+                return {} if use_typed_state else state
 
             # Project state onto the agent's input schema (same rule as
             # the homegrown runner).
@@ -232,7 +240,6 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
             )
 
             # Per-node RunRecord summary for the WorkflowResult.runs view.
-            # `_summarize_run` was imported once at the top of run_via_langgraph.
             summary = _summarize_run(
                 response,
                 tenant_id=tenant_id,
@@ -244,37 +251,47 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
 
             if response.status != "success":
                 # Same as homegrown: persist an ERROR-status RunRecord
-                # for queries that join on workflow_run_id+node_id. The
-                # executor only writes a FailureRecord on its side.
-                # Reads `storage` from the enclosing closure (loop var).
+                # for queries that join on workflow_run_id+node_id.
                 await storage.save_run(summary)
                 error_state["node_id"] = node_id
                 error_state["error"] = response.error
                 error_state["state_before"] = dict(state)
-                # Return state unchanged so partial-state semantics match
-                # the homegrown runner.
-                return state
+                return {} if use_typed_state else state
 
-            # Success: shallow-merge response into state. Returning the
-            # FULL merged state (not just delta) so `StateGraph(dict)`'s
-            # replace-on-update merge preserves all keys.
+            if use_typed_state:
+                # Typed-state path: return ONLY the agent's output. LangGraph
+                # merges via per-key reducers (operator.add for `append`,
+                # etc.) or replace-on-update for un-annotated keys. This is
+                # the only correct shape for parallel branches — a full-state
+                # return would double-count upstream values under any
+                # accumulating reducer.
+                return response.data
+            # Dict-state path: return full merged state because
+            # `StateGraph(dict)` replaces wholesale on update.
             new_state = dict(state)
             new_state.update(response.data)
             return new_state
 
         return node_fn
 
-    state_graph = StateGraph(dict)
+    state_graph = StateGraph(state_class)
     for nid in graph.nodes:
         state_graph.add_node(nid, _make_node_fn(nid))
 
     state_graph.add_edge(START, graph.entrypoint)
 
-    # Group outbound edges by source so we can decide per source whether
-    # to emit unconditional `add_edge` or conditional routing. The
-    # validator (validate_conditional) guarantees no mixed kinds per
-    # source, an exactly-one default for conditional fan-outs, and the
-    # default appears LAST.
+    # Group outbound edges by source. ``validate_dag`` guarantees per-source
+    # kinds are uniform (all SEQUENTIAL, all CONDITIONAL, or all
+    # PARALLEL_FAN_OUT — never mixed within a single source).
+    #
+    # Mapping to LangGraph constructs:
+    #   * SEQUENTIAL          → state_graph.add_edge(src, dst)
+    #   * CONDITIONAL fan-out → state_graph.add_conditional_edges(src, router, mapping)
+    #   * PARALLEL_FAN_OUT    → multiple state_graph.add_edge(src, dst_i)
+    #                            (LangGraph runs the targets concurrently)
+    #   * PARALLEL_FAN_IN     → state_graph.add_edge(src_i, dst) — fan-in is
+    #                            per-target; LangGraph waits on all upstream
+    #                            edges before firing the target.
     by_source: dict[str, list[Any]] = {}
     for edge in graph.edges:
         by_source.setdefault(edge.from_id, []).append(edge)
@@ -283,6 +300,11 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
         if outbound and outbound[0].kind is EdgeKind.CONDITIONAL:
             _wire_conditional_fan_out(state_graph, src, outbound)
         else:
+            # Sequential, parallel_fan_out, and parallel_fan_in all
+            # compile to plain add_edge calls. LangGraph's default
+            # execution model concurrently runs siblings sharing a
+            # source (fan-out) and waits on siblings sharing a target
+            # (fan-in).
             for e in outbound:
                 state_graph.add_edge(e.from_id, e.to_id)
 

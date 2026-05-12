@@ -242,20 +242,16 @@ def test_can_compile_rejects_non_agent_nodes(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_can_compile_rejects_parallel_edges(tmp_path: Path) -> None:
-    """Parallel fan-out / fan-in aren't supported yet; the compiler
-    refuses them with a v1.1.x pointer. Conditional edges are NOW
-    supported (this PR) and tested separately under
-    ``test_workflow_conditional.py``."""
+def test_can_compile_accepts_parallel_edges(tmp_path: Path) -> None:
+    """Parallel fan-out / fan-in edges ARE accepted by ``can_compile``
+    as of the parallel-edges PR. Structural rules (minimum-2-fan-outs,
+    etc.) are enforced by ``validate_dag``, not ``can_compile``."""
     yaml_path = _scaffold_two_step(tmp_path, runtime="langgraph")
     spec, parent = load_workflow_spec(yaml_path)
     graph = compile_workflow(spec, parent)
     graph.edges = [WorkflowEdge(from_id="first", to_id="second", kind=EdgeKind.PARALLEL_FAN_OUT)]
     ok, reason = can_compile(graph)
-    assert not ok
-    assert reason is not None
-    lower = reason.lower()
-    assert "parallel" in lower or "fan" in lower
+    assert ok and reason is None
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from movate.core.workflow.compiler import (
     WorkflowCompileError,
     compile_workflow,
     validate_conditional,
+    validate_dag,
     validate_for_runtime,
     validate_linear,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "compile_workflow",
     "load_workflow_spec",
     "validate_conditional",
+    "validate_dag",
     "validate_for_runtime",
     "validate_linear",
 ]

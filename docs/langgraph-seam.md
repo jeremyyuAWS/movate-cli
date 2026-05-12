@@ -294,6 +294,20 @@ documented best practice.
       walks branches in YAML order; explicit `when: null` default
       required and enforced as last edge per source. 47 tests in
       [`tests/test_workflow_conditional.py`](../tests/test_workflow_conditional.py).
+- [x] **Parallel fan-out + reducer annotations** (Tier 2 #6). New
+      `kind: parallel_fan_out` / `parallel_fan_in` edge kinds on
+      `EdgeSpec`. State-schema gains `x-movate-reducer: <name>` JSON
+      Schema extension with six registered reducers (`append`,
+      `union`, `max`, `min`, `last`, `merge`). Compiler detects
+      parallel edges + materialises a `TypedDict` from `state_schema`
+      via [`compilers/_typed_state.py`](../src/movate/core/workflow/compilers/_typed_state.py)
+      so LangGraph's per-key shallow-merge / reducer-merge does the
+      right thing. Node fns return delta-only when typed state is in
+      play; full-state for the dict path (back-compat for non-parallel
+      workflows). New `validate_dag` is the most permissive validator —
+      accepts conditional + parallel with mixed-kinds detection and a
+      minimum-2-branches rule for fan-outs. 28 tests in
+      [`tests/test_workflow_parallel.py`](../tests/test_workflow_parallel.py).
 
 ## What to do at v1.1 (additive on the linear compiler)
 
