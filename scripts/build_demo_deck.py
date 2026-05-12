@@ -608,12 +608,12 @@ Question: {{ input.question }}""",
     # 11 — Section: Wire the workflow
     add_section(prs, "Part 2", "Wire the workflow")
 
-    # 12 — workflow.yaml with conditional edges
+    # 12 — workflow.yaml with conditional edges  [v1.1 PREVIEW]
     add_code_slide(
         prs,
-        title="Step 5 — The workflow.yaml",
-        subtitle="One file describes the entire routing topology",
-        code="""# movate-faq/workflow.yaml
+        title="Step 5 — The workflow.yaml   [v1.1 preview]",
+        subtitle="Coming in v1.1: declarative conditional routing. Today: orchestrate in a 5-line Python or bash script.",
+        code="""# movate-faq/workflow.yaml      ← v1.1 syntax
 api_version: movate/v1
 kind: Workflow
 name: movate-faq
@@ -646,10 +646,11 @@ edges:
     kind: conditional
     when: null        # default branch — required + must be last""",
         explanation=[
-            "**`runtime: langgraph`** unlocks conditional edges. The default homegrown runner only handles linear DAGs.",
-            "**JSONPath-like DSL** in the `when:` clauses — supports `==`, `!=`, `<`, `>`, `&&`, `||`, `in [...]`. No `eval()`, no third-party dep.",
-            "**Default branch (`when: null`) is required and must be last** — covers the \"manager misclassified\" or \"unknown intent\" case. We route to cli_expert as a safe fallback.",
+            "**`runtime: langgraph`** will unlock conditional edges. The default homegrown runner today only handles linear DAGs — conditional support lands in v1.1.",
+            "**JSONPath-like DSL** in the `when:` clauses — will support `==`, `!=`, `<`, `>`, `&&`, `||`, `in [...]`. No `eval()`, no third-party dep.",
+            "**Default branch (`when: null`)** — covers the \"manager misclassified\" or \"unknown intent\" case. Required + must be last in the edge list.",
         ],
+        footer="v1.1 preview — until then, route in client code. See the movate-faq-demo repo's ask.py for the 40-line orchestration pattern that runs today.",
     )
 
     # 13 — state.json
