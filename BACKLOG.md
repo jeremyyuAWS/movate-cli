@@ -292,12 +292,21 @@ These pay back across every phase. Don't queue them after v1.0 — interleave th
 
 Strategic direction shift: position movate-cli as **MDK — Movate Development Kit**, an enterprise SDK with knowledge graphs, multi-tenancy, and adapter architecture. Some items below are already shipped (see notes); the new work is grouped in phases v0.6 → v1.0.
 
+> **Resale-clean stack is the real constraint, not "make MDK sellable."**
+> MDK itself isn't sold. But Movate-built customer solutions embed MDK's
+> dependencies, so every dep's license must be permissive enough that the
+> customer engagement can be resold without copyleft contamination, BSL
+> service-competition clauses, or open-sourcing of proprietary work.
+>
+> Current stack is **100% permissively licensed** (MIT / Apache 2.0 / BSD) —
+> see [docs/license-posture.md](docs/license-posture.md) (TBD).
+> Future additions must clear the same bar.
+>
 > **Open questions for leadership before committing engineering weeks:**
-> 1. "Commercializable / resellable" — internal Movate only, SI partners, or direct enterprise sales? Each is a different product.
-> 2. Multi-cloud requirement (GCP/AWS) — hard requirement or eventual?
-> 3. Multi-tenant — hosted SaaS or self-hosted by customer?
-> 4. Lyzr adapter — strategic partnership or example of many?
-> 5. Knowledge graphs — concrete customer use case or aspirational?
+> 1. Multi-cloud requirement (GCP/AWS) — hard requirement or eventual?
+> 2. Multi-tenant — hosted SaaS or self-hosted by customer?
+> 3. Lyzr adapter — strategic partnership or example of many? **License-check Lyzr first.**
+> 4. Knowledge graphs — concrete customer use case or aspirational?
 
 ### Tier 0 — Brand + naming (v0.6, ~1 week)
 
@@ -333,9 +342,9 @@ Strategic direction shift: position movate-cli as **MDK — Movate Development K
 
 ### Tier 4 — Knowledge architecture (v0.8 + v0.9, ~10-12 weeks total)
 
-- [ ] **Evaluate open-source vector DB candidates** `[HIGH] [v0.8] [3d]` — `pgvector` (recommended; already have Postgres), `Qdrant`, `Chroma`, `Weaviate`, `LanceDB`. Write a 1-page decision doc.
+- [ ] **Evaluate open-source vector DB candidates** `[HIGH] [v0.8] [3d]` — `pgvector` (recommended; already have Postgres; PostgreSQL License — permissive), `Qdrant` (Apache 2.0), `Chroma` (Apache 2.0), `Weaviate` (BSD-3), `LanceDB` (Apache 2.0). All license-clean for customer resale. Write a 1-page decision doc.
 - [ ] **Integrate pgvector (or chosen VDB)** `[HIGH] [v0.8] [1-2w]` — `MemoryProvider.vector_search()` + ingestion pipeline. `knowledge.yaml: vector_db:` config.
-- [ ] **Evaluate open-source knowledge graph candidates** `[HIGH] [v0.9] [3d]` — `Apache AGE` (recommended; Postgres extension), `Neo4j Community`, `Memgraph`, `Kuzu`. Decision doc.
+- [ ] **Evaluate open-source knowledge graph candidates** `[HIGH] [v0.9] [3d]` — `Apache AGE` (**recommended**; Postgres extension; Apache 2.0). **EXCLUDE**: Neo4j Community (GPLv3 — copyleft); Memgraph (BSL — service-competition restrictions). Acceptable alternatives: Kuzu (MIT), TerminusDB (Apache 2.0). Decision doc must explicitly state license + resale safety.
 - [ ] **Integrate KG (Apache AGE or chosen)** `[HIGH] [v0.9] [1-2w]` — graph queries via Cypher; entity + relationship extraction at ingest.
 - [ ] **Canonical KB ingestion pipeline** `[HIGH] [v0.9] [2w]` — `mdk knowledge ingest <path>` runs: chunking → metadata → embedding → entity extraction → graph relationships. Configurable via `knowledge.yaml`.
 - [ ] **Hybrid retrieval (vector + KG)** `[HIGH] [v0.9] [1w]` — query fans out to both; merge by score with configurable weights.
@@ -366,10 +375,15 @@ Strategic direction shift: position movate-cli as **MDK — Movate Development K
 - [ ] **Configurable fallback strategy chain (LLM → HITL → deterministic)** `[MED] [v1.0] [3d]` — per-eval-config; defaults to LLM-only.
 - [ ] **Persist evaluation results to datastore** `[—] [done]` — already shipped (EvalRecord); just add per-dimension subscores when v1.0 lands.
 
-### Tier 8 — Doctor + observability polish (v0.6+, ~1 week)
+### Tier 8 — Doctor + observability polish + license hygiene (v0.6+, ~1-2 weeks)
 
 - [ ] **`mdk doctor --explain`** `[HIGH] [v0.6] [3d]` — for each check, render: what it does, why it matters, what failure means, the copy-pasteable fix.
 - [ ] **Doctor output explainability doc** `[MED] [v0.6] [2d]` — `docs/doctor-explained.md` documents every line — what it tests, what's safe to ignore.
+- [ ] **License column in `mdk doctor`** `[HIGH] [v0.6] [2d]` — every dep line shows SPDX license alongside install status. Operators see resale-safety at a glance. Pre-empts the "is this stack OK to embed in a customer solution?" question.
+- [ ] **`mdk doctor --licenses` deep report** `[MED] [v0.6] [2d]` — full SPDX breakdown, per-dep license file links, separates required vs optional, flags any non-permissive entries in red.
+- [ ] **`docs/license-posture.md`** `[HIGH] [v0.6] [2d]` — explains Movate's stance: every dep in MDK is permissively licensed (MIT / Apache 2.0 / BSD) so customer engagements can embed + resell MDK-based solutions without copyleft contamination. Documents the explicit avoid-list (GPL / AGPL / SSPL / BSL with restrictive clauses). Linkable from doctor and from customer-facing solution docs.
+- [ ] **CI license check** `[HIGH] [v0.6] [3d]` — `pip-licenses` or equivalent runs on every PR; fails merge if a new dep introduces a copyleft / SSPL / BSL license. Allowlist of approved SPDX IDs in repo.
+- [ ] **License-clean gate on new deps** `[HIGH] [ongoing]` — every new optional extra (vector DB, KG, adapter) goes through license review before merge. Mark approved deps in `pyproject.toml` comments with their SPDX ID.
 
 ### Tier 9 — Enterprise readiness (v1.0+, ongoing)
 
