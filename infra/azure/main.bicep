@@ -61,6 +61,21 @@ operator populates KV secrets, second pass flips the flag to
 ''')
 param enableApiWorker bool = true
 
+@description('''
+Short suffix appended to globally-unique resource names (Key Vault,
+ACR, Postgres) to avoid collisions with other Azure tenants that
+picked the same "movate" branding. KV names live in a global Azure
+namespace (3-24 chars, alphanumeric + hyphens); ACR names too (5-50
+chars, alphanumeric only). Recommended: 2-6 lowercase alphanumeric
+chars — your org slug, your initials, or a UUID slice. Capped at 6
+chars because KV is the tightest constraint: ``movate-staging-kv-``
+is 18 chars, leaving exactly 6 for the suffix before hitting KV's
+24-char ceiling. Empty string keeps the original short names — only
+safe on the FIRST tenant to claim them on Azure.
+''')
+@maxLength(6)
+param nameSuffix string = ''
+
 // ---------------------------------------------------------------------------
 // Per-env defaults — keep in sync with docs/v1.0-azure-design §4
 // ---------------------------------------------------------------------------
@@ -93,10 +108,17 @@ var workerQueueDepthPerReplica = isProd ? 10 : 3
 // Resource names — see docs/v1.0-azure-design §2 for the convention.
 // ---------------------------------------------------------------------------
 
+// nameSuffix is appended to the globally-unique resource names (KV,
+// ACR, Postgres — these live in Azure-wide DNS / API namespaces, so a
+// vanilla "movate-dev-kv" can be claimed by any other tenant).
+// RG-scoped names (logs, ACA env, ACA apps) don't need it — they only
+// have to be unique within the RG.
+var sfx = empty(nameSuffix) ? '' : '-${nameSuffix}'
+var sfxNoHyphen = empty(nameSuffix) ? '' : nameSuffix
 var logName = 'movate-${env}-logs'
-var acrName = 'movate${env}acr'
-var kvName = 'movate-${env}-kv'
-var pgName = 'movate-${env}-pg'
+var acrName = 'movate${env}acr${sfxNoHyphen}'
+var kvName = 'movate-${env}-kv${sfx}'
+var pgName = 'movate-${env}-pg${sfx}'
 var caeName = 'movate-${env}-cae'
 var apiName = 'movate-${env}-api'
 var workerName = 'movate-${env}-worker'
