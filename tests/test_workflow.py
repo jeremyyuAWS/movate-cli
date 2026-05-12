@@ -479,7 +479,10 @@ def test_validate_linear_rejects_conditional_edges() -> None:
 
 
 @pytest.mark.unit
-def test_validate_linear_rejects_non_agent_nodes() -> None:
+def test_validate_linear_rejects_human_nodes() -> None:
+    """HUMAN nodes only run under `runtime: langgraph` — the homegrown
+    runner has no pause/resume semantics. validate_linear surfaces a
+    pointed error with a fix hint."""
     g = WorkflowGraph(
         name="demo",
         version="0.1.0",
@@ -488,7 +491,28 @@ def test_validate_linear_rejects_non_agent_nodes() -> None:
         entrypoint="a",
         nodes={
             "a": WorkflowNode(id="a", type=NodeType.AGENT, ref="/x"),
-            "b": WorkflowNode(id="b", type=NodeType.HUMAN, ref="/y"),
+            "b": WorkflowNode(id="b", type=NodeType.HUMAN, ref=""),
+        },
+        edges=[WorkflowEdge(from_id="a", to_id="b")],
+        workflow_dir=Path("/"),
+    )
+    with pytest.raises(WorkflowCompileError, match="runtime: langgraph"):
+        validate_linear(g)
+
+
+@pytest.mark.unit
+def test_validate_linear_rejects_tool_nodes() -> None:
+    """Non-AGENT, non-HUMAN nodes (TOOL/FUNCTION/SUB_WORKFLOW) are still
+    rejected with the v0.3 scope message — those land in v1.1+."""
+    g = WorkflowGraph(
+        name="demo",
+        version="0.1.0",
+        description="",
+        state_schema={"type": "object"},
+        entrypoint="a",
+        nodes={
+            "a": WorkflowNode(id="a", type=NodeType.AGENT, ref="/x"),
+            "b": WorkflowNode(id="b", type=NodeType.TOOL, ref="/y"),
         },
         edges=[WorkflowEdge(from_id="a", to_id="b")],
         workflow_dir=Path("/"),

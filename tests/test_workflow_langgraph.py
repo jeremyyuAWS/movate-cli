@@ -226,19 +226,21 @@ def test_can_compile_accepts_linear_agent_graph(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_can_compile_rejects_non_agent_nodes(tmp_path: Path) -> None:
-    """The IR can hold TOOL / HUMAN / FUNCTION nodes (future variants);
-    the v1.0 compiler refuses them with a clear message."""
-    # Hand-build a graph with a HUMAN node — v0.3 compiler rejects this,
-    # but for the capability check we construct the IR directly.
+def test_can_compile_rejects_tool_and_function_nodes(tmp_path: Path) -> None:
+    """The IR can hold TOOL / FUNCTION / SUB_WORKFLOW nodes (queued
+    variants); the v1.1 compiler refuses them with a clear message
+    pointing at the v1.1.x feature that would unlock each. HUMAN nodes
+    are NOW accepted (this PR) and tested separately under
+    ``test_workflow_hitl.py``."""
     yaml_path = _scaffold_two_step(tmp_path, runtime="langgraph")
     spec, parent = load_workflow_spec(yaml_path)
     graph = compile_workflow(spec, parent)
-    graph.nodes["first"] = WorkflowNode(id="first", type=NodeType.HUMAN, ref="x")
+    graph.nodes["first"] = WorkflowNode(id="first", type=NodeType.TOOL, ref="x")
 
     ok, reason = can_compile(graph)
     assert not ok
-    assert reason is not None and "AGENT nodes only" in reason
+    assert reason is not None
+    assert "tool" in reason.lower() or "agent and human" in reason.lower()
 
 
 @pytest.mark.unit

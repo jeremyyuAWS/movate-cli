@@ -488,8 +488,19 @@ class JudgeConfig(BaseModel):
 
 class WorkflowStatus(StrEnum):
     SUCCESS = "success"
+    """Terminal: every node ran to completion."""
+
     ERROR = "error"
     """Terminal: at least one node failed; partial state retained."""
+
+    PAUSED = "paused"
+    """Non-terminal: the workflow hit a HUMAN node (or other
+    ``interrupt_before`` point) and is awaiting an external resume.
+    Call ``POST /workflows/{run_id}/resume`` with a payload matching
+    the node's ``resume_payload_schema`` to continue. The state
+    persisted in the checkpoint is the state captured RIGHT BEFORE
+    the paused node — so the resumed run sees the same inputs it
+    would have seen on a non-pause path."""
 
 
 class WorkflowRunRecord(BaseModel):
@@ -510,6 +521,13 @@ class WorkflowRunRecord(BaseModel):
     final_state: dict[str, Any] | None = None
     error_node_id: str | None = None
     error: ErrorInfo | None = None
+    pause_at: str | None = None
+    """When :attr:`status` is ``PAUSED``, the id of the HUMAN node the
+    workflow is paused at. Persisted so the resume API can call
+    LangGraph's ``update_state(..., as_node=pause_at)`` to advance
+    past the interrupt — without this, the resumed graph would
+    re-pause at the same node indefinitely."""
+
     created_at: datetime = Field(default_factory=_now)
 
 

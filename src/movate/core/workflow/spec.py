@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import (
@@ -64,15 +64,43 @@ class WorkflowSpecLoadError(Exception):
 class NodeSpec(BaseModel):
     """One workflow node as written in YAML.
 
-    v0.3 nodes are agents only. The Literal narrows the surface so a typo
-    like ``type: ageent`` fails at parse time, not at run time.
+    Two node types ship:
+
+    * ``agent`` (default) — invokes a registered agent via the executor.
+      ``ref`` is the path to the agent directory.
+    * ``human`` — HITL pause point. The workflow halts at this node and
+      waits for an external system to call ``POST /workflows/{id}/resume``
+      with a JSON payload matching the node's ``resume_payload_schema``.
+      Requires ``runtime: langgraph`` + a ``checkpointer:`` (compiler
+      enforces both at workflow load).
+
+    Other node types (``tool`` / ``function`` / ``sub_workflow``) are
+    declared in the IR but not yet accepted on the YAML surface — adding
+    them is additive when their compiler integrations land.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(..., min_length=1, max_length=128)
-    type: Literal["agent"] = "agent"
-    ref: str = Field(..., description="Path to agent dir, relative to workflow.yaml")
+    type: Literal["agent", "human"] = "agent"
+    ref: str = Field(
+        default="",
+        description=(
+            "Path to agent dir (relative to workflow.yaml) for `type: agent`. "
+            "Unused for `type: human` — the resume API supplies the payload at "
+            "runtime."
+        ),
+    )
+
+    resume_payload_schema: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "JSON Schema for the payload an external system must supply via "
+            "`POST /workflows/{id}/resume`. Required for `type: human`; "
+            "ignored otherwise. Validated at compile time; the resume API "
+            "validates incoming payloads against it before merging into state."
+        ),
+    )
 
     @field_validator("id")
     @classmethod
@@ -82,6 +110,35 @@ class NodeSpec(BaseModel):
                 f"node id {v!r} must be lowercase alphanumeric with hyphens/underscores"
             )
         return v
+
+    @model_validator(mode="after")
+    def _validate_human_node_shape(self) -> NodeSpec:
+        """Cross-field rules tied to ``type``:
+
+        * ``type: human`` requires ``resume_payload_schema`` — the resume
+          API needs it to validate incoming payloads. Surfaced at YAML
+          parse so a missing schema doesn't slip past validate.
+        * ``type: human`` MUST NOT carry a ``ref`` — there's no agent to
+          point at. Rejected at parse so operators don't accidentally
+          declare a HUMAN node with a dangling agent path.
+        * ``type: agent`` requires ``ref`` (the agent dir) — already
+          implicit through the existing loader checks but worth
+          double-locking here.
+        """
+        if self.type == "human":
+            if self.resume_payload_schema is None:
+                raise ValueError(
+                    f"node {self.id!r}: type=human requires resume_payload_schema "
+                    f"(the JSON Schema the resume API will validate the payload against)"
+                )
+            if self.ref:
+                raise ValueError(
+                    f"node {self.id!r}: type=human must NOT have ref — there's no "
+                    f"agent to invoke. Remove the ref field."
+                )
+        elif self.type == "agent" and not self.ref:
+            raise ValueError(f"node {self.id!r}: type=agent requires ref (path to the agent dir)")
+        return self
 
 
 class EdgeKindYaml(StrEnum):

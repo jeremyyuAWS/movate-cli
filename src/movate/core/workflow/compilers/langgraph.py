@@ -93,18 +93,18 @@ class LangGraphCompileError(Exception):
 def can_compile(graph: WorkflowGraph) -> tuple[bool, str | None]:
     """Return ``(supported, reason)`` for the v1.1.x compiler.
 
-    Currently supported: AGENT nodes + SEQUENTIAL / CONDITIONAL /
-    PARALLEL_FAN_OUT / PARALLEL_FAN_IN edges. Rejected:
-    TOOL / HUMAN / FUNCTION / SUB_WORKFLOW nodes (queued for v1.1.x).
-    Structural rules (e.g. conditional default-last, parallel
-    minimum-2-branches) are enforced by ``validate_dag``.
+    Currently supported: AGENT + HUMAN nodes; SEQUENTIAL / CONDITIONAL /
+    PARALLEL_FAN_OUT / PARALLEL_FAN_IN edges. Rejected: TOOL / FUNCTION /
+    SUB_WORKFLOW node types (queued for v1.1.x). Structural rules
+    (conditional default-last, parallel minimum-2-branches, HUMAN-needs-
+    checkpointer) are enforced by ``validate_dag``.
     """
     for nid, node in graph.nodes.items():
-        if node.type is not NodeType.AGENT:
+        if node.type not in (NodeType.AGENT, NodeType.HUMAN):
             return (
                 False,
                 f"node {nid!r} has type {node.type.value!r}; langgraph compiler "
-                "currently handles AGENT nodes only. TOOL / HUMAN / FUNCTION / "
+                "currently handles AGENT and HUMAN nodes only. TOOL / FUNCTION / "
                 "SUB_WORKFLOW support lands in v1.1.x.",
             )
     return (True, None)
@@ -144,6 +144,8 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
     storage: StorageProvider,
     tenant_id: str,
     workflow_run_id: str | None = None,
+    resume_payload: dict[str, Any] | None = None,
+    resume_as_node: str | None = None,
 ) -> WorkflowResult:
     """Execute ``graph`` under the LangGraph runtime.
 
@@ -151,6 +153,19 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
     ``graph.runtime == "langgraph"``. Returns the same ``WorkflowResult``
     shape so downstream code (CLI render, storage queries, replay)
     doesn't branch on runtime.
+
+    Two invocation modes:
+
+    * **Fresh run** (``resume_payload=None``, the default) — calls
+      ``compiled.ainvoke(initial_state)``. Used by the runner.
+
+    * **Resume** (``resume_payload`` is a dict + ``workflow_run_id``
+      points at a paused checkpoint) — calls
+      ``compiled.aupdate_state(config, resume_payload)`` then
+      ``compiled.ainvoke(None, config)``. Used by
+      :func:`movate.core.workflow.resume.resume_workflow`. Skips
+      ``initial_state`` schema validation since the checkpointed state
+      already passed it on the original run.
     """
     # Local imports for the WorkflowResult + WorkflowRunError types and
     # the _summarize_run helper. runner.py imports THIS module at dispatch
@@ -171,17 +186,28 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
     started = time.monotonic()
 
     # Validate initial state up front — same as the homegrown runner.
-    try:
-        Draft202012Validator(graph.state_schema).validate(initial_state)
-    except JsonSchemaError as exc:
-        raise WorkflowRunError(
-            f"initial_state failed workflow state_schema: {exc.message}"
-        ) from exc
+    # Skipped on resume because the checkpointed state already passed
+    # validation on the original invocation; the resume_payload is a
+    # MERGE not a fresh state, and is validated against the HUMAN
+    # node's resume_payload_schema by the caller (resume.py) instead.
+    if resume_payload is None:
+        try:
+            Draft202012Validator(graph.state_schema).validate(initial_state)
+        except JsonSchemaError as exc:
+            raise WorkflowRunError(
+                f"initial_state failed workflow state_schema: {exc.message}"
+            ) from exc
 
     # Pre-load every AGENT bundle so failures surface before we build
     # the graph. Mirrors the homegrown runner's per-node load step.
+    # HUMAN nodes have no bundle to load — they're pure pause-points;
+    # LangGraph's interrupt_before handles them at the graph layer.
     bundles: dict[str, AgentBundle] = {}
+    human_node_ids: list[str] = []
     for nid, node in graph.nodes.items():
+        if node.type is NodeType.HUMAN:
+            human_node_ids.append(nid)
+            continue
         try:
             bundles[nid] = load_agent(node.ref)
         except AgentLoadError as exc:
@@ -210,6 +236,31 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
     state_class: Any = (
         build_typed_state_class(graph.state_schema, reducers) if use_typed_state else dict
     )
+
+    def _make_human_node_fn(
+        node_id: str,
+    ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+        """Build a no-op runner for a HUMAN node.
+
+        HUMAN nodes don't do work themselves — they exist to mark a
+        pause point. LangGraph's ``interrupt_before`` mechanism halts
+        execution BEFORE this fn is invoked on first walk; on resume
+        the fn IS invoked (now with the operator-supplied payload
+        already merged into state via update_state) and just
+        passes state through. The downstream graph then continues.
+        """
+
+        async def human_node_fn(state: dict[str, Any]) -> dict[str, Any]:
+            # Already-errored short-circuit; same logic as AGENT path.
+            if error_state:
+                return {} if use_typed_state else state
+            # Passthrough: the resume payload was merged via
+            # graph.update_state BEFORE ainvoke(None) was called,
+            # so by the time we get here `state` already reflects
+            # whatever the human supplied. Nothing to do.
+            return {} if use_typed_state else dict(state)
+
+        return human_node_fn
 
     def _make_node_fn(
         node_id: str,
@@ -277,8 +328,11 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
         return node_fn
 
     state_graph = StateGraph(state_class)
-    for nid in graph.nodes:
-        state_graph.add_node(nid, _make_node_fn(nid))
+    for nid, node in graph.nodes.items():
+        if node.type is NodeType.HUMAN:
+            state_graph.add_node(nid, _make_human_node_fn(nid))
+        else:
+            state_graph.add_node(nid, _make_node_fn(nid))
 
     state_graph.add_edge(START, graph.entrypoint)
 
@@ -323,16 +377,57 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
     # — opened on entering the context, closed on exit. Memory is
     # lifecycle-free but wrapped in the same CM so the call sites
     # don't branch on backend.
+    # Tracks pause state — set when LangGraph stops at a HUMAN node.
+    # Read after `ainvoke` returns to distinguish "ran to completion"
+    # from "paused waiting for resume."
+    paused_at: str | None = None
+
     if graph.checkpointer is not None:
         try:
             async with async_checkpointer(graph.checkpointer, tenant_id=tenant_id) as checkpointer:
-                compiled = state_graph.compile(checkpointer=checkpointer)
+                # ``interrupt_before`` tells LangGraph to halt the walk
+                # BEFORE invoking the listed node fns. Empty list ⇒ no
+                # interrupts; the existing happy path continues unchanged.
+                compile_kwargs: dict[str, Any] = {"checkpointer": checkpointer}
+                if human_node_ids:
+                    compile_kwargs["interrupt_before"] = human_node_ids
+                compiled = state_graph.compile(**compile_kwargs)
                 # LangGraph requires a thread_id when a checkpointer is
                 # attached. We use the workflow_run_id so each invocation
                 # maps 1:1 to a checkpoint thread — matches how operators
                 # think about "this workflow run."
                 invoke_config: dict[str, Any] = {"configurable": {"thread_id": wf_id}}
-                final_state = await compiled.ainvoke(dict(initial_state), config=invoke_config)
+                if resume_payload is None:
+                    # Fresh-run path: invoke with the initial state.
+                    final_state = await compiled.ainvoke(dict(initial_state), config=invoke_config)
+                else:
+                    # Resume path: merge the payload into the
+                    # checkpointed state, then invoke with None to
+                    # continue from the checkpoint. LangGraph's
+                    # update_state writes the merged values to the
+                    # current checkpoint; the subsequent ainvoke(None)
+                    # re-enters at the post-merge point and proceeds
+                    # through the rest of the graph (including any
+                    # downstream HUMAN nodes, which may pause again).
+                    #
+                    # ``as_node`` is critical: without it, LangGraph
+                    # treats the update as supplementing the existing
+                    # interrupt and re-pauses at the SAME node on the
+                    # next ainvoke. Setting ``as_node`` to the paused
+                    # HUMAN node tells LangGraph "this update IS the
+                    # node's output; advance past it." The resume.py
+                    # wrapper threads pause_at from the checkpointed
+                    # WorkflowRunRecord into this kwarg.
+                    update_kwargs: dict[str, Any] = {}
+                    if resume_as_node is not None:
+                        update_kwargs["as_node"] = resume_as_node
+                    await compiled.aupdate_state(invoke_config, resume_payload, **update_kwargs)
+                    final_state = await compiled.ainvoke(None, config=invoke_config)
+                # Detect pause: after invoke returns, ask the checkpointer
+                # which node was about to run next. If it's a HUMAN node,
+                # the workflow is paused there.
+                if human_node_ids:
+                    paused_at = await _detect_pause(compiled, invoke_config, human_node_ids)
         except CheckpointerError as exc:
             # Re-raise as LangGraphCompileError so the runner's caller
             # gets a single error type to handle for "compile failed",
@@ -380,6 +475,33 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
             runs=captured_runs,
             error_node_id=error_state["node_id"],
             error=error_state["error"],
+            started_at=started,
+            finished_at=finished,
+        )
+
+    # Pause path. LangGraph stopped before a HUMAN node — workflow
+    # didn't complete; awaiting an external resume.
+    if paused_at is not None:
+        paused_node = graph.nodes[paused_at]
+        wf_record = WorkflowRunRecord(
+            workflow_run_id=wf_id,
+            tenant_id=tenant_id,
+            workflow=graph.name,
+            workflow_version=graph.version,
+            status=WorkflowStatus.PAUSED,
+            initial_state=initial_state,
+            final_state=final_state,
+            pause_at=paused_at,
+        )
+        await storage.save_workflow_run(wf_record)
+        return WorkflowResult(
+            workflow_run_id=wf_id,
+            status=WorkflowStatus.PAUSED,
+            initial_state=initial_state,
+            final_state=final_state,
+            runs=captured_runs,
+            pause_at=paused_at,
+            resume_payload_schema=paused_node.resume_payload_schema,
             started_at=started,
             finished_at=finished,
         )
@@ -457,6 +579,36 @@ def _wire_conditional_fan_out(
     targets = {e.to_id for e in outbound}
     path_map = {t: t for t in targets}
     state_graph.add_conditional_edges(src, router, path_map)
+
+
+async def _detect_pause(
+    compiled: Any,
+    config: dict[str, Any],
+    human_node_ids: list[str],
+) -> str | None:
+    """Return the HUMAN node id the workflow paused at, or None if it
+    ran to completion.
+
+    LangGraph exposes the post-invoke snapshot via ``aget_state(config)``;
+    the ``next`` field on that snapshot is the tuple of node names
+    queued to run next. If that tuple is non-empty AND its first member
+    is one of our HUMAN nodes, the workflow paused before invoking it.
+    Empty ``next`` means the graph hit END — no pause, just completion.
+    """
+    try:
+        snapshot = await compiled.aget_state(config)
+    except Exception:  # pragma: no cover — defensive; LangGraph rarely raises here
+        return None
+
+    next_nodes = getattr(snapshot, "next", ()) or ()
+    if not next_nodes:
+        return None
+
+    # If the next-to-run node is a HUMAN node, we're paused there.
+    for nid in next_nodes:
+        if nid in human_node_ids:
+            return str(nid)
+    return None
 
 
 def _project_state(state: dict[str, Any], bundle: AgentBundle) -> dict[str, Any]:

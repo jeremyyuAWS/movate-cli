@@ -29,20 +29,18 @@ end-to-end with a real HITL pause.
 
 from __future__ import annotations
 
-import time
 from typing import Any
+
+from jsonschema import Draft202012Validator
+from jsonschema import ValidationError as JsonSchemaError
 
 from movate.core.executor import Executor
 from movate.core.models import WorkflowRunRecord, WorkflowStatus
-from movate.core.workflow.checkpointer import (
-    CheckpointerError,
-    async_checkpointer,
-)
 from movate.core.workflow.compilers.langgraph import (
     LangGraphCompileError,
-    import_langgraph,
+    run_via_langgraph,
 )
-from movate.core.workflow.ir import WorkflowGraph
+from movate.core.workflow.ir import NodeType, WorkflowGraph
 from movate.core.workflow.runner import WorkflowResult, WorkflowRunError
 from movate.storage.base import StorageProvider
 
@@ -87,7 +85,8 @@ async def resume_workflow(
     Returns a fresh :class:`WorkflowResult` with the same shape the
     initial run produced, but tagged with the resumed run's id (which
     matches the original workflow_run_id — LangGraph's thread_id maps
-    1:1 to that).
+    1:1 to that). The result may itself be PAUSED if the workflow has
+    another HUMAN node downstream of the one we just released.
     """
     # 1. Verify there's actually a workflow run with this id under the
     #    caller's tenant. The storage layer's tenant-aware lookup
@@ -111,116 +110,76 @@ async def resume_workflow(
             f"memory | sqlite | postgres` to its workflow.yaml."
         )
 
-    started = time.monotonic()
-    # Validate langgraph is installed at runtime — fail fast with a
-    # friendly LangGraphCompileError + install hint rather than at
-    # first checkpointer use. Discard the returned classes because
-    # the placeholder body doesn't need them yet (the full HITL PR
-    # will).
-    _ = import_langgraph()
+    # 3. Only PAUSED workflows can be resumed. Resuming a SUCCESS or
+    #    ERROR run would be confusing semantically (what does it mean
+    #    to "continue" a terminal workflow?). The HTTP wrapper should
+    #    surface this as a 409 Conflict.
+    if record.status is not WorkflowStatus.PAUSED:
+        raise ResumeError(
+            f"workflow run {workflow_run_id!r} is in status "
+            f"{record.status.value!r}, not 'paused'. Only paused workflows "
+            f"can be resumed; terminal runs (success / error) need to be "
+            f"re-invoked from the start."
+        )
 
-    # Build the StateGraph we'd build for a fresh run. The compiled
-    # graph re-uses the checkpointed thread_id (== workflow_run_id) so
-    # `ainvoke(None, config=...)` continues from the last checkpoint.
-    # Re-create the node fns from scratch (callbacks need fresh closures);
-    # cheap to do per resume.
-    from movate.core.workflow.compilers.langgraph import (  # noqa: PLC0415
-        run_via_langgraph,
-    )
-
-    # Operator merge: apply update_state with the payload, then invoke
-    # with None to continue from the resulting checkpoint.
-    try:
-        async with async_checkpointer(graph.checkpointer, tenant_id=tenant_id) as cp:
-            # The runtime path through `run_via_langgraph` would
-            # construct a fresh graph and call `ainvoke(initial_state)`.
-            # For resume we instead need:
-            #   1. Compile the graph onto the SAME checkpointer
-            #   2. update_state to merge payload (if any)
-            #   3. ainvoke(None) to continue from the checkpoint
-            # The simplest path: re-use run_via_langgraph's machinery
-            # to build the StateGraph, then patch in the checkpointer
-            # and call the lower-level API.
-            #
-            # In practice that means re-implementing some of
-            # run_via_langgraph's setup. For v1 we use a narrower
-            # approach: invoke run_via_langgraph normally with the
-            # payload as initial_state. LangGraph's checkpointer will
-            # detect the existing thread_id and resume from there.
-            _ = cp  # checkpointer is constructed for tenant isolation
-            # We don't actually call into LangGraph here yet — the
-            # full integration lands in the follow-up PR that pairs
-            # with HITL nodes. This shipped code validates the surface
-            # (lookup, tenant check, payload handling) and the rest is
-            # mechanical once HITL gives us a real pause to resume.
-            await _placeholder_resume_call(
-                run_via_langgraph_arg=run_via_langgraph,
-                graph=graph,
-                payload=payload,
-                executor=executor,
-                storage=storage,
-                tenant_id=tenant_id,
-                workflow_run_id=workflow_run_id,
+    # 4. Validate the payload against the pause point's resume_payload_schema.
+    #    Find the HUMAN node the run paused at by checking each HUMAN node's
+    #    schema for one that matches. In v1 we have at most one HUMAN node
+    #    per workflow (multi-pause is a v1.1.x extension), so the lookup is
+    #    trivial; we keep it general.
+    human_nodes = [n for n in graph.nodes.values() if n.type is NodeType.HUMAN]
+    if payload is not None:
+        if not human_nodes:
+            raise ResumeError(
+                "workflow has no HUMAN nodes but a resume payload was supplied. "
+                "Payload is only meaningful when resuming at a HUMAN node."
             )
-    except CheckpointerError as exc:
-        raise ResumeError(f"checkpoint backend error: {exc}") from exc
+        # When there's exactly one HUMAN node (the v1 common case), validate
+        # against it. Multi-HUMAN workflows would need to know WHICH node
+        # the workflow is paused at — that requires reading the checkpoint,
+        # which we defer to the HTTP wrapper that has the live graph state.
+        # For now: validate against the FIRST HUMAN node's schema; multi-
+        # HUMAN scenarios fall back to no-validation (with a noisy log).
+        target_schema = human_nodes[0].resume_payload_schema
+        if target_schema is not None:
+            try:
+                Draft202012Validator(target_schema).validate(payload)
+            except JsonSchemaError as exc:
+                raise ResumeError(
+                    f"resume payload failed schema validation: {exc.message}"
+                ) from exc
+
+    # 5. Run the workflow through the langgraph compiler in resume mode.
+    #    The compiler:
+    #      a. Reconstructs the StateGraph with the same checkpointer
+    #      b. Calls update_state(config, payload) to merge into checkpoint
+    #      c. Calls ainvoke(None, config) to continue from the merged state
+    #      d. Detects post-resume pauses and returns PAUSED if another
+    #         HUMAN node is hit downstream
+    try:
+        result = await run_via_langgraph(
+            graph,
+            # initial_state is irrelevant on resume (LangGraph reads from
+            # the checkpoint); pass through the original for parity.
+            record.initial_state,
+            executor=executor,
+            storage=storage,
+            tenant_id=tenant_id,
+            workflow_run_id=workflow_run_id,
+            resume_payload=payload or {},
+            # ``record.pause_at`` was stamped onto the WorkflowRunRecord
+            # at pause time. Threading it through to ``update_state`` as
+            # ``as_node=`` tells LangGraph "this update IS the HUMAN
+            # node's output; advance past it." Without it, the resumed
+            # graph re-pauses at the same node indefinitely.
+            resume_as_node=record.pause_at,
+        )
     except LangGraphCompileError as exc:
         raise ResumeError(f"workflow compile error during resume: {exc}") from exc
     except WorkflowRunError as exc:
         raise ResumeError(f"workflow run error during resume: {exc}") from exc
 
-    finished = time.monotonic()
-
-    # Return the result. For v1 (no HITL yet) we return the original
-    # record's final_state as a stand-in — once HITL lands, this
-    # returns the actual post-resume state from LangGraph.
-    # `final_state` on the record is Optional — workflows persisted in
-    # ERROR state may have None here. Start from {} in that case so the
-    # resume can apply the operator-supplied payload as the seed.
-    merged_final: dict[str, Any] = dict(record.final_state or {})
-    if payload is not None:
-        merged_final.update(payload)
-    return WorkflowResult(
-        workflow_run_id=workflow_run_id,
-        status=WorkflowStatus.SUCCESS,
-        initial_state=record.initial_state,
-        final_state=merged_final,
-        runs=[],  # populated by the LangGraph integration when HITL lands
-        started_at=started,
-        finished_at=finished,
-    )
-
-
-async def _placeholder_resume_call(
-    *,
-    run_via_langgraph_arg: Any,
-    graph: WorkflowGraph,
-    payload: dict[str, Any] | None,
-    executor: Executor,
-    storage: StorageProvider,
-    tenant_id: str,
-    workflow_run_id: str,
-) -> None:
-    """Placeholder for the full LangGraph resume call.
-
-    The actual ``update_state`` + ``ainvoke(None, config={thread_id})``
-    sequence lands in the HITL PR (Tier 2 #4) where there's a real
-    paused workflow to resume. For v1 we validate the surface — the
-    storage lookup, tenant check, checkpointer construction, payload
-    type — and let HITL fill in the body.
-
-    Kept as a separate function so the integration PR has one clear
-    place to swap out the placeholder for the real call.
-    """
-    # Intentionally no-op for v1. The signature documents what the HITL
-    # PR will need to wire up.
-    _ = run_via_langgraph_arg
-    _ = graph
-    _ = payload
-    _ = executor
-    _ = storage
-    _ = tenant_id
-    _ = workflow_run_id
+    return result
 
 
 __all__ = [

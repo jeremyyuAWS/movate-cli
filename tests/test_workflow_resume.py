@@ -254,65 +254,26 @@ async def test_resume_without_checkpointer_raises_resume_error(
 
 
 # ---------------------------------------------------------------------------
-# Surface — payload is accepted; final_state reflects merge
+# Status gate — only PAUSED workflows can be resumed
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-async def test_resume_returns_merged_state_when_record_exists(
+async def test_resume_refuses_non_paused_runs(
     tmp_path: Path,
     executor: Executor,
     storage: InMemoryStorage,
 ) -> None:
-    """For v1 (pre-HITL), the resume function returns a WorkflowResult
-    whose ``final_state`` is the record's final_state shallow-merged
-    with the supplied payload — operators can preview what the next
-    invocation would see. The LangGraph ``ainvoke(None)`` call lands
-    with the HITL PR."""
+    """Resuming a terminal (SUCCESS / ERROR) run is a category error —
+    raise ResumeError with an actionable hint pointing operators at
+    re-invoking from the start instead."""
     yaml_path = _scaffold_workflow(tmp_path, checkpointer="memory")
     spec, parent = load_workflow_spec(yaml_path)
     graph = compile_workflow(spec, parent)
 
     await storage.save_workflow_run(
         WorkflowRunRecord(
-            workflow_run_id="wf-merge-test",
-            tenant_id="acme",
-            workflow="resume-test",
-            workflow_version="0.1.0",
-            status=WorkflowStatus.SUCCESS,
-            initial_state={"text": "seed"},
-            final_state={"text": "checkpoint", "step": 1},
-        )
-    )
-
-    result = await resume_workflow(
-        "wf-merge-test",
-        payload={"approved": True, "step": 2},
-        graph=graph,
-        executor=executor,
-        storage=storage,
-        tenant_id="acme",
-    )
-
-    assert result.status is WorkflowStatus.SUCCESS
-    assert result.workflow_run_id == "wf-merge-test"
-    # Payload merges over the checkpointed state — step=2 wins.
-    assert result.final_state == {"text": "checkpoint", "step": 2, "approved": True}
-
-
-@pytest.mark.unit
-async def test_resume_with_none_payload_preserves_state_as_is(
-    tmp_path: Path,
-    executor: Executor,
-    storage: InMemoryStorage,
-) -> None:
-    yaml_path = _scaffold_workflow(tmp_path, checkpointer="memory")
-    spec, parent = load_workflow_spec(yaml_path)
-    graph = compile_workflow(spec, parent)
-
-    await storage.save_workflow_run(
-        WorkflowRunRecord(
-            workflow_run_id="wf-no-payload",
+            workflow_run_id="wf-already-done",
             tenant_id="acme",
             workflow="resume-test",
             workflow_version="0.1.0",
@@ -322,12 +283,12 @@ async def test_resume_with_none_payload_preserves_state_as_is(
         )
     )
 
-    result = await resume_workflow(
-        "wf-no-payload",
-        payload=None,
-        graph=graph,
-        executor=executor,
-        storage=storage,
-        tenant_id="acme",
-    )
-    assert result.final_state == {"text": "ok"}
+    with pytest.raises(ResumeError, match="not 'paused'"):
+        await resume_workflow(
+            "wf-already-done",
+            payload=None,
+            graph=graph,
+            executor=executor,
+            storage=storage,
+            tenant_id="acme",
+        )

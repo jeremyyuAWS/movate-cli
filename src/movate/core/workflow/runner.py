@@ -67,13 +67,27 @@ class WorkflowResult:
     """The state dict at the moment the workflow halted. On success this is
     the post-merge state after the sink node ran; on partial failure this is
     the state captured *before* the failing node executed (so the user can
-    inspect what node N saw before crashing)."""
+    inspect what node N saw before crashing); on PAUSED this is the state
+    the next node (a HUMAN node) would have seen — same as ``state_before``
+    semantics in the failure case."""
 
     runs: list[RunRecord] = field(default_factory=list)
     error_node_id: str | None = None
     error: ErrorInfo | None = None
     started_at: float = 0.0
     finished_at: float = 0.0
+
+    pause_at: str | None = None
+    """When :attr:`status` is ``PAUSED``, the id of the HUMAN node the
+    workflow is waiting at. None for SUCCESS / ERROR. Used by the
+    resume API to fetch the right ``resume_payload_schema`` for
+    validating the incoming payload."""
+
+    resume_payload_schema: dict[str, Any] | None = None
+    """When :attr:`status` is ``PAUSED``, the JSON Schema the external
+    system's resume payload must validate against. Propagated from
+    the HUMAN node's spec so the resume API / HTTP layer can surface
+    it to the human before they submit."""
 
     @property
     def duration_ms(self) -> int:

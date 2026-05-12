@@ -45,9 +45,15 @@ class WorkflowNode:
     """Reference resolved by the runner.
 
     For ``type == AGENT`` this is an absolute path to an agent directory.
+    For ``type == HUMAN`` this is unused (empty string).
     Other node types will reuse this field with their own resolution rules
-    (e.g. tool registry key, human-task spec path).
+    (e.g. tool registry key, sub-workflow path).
     """
+
+    resume_payload_schema: dict[str, Any] | None = None
+    """For HUMAN nodes, the JSON Schema the external resume payload
+    must validate against. The compiler enforces non-None at workflow
+    load. Other node types leave this None."""
 
     metadata: dict[str, Any] = field(default_factory=dict)
     """Compiler/runner annotations. v0.3 leaves this empty; later phases use

@@ -59,21 +59,33 @@ def compile_workflow(spec: WorkflowSpec, workflow_dir: Path) -> WorkflowGraph:
     """
     workflow_dir = workflow_dir.resolve()
 
-    # 1. Nodes — duplicate id check + ref resolution.
+    # 1. Nodes — duplicate id check + per-type field validation.
     nodes: dict[str, WorkflowNode] = {}
     for ns in spec.nodes:
         if ns.id in nodes:
             raise WorkflowCompileError(f"duplicate node id: {ns.id!r}")
-        resolved_ref = (workflow_dir / ns.ref).resolve()
-        # We don't load the agent here — that's the runner's job. But we
-        # at least make sure the path exists so a typo in workflow.yaml
-        # fails loud at compile time.
-        if not resolved_ref.exists():
-            raise WorkflowCompileError(f"node {ns.id!r}: ref path does not exist: {resolved_ref}")
+        node_type = NodeType(ns.type)
+        resolved_ref = ""
+        if node_type is NodeType.AGENT:
+            # AGENT nodes need a ref pointing at a real directory on disk.
+            # We don't load the agent here (the runner's job) but we do
+            # make sure the path exists so a typo fails loud at compile
+            # time rather than first-call.
+            resolved_path = (workflow_dir / ns.ref).resolve()
+            if not resolved_path.exists():
+                raise WorkflowCompileError(
+                    f"node {ns.id!r}: ref path does not exist: {resolved_path}"
+                )
+            resolved_ref = str(resolved_path)
+        elif node_type is NodeType.HUMAN:
+            # HUMAN nodes have no ref. The Pydantic validator on NodeSpec
+            # already enforced that; nothing to resolve here.
+            pass
         nodes[ns.id] = WorkflowNode(
             id=ns.id,
-            type=NodeType(ns.type),
-            ref=str(resolved_ref),
+            type=node_type,
+            ref=resolved_ref,
+            resume_payload_schema=ns.resume_payload_schema,
         )
 
     # 2. Entrypoint must exist.
@@ -201,12 +213,22 @@ def validate_linear(graph: WorkflowGraph) -> None:
     against the same :class:`WorkflowGraph` without modifying the IR or
     the structural compiler.
     """
-    # Node types — agent only. Most specific user-facing failure first.
+    # Node types — agent only. HUMAN nodes specifically need a clear
+    # pointer at runtime: langgraph since that's the only path that
+    # supports interrupt_before pause-and-resume semantics.
+    human_nodes = sorted(n.id for n in graph.nodes.values() if n.type is NodeType.HUMAN)
+    if human_nodes:
+        raise WorkflowCompileError(
+            f"HUMAN nodes require `runtime: langgraph` on workflow.yaml — "
+            f"the homegrown runner has no pause/resume semantics. "
+            f"Offenders: {', '.join(human_nodes)}. "
+            f"Set `runtime: langgraph` AND `checkpointer: memory|sqlite|postgres`."
+        )
     bad_types = sorted(n.id for n in graph.nodes.values() if n.type is not NodeType.AGENT)
     if bad_types:
         raise WorkflowCompileError(
             f"v0.3 supports only type=agent nodes; offenders: {', '.join(bad_types)}. "
-            f"Tools/HITL/sub-workflows land in v1.1+."
+            f"Tools/sub-workflows land in v1.1+."
         )
 
     # Edge kinds — sequential only.
@@ -381,18 +403,42 @@ def validate_dag(graph: WorkflowGraph) -> None:
       validator layer today. v1.2 might use it to gate non-default
       fan-in merge semantics.
     """
-    # Reuse validate_conditional's checks for AGENT-only + per-source
-    # mixed-kinds + conditional default rules. Then layer parallel rules.
-    # We can't call validate_conditional directly because it rejects
-    # parallel kinds — instead re-implement the AGENT check and let the
-    # source-grouping logic discriminate.
-    bad_types = sorted(n.id for n in graph.nodes.values() if n.type is not NodeType.AGENT)
+    # AGENT + HUMAN nodes are accepted; TOOL / FUNCTION / SUB_WORKFLOW
+    # land in later v1.1.x PRs. Each kind has its own gates.
+    bad_types = sorted(
+        n.id for n in graph.nodes.values() if n.type not in (NodeType.AGENT, NodeType.HUMAN)
+    )
     if bad_types:
         raise WorkflowCompileError(
-            f"langgraph runtime currently supports only type=agent nodes; "
-            f"offenders: {', '.join(bad_types)}. "
-            f"TOOL / HUMAN / FUNCTION / SUB_WORKFLOW land in v1.1.x."
+            f"langgraph runtime currently supports only type=agent and "
+            f"type=human nodes; offenders: {', '.join(bad_types)}. "
+            f"TOOL / FUNCTION / SUB_WORKFLOW land in v1.1.x."
         )
+
+    # HUMAN-node gates: each HUMAN needs a non-None resume_payload_schema
+    # (already enforced by NodeSpec Pydantic validator at parse time,
+    # but double-check at compile to defend against hand-built graphs
+    # that skip the YAML loader). The graph itself must declare a
+    # checkpointer because HUMAN nodes use LangGraph's
+    # ``interrupt_before`` which requires a checkpointer to pause + resume.
+    human_nodes = [n for n in graph.nodes.values() if n.type is NodeType.HUMAN]
+    if human_nodes:
+        if graph.checkpointer is None:
+            offenders = ", ".join(sorted(n.id for n in human_nodes))
+            raise WorkflowCompileError(
+                f"workflow has HUMAN nodes ({offenders}) but no checkpointer "
+                f"configured. HITL workflows require `checkpointer: memory | "
+                f"sqlite | postgres` on workflow.yaml — without one LangGraph "
+                f"can't pause + resume at the HUMAN node."
+            )
+        missing_schema = sorted(n.id for n in human_nodes if n.resume_payload_schema is None)
+        if missing_schema:
+            raise WorkflowCompileError(
+                f"HUMAN nodes missing resume_payload_schema: "
+                f"{', '.join(missing_schema)}. Each HUMAN node needs a JSON "
+                f"Schema for the payload the external system will POST to "
+                f"/workflows/{{id}}/resume."
+            )
 
     by_source: dict[str, list[WorkflowEdge]] = {}
     for e in graph.edges:
