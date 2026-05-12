@@ -59,9 +59,11 @@ langgraph = [
     "langgraph>=1.0,<2",
     # Checkpoint backends. `langgraph-checkpoint-sqlite` + `-postgres` are
     # separate packages from the main `langgraph` distribution; both ship
-    # under the same release cadence and pin against the same protocol.
-    "langgraph-checkpoint-sqlite>=2.0,<3",
-    "langgraph-checkpoint-postgres>=2.0,<3",
+    # under the same release cadence. Pinned to v3+ because v2.x's
+    # AsyncSqliteSaver.setup() calls `aiosqlite.Connection.is_alive()`
+    # which was removed in aiosqlite 0.22; v3 uses the supported API.
+    "langgraph-checkpoint-sqlite>=3.0,<4",
+    "langgraph-checkpoint-postgres>=3.0,<4",
 ]
 
 [dependency-groups]

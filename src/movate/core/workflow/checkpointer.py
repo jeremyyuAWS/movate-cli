@@ -11,21 +11,21 @@ Three concerns this module owns:
    A mismatched tenant returns "not found", not 403 — 403 would leak
    the existence of the workflow.
 
-2. **Backend selection.** Three kinds are documented (memory / sqlite /
-   postgres) matching our storage providers, but v1.0 of this module
-   ships **memory only**. SQLite + Postgres ride on top of the
-   ``langgraph-checkpoint-sqlite`` / ``-postgres`` companion packages
-   and require async connection-pool lifecycle management; both are
-   queued for a follow-up PR (see BACKLOG.md "Tier 2 follow-up:
-   determinism implementation" §2). Until then the factory raises
-   :class:`NotImplementedError` with an operator-facing pointer.
+2. **Backend selection.** Three kinds: memory / sqlite / postgres.
+   Memory is in-process (lost on restart). SQLite persists at
+   ``~/.movate/checkpoints.db`` (override via ``MOVATE_CHECKPOINT_DB``)
+   — single-node deployments and local dev. Postgres shares the runtime
+   DSN (override via ``MOVATE_CHECKPOINT_PG_DSN``) — multi-node-safe;
+   the production backend for HITL workflows.
 
-3. **Lifecycle.** The factory returns a value that's safe to pass to
-   ``StateGraph.compile(checkpointer=...)`` directly. For memory that's
-   the saver instance. For sqlite/postgres that'll be an async context
-   manager — the runner will need to open / close it around
-   ``ainvoke``. v1.0 only deals with the memory case so the surface
-   stays simple.
+3. **Lifecycle.** Two APIs:
+   * :func:`make_checkpointer` — synchronous; returns the wrapped
+     checkpointer directly. Memory-only (no connection lifecycle to
+     manage). Used by tests and by callers that don't need persistence.
+   * :func:`async_checkpointer` — async context manager. Works for all
+     three kinds. SQLite + Postgres need their connection pools opened
+     before ``ainvoke`` and closed after — the CM handles both.
+     :func:`run_via_langgraph` uses this form.
 
 Why this layout rather than a thin wrapper over our existing
 :class:`StorageProvider`: LangGraph's checkpoint protocol is non-trivial
@@ -38,8 +38,11 @@ inherit their bug fixes and stay current with LangGraph itself.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 # Import the LangGraph base if available so the wrapper can inherit it.
@@ -84,13 +87,16 @@ class CheckpointerKind(StrEnum):
     * ``memory`` — in-process; checkpoints are lost on restart. Default
       for workflows that don't require resume across restarts (no HUMAN
       nodes, no expectation of fault-tolerant continuation). Fast,
-      hermetic, zero infra.
+      hermetic, zero infra. Accessible via either
+      :func:`make_checkpointer` or :func:`async_checkpointer`.
     * ``sqlite`` — single-file persistence at ``~/.movate/checkpoints.db``
       (override via ``MOVATE_CHECKPOINT_DB``). Suitable for single-node
-      deployments and local dev. **Deferred to a follow-up PR.**
-    * ``postgres`` — multi-node-safe persistence, shares the runtime
-      Postgres DSN. The production backend for HITL workflows.
-      **Deferred to a follow-up PR.**
+      deployments and local dev. **Requires** ``async_checkpointer``
+      because of the async connection lifecycle.
+    * ``postgres`` — multi-node-safe persistence; uses
+      ``MOVATE_CHECKPOINT_PG_DSN`` (or ``MOVATE_DB_URL`` as fallback).
+      The production backend for HITL workflows. **Requires**
+      ``async_checkpointer`` and an explicit DSN.
     """
 
     MEMORY = "memory"
@@ -324,19 +330,144 @@ def make_checkpointer(
             ) from exc
         return TenantNamespacedCheckpointer(MemorySaver(), tenant_id=tenant_id)
 
-    if kind is CheckpointerKind.SQLITE:
+    # SQLite + Postgres have a connection-pool lifecycle that
+    # ``make_checkpointer`` (sync) can't manage. Direct callers asking
+    # for those kinds need to use :func:`async_checkpointer` instead.
+    if kind in (CheckpointerKind.SQLITE, CheckpointerKind.POSTGRES):
         raise CheckpointerError(
-            "checkpointer 'sqlite' is queued for a follow-up PR (see BACKLOG.md "
-            "Tier 2 §2). Use 'memory' for now, or 'postgres' once that lands."
-        )
-
-    if kind is CheckpointerKind.POSTGRES:
-        raise CheckpointerError(
-            "checkpointer 'postgres' is queued for a follow-up PR (see BACKLOG.md "
-            "Tier 2 §2). Use 'memory' until then."
+            f"checkpointer {kind.value!r} requires lifecycle management; "
+            f"use ``async with async_checkpointer({kind.value!r}, "
+            f"tenant_id=...) as cp:`` instead of make_checkpointer()."
         )
 
     # Unreachable — StrEnum constraint plus exhaustive cases above.
+    raise CheckpointerError(f"unhandled checkpointer kind: {kind!r}")  # pragma: no cover
+
+
+# ---------------------------------------------------------------------------
+# Async context manager — the production-grade lifecycle entry point
+# ---------------------------------------------------------------------------
+
+
+def _sqlite_path() -> Path:
+    """Return the path to the sqlite checkpoint DB.
+
+    Operator override via ``MOVATE_CHECKPOINT_DB`` env var; default at
+    ``~/.movate/checkpoints.db``. The parent directory is created on
+    demand so first-run setup is zero-config."""
+    raw = os.environ.get("MOVATE_CHECKPOINT_DB")
+    if raw:
+        return Path(raw).expanduser()
+    return Path("~/.movate/checkpoints.db").expanduser()
+
+
+def _postgres_dsn() -> str:
+    """Return the DSN for the postgres checkpoint pool.
+
+    Operator override via ``MOVATE_CHECKPOINT_PG_DSN``; falls back to
+    the runtime ``MOVATE_DB_URL`` (assuming the operator wants
+    checkpoints in the same DB as run records). Raises if neither is set
+    — postgres requires explicit config; we don't synthesize a localhost
+    DSN like sqlite does."""
+    dsn = os.environ.get("MOVATE_CHECKPOINT_PG_DSN") or os.environ.get("MOVATE_DB_URL")
+    if not dsn:
+        raise CheckpointerError(
+            "checkpointer 'postgres' requires MOVATE_CHECKPOINT_PG_DSN "
+            "(or MOVATE_DB_URL) to be set. Postgres needs explicit "
+            "connection info — set the env var or use 'sqlite' for "
+            "single-node persistence."
+        )
+    return dsn
+
+
+@asynccontextmanager
+async def async_checkpointer(
+    kind: CheckpointerKind | str,
+    *,
+    tenant_id: str,
+) -> AsyncIterator[TenantNamespacedCheckpointer]:
+    """Async context manager yielding a tenant-namespaced checkpointer.
+
+    Handles the connection lifecycle for sqlite/postgres backends —
+    opens on enter, closes on exit. Memory backend uses a no-op
+    lifecycle (no connection to manage) but is still wrapped in the
+    same API so callers don't branch on backend.
+
+    Usage:
+
+        async with async_checkpointer("postgres", tenant_id="acme") as cp:
+            compiled = state_graph.compile(checkpointer=cp)
+            result = await compiled.ainvoke(state, config=cfg)
+
+    Raises :class:`CheckpointerError` for missing langgraph optional
+    dep, missing companion package (``langgraph-checkpoint-sqlite`` /
+    ``-postgres``), or missing DSN for postgres.
+    """
+    if isinstance(kind, str):
+        try:
+            kind = CheckpointerKind(kind)
+        except ValueError as exc:
+            raise CheckpointerError(
+                f"unknown checkpointer kind {kind!r}; valid: "
+                f"{', '.join(k.value for k in CheckpointerKind)}"
+            ) from exc
+
+    if kind is CheckpointerKind.MEMORY:
+        # No lifecycle — yield the saver synchronously.
+        try:
+            from langgraph.checkpoint.memory import (  # noqa: PLC0415 — optional dep
+                MemorySaver,
+            )
+        except ImportError as exc:
+            raise CheckpointerError(
+                "checkpointer 'memory' requires the langgraph package. "
+                "Install with: uv pip install 'movate-cli[langgraph]'"
+            ) from exc
+        yield TenantNamespacedCheckpointer(MemorySaver(), tenant_id=tenant_id)
+        return
+
+    if kind is CheckpointerKind.SQLITE:
+        try:
+            from langgraph.checkpoint.sqlite.aio import (  # noqa: PLC0415 — optional dep
+                AsyncSqliteSaver,
+            )
+        except ImportError as exc:
+            raise CheckpointerError(
+                "checkpointer 'sqlite' requires the langgraph-checkpoint-"
+                "sqlite package. Install with: uv pip install "
+                "'movate-cli[langgraph]'"
+            ) from exc
+        path = _sqlite_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        async with AsyncSqliteSaver.from_conn_string(str(path)) as inner:
+            # LangGraph's sqlite saver auto-initialises the schema on
+            # first use; we explicitly DON'T call .setup() here because
+            # the library's own docstring says it shouldn't be called
+            # directly. The first put / get_tuple call triggers it.
+            yield TenantNamespacedCheckpointer(inner, tenant_id=tenant_id)
+        return
+
+    if kind is CheckpointerKind.POSTGRES:
+        try:
+            from langgraph.checkpoint.postgres.aio import (  # noqa: PLC0415 — optional dep
+                AsyncPostgresSaver,
+            )
+        except ImportError as exc:
+            raise CheckpointerError(
+                "checkpointer 'postgres' requires the langgraph-checkpoint-"
+                "postgres package. Install with: uv pip install "
+                "'movate-cli[langgraph]'"
+            ) from exc
+        dsn = _postgres_dsn()
+        async with AsyncPostgresSaver.from_conn_string(dsn) as inner:
+            # Postgres saver requires explicit setup — DDL for the
+            # checkpoint tables runs on first call. Unlike SQLite this
+            # one IS meant to be called by the user (per its docstring).
+            await inner.setup()
+            yield TenantNamespacedCheckpointer(inner, tenant_id=tenant_id)
+        return
+
+    # Unreachable — StrEnum constraint above.
     raise CheckpointerError(f"unhandled checkpointer kind: {kind!r}")  # pragma: no cover
 
 
@@ -344,5 +475,6 @@ __all__ = [
     "CheckpointerError",
     "CheckpointerKind",
     "TenantNamespacedCheckpointer",
+    "async_checkpointer",
     "make_checkpointer",
 ]

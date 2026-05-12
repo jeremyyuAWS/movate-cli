@@ -274,10 +274,13 @@ documented best practice.
       (Tier 2 #2). `TenantNamespacedCheckpointer` wraps LangGraph's
       `BaseCheckpointSaver` so every checkpoint operation prefixes
       `thread_id` with `tenant_id::` — tenant A's workflow threads are
-      invisible to tenant B even with colliding workflow_run_ids. v1.0
-      ships the **memory** backend; sqlite + postgres are queued
-      (`CheckpointerError` raised today with operator-facing pointer).
-      14 tests in
+      invisible to tenant B even with colliding workflow_run_ids. **All
+      three backends ship.** Memory via the sync `make_checkpointer`;
+      SQLite + Postgres via the async-context-manager `async_checkpointer`
+      which handles the connection-pool lifecycle around `ainvoke`.
+      SQLite persists at `~/.movate/checkpoints.db` (override via
+      `MOVATE_CHECKPOINT_DB`); Postgres uses `MOVATE_CHECKPOINT_PG_DSN`
+      (or `MOVATE_DB_URL` as fallback). 15 tests in
       [`tests/test_workflow_checkpointer.py`](../tests/test_workflow_checkpointer.py).
 - [x] **Conditional edges + JSONPath-like DSL** (Tier 2 #5). New
       `kind: conditional` / `when: <expr>` fields on `EdgeSpec`; YAML

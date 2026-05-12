@@ -278,16 +278,17 @@ def test_factory_rejects_unknown_kind() -> None:
 
 
 @pytest.mark.unit
-def test_factory_defers_sqlite_with_pointer() -> None:
-    """Until the SQLite backend lands, the factory raises a friendly
-    pointer to the BACKLOG entry."""
-    with pytest.raises(CheckpointerError, match=r"sqlite.*follow-up"):
+def test_sync_factory_redirects_sqlite_to_async_form() -> None:
+    """SQLite + Postgres need connection-pool lifecycle that ``make_checkpointer``
+    (sync) can't manage. The factory refuses and points operators at
+    ``async_checkpointer`` instead."""
+    with pytest.raises(CheckpointerError, match="async_checkpointer"):
         make_checkpointer("sqlite", tenant_id="acme")
 
 
 @pytest.mark.unit
-def test_factory_defers_postgres_with_pointer() -> None:
-    with pytest.raises(CheckpointerError, match=r"postgres.*follow-up"):
+def test_sync_factory_redirects_postgres_to_async_form() -> None:
+    with pytest.raises(CheckpointerError, match="async_checkpointer"):
         make_checkpointer("postgres", tenant_id="acme")
 
 
@@ -359,15 +360,19 @@ async def test_compile_to_langgraph_without_checkpointer_still_works(
 
 
 @pytest.mark.unit
-async def test_compile_to_langgraph_surfaces_deferred_backend_error(
+async def test_compile_to_langgraph_runs_with_sqlite_checkpointer(
     tmp_path: Path,
     pricing: PricingTable,
     storage: InMemoryStorage,
     tracer: NullTracer,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A workflow asking for the deferred sqlite backend fails with a
-    LangGraphCompileError that wraps the CheckpointerError — operators
-    get a single error type to catch on the caller side."""
+    """SQLite backend works end-to-end through the async lifecycle.
+    Uses an isolated tmp_path file via MOVATE_CHECKPOINT_DB so tests
+    don't share state."""
+    db = tmp_path / "checkpoints.db"
+    monkeypatch.setenv("MOVATE_CHECKPOINT_DB", str(db))
+
     yaml_path = _scaffold_single_node_workflow(tmp_path, checkpointer="sqlite")
     runner = _build_runner(
         provider=_ConstantProvider(),
@@ -377,8 +382,38 @@ async def test_compile_to_langgraph_surfaces_deferred_backend_error(
     )
     spec, parent = load_workflow_spec(yaml_path)
     graph = compile_workflow(spec, parent)
+    result = await runner.run(graph, initial_state={"text": "seed"})
 
-    with pytest.raises(LangGraphCompileError, match=r"sqlite.*follow-up"):
+    assert result.status is WorkflowStatus.SUCCESS
+    # SQLite saver wrote at least one checkpoint to disk.
+    assert db.exists()
+    assert db.stat().st_size > 0
+
+
+@pytest.mark.unit
+async def test_compile_to_langgraph_postgres_requires_dsn_env(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without MOVATE_CHECKPOINT_PG_DSN (or MOVATE_DB_URL), the postgres
+    backend refuses with an operator-facing pointer."""
+    monkeypatch.delenv("MOVATE_CHECKPOINT_PG_DSN", raising=False)
+    monkeypatch.delenv("MOVATE_DB_URL", raising=False)
+
+    yaml_path = _scaffold_single_node_workflow(tmp_path, checkpointer="postgres")
+    runner = _build_runner(
+        provider=_ConstantProvider(),
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+    )
+    spec, parent = load_workflow_spec(yaml_path)
+    graph = compile_workflow(spec, parent)
+
+    with pytest.raises(LangGraphCompileError, match="MOVATE_CHECKPOINT_PG_DSN"):
         await runner.run(graph, initial_state={"text": "seed"})
 
 
