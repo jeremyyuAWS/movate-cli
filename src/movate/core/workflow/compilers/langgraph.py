@@ -325,20 +325,14 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
     # don't branch on backend.
     if graph.checkpointer is not None:
         try:
-            async with async_checkpointer(
-                graph.checkpointer, tenant_id=tenant_id
-            ) as checkpointer:
+            async with async_checkpointer(graph.checkpointer, tenant_id=tenant_id) as checkpointer:
                 compiled = state_graph.compile(checkpointer=checkpointer)
                 # LangGraph requires a thread_id when a checkpointer is
                 # attached. We use the workflow_run_id so each invocation
                 # maps 1:1 to a checkpoint thread — matches how operators
                 # think about "this workflow run."
-                invoke_config: dict[str, Any] = {
-                    "configurable": {"thread_id": wf_id}
-                }
-                final_state = await compiled.ainvoke(
-                    dict(initial_state), config=invoke_config
-                )
+                invoke_config: dict[str, Any] = {"configurable": {"thread_id": wf_id}}
+                final_state = await compiled.ainvoke(dict(initial_state), config=invoke_config)
         except CheckpointerError as exc:
             # Re-raise as LangGraphCompileError so the runner's caller
             # gets a single error type to handle for "compile failed",
