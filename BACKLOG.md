@@ -288,6 +288,98 @@ These pay back across every phase. Don't queue them after v1.0 — interleave th
 
 ---
 
+## 9. MDK rebrand + canonical config (Deva's feedback, May 2026)
+
+Strategic direction shift: position movate-cli as **MDK — Movate Development Kit**, an enterprise SDK with knowledge graphs, multi-tenancy, and adapter architecture. Some items below are already shipped (see notes); the new work is grouped in phases v0.6 → v1.0.
+
+> **Open questions for leadership before committing engineering weeks:**
+> 1. "Commercializable / resellable" — internal Movate only, SI partners, or direct enterprise sales? Each is a different product.
+> 2. Multi-cloud requirement (GCP/AWS) — hard requirement or eventual?
+> 3. Multi-tenant — hosted SaaS or self-hosted by customer?
+> 4. Lyzr adapter — strategic partnership or example of many?
+> 5. Knowledge graphs — concrete customer use case or aspirational?
+
+### Tier 0 — Brand + naming (v0.6, ~1 week)
+
+- [ ] **Rename `movate` CLI → `mdk`** `[HIGH] [v0.6] [2-3d]` — binary, package, env var prefix (`MOVATE_*` → `MDK_*`), config dir (`~/.movate/` → `~/.mdk/`). Mechanical but breaking. Keep `movate` as transitional alias for 2 releases.
+- [ ] **Rename `movate.yaml` → `policy.yaml`** `[HIGH] [v0.6] [1d]` — loader checks both, prefers `policy.yaml`. Deprecation warning on old name.
+- [ ] **Update demo repo + docs to use `mdk`** `[HIGH] [v0.6] [1d]` — README, ask.py subprocess calls, dev-loop.md, deck source files.
+
+### Tier 1 — Canonical config files (v0.6, ~2-3 weeks)
+
+- [ ] **`policy.yaml` (renamed from movate.yaml)** `[HIGH] [v0.6] [done-after-rename]` — already implements: allowed_providers, deny_models, max_cost_per_run_usd, tenant_budgets.
+- [ ] **`runtime.yaml` — runtime + adapter selection + provider routing** `[HIGH] [v0.6] [3-5d]` — defaults for runtime kind (litellm|native_openai|native_anthropic|lyzr), per-agent overrides allowed; provider routing rules (cost/latency/region) merged here from §7.
+- [ ] **`eval.yaml` — global eval defaults** `[HIGH] [v0.6] [2d]` — gate, gate_mode, regression_tolerance, runs_per_case, default judge model. Per-agent `evals:` block in agent.yaml overrides.
+- [ ] **`knowledge.yaml` — KB sources + ingestion config** `[HIGH] [v0.6] [3d]` — vector DB pointer, KG endpoint, chunking strategy, embedding model. Per-agent `knowledge:` refs point at indices/namespaces declared here.
+- [ ] **Layered context resolution: Global → Agent → Session** `[HIGH] [v0.6] [3d]` — formalize merge precedence; expose via `mdk config show` showing the resolved config for a given agent.
+
+### Tier 2 — Agent definition expansion (v0.7, ~2 weeks)
+
+- [ ] **Input/output examples in agent.yaml** `[HIGH] [v0.7] [2d]` — `examples: [{input: ..., output: ...}]`; `mdk validate` smoke-tests against these; powers downstream synthetic data generation.
+- [ ] **Goals + objectives + KB refs as first-class agent.yaml fields** `[HIGH] [v0.7] [3d]` — structured `goals: [...]`, `objectives: [{id, threshold, judge}]`, `knowledge: [{kind, path|index|namespace}]`. Becomes the contract for test generation.
+- [ ] **Modularize agent objectives for evaluation** `[HIGH] [v0.7] [3d]` — each objective is independently scored + reported (per-objective subscore in eval table). Eval gate can target individual objectives.
+
+### Tier 3 — Multi-source onboarding + dynamic test gen (v0.7, ~3-4 weeks)
+
+- [ ] **Onboard from Agent JSON** `[MED] [v0.7] [1d]` — `mdk onboard --from-json agent.json` builds equivalent of agent.yaml on disk.
+- [ ] **Onboard from trace logs** `[MED] [v0.7] [1w]` — given recorded RunRecords, synthesize a starter agent.yaml (provider, schemas inferred from data shape).
+- [ ] **Onboard from chat UI export** `[MED] [v0.7] [1w]` — common chat export formats (OpenAI, Anthropic, Claude.ai exports) → agent.yaml seed.
+- [ ] **Black-box application testing (`mdk eval <http-url>`)** `[HIGH] [v0.7] [1w]` — hit an HTTP endpoint instead of a local agent; same eval framework, different runner.
+- [ ] **Generate scenario test cases from agent goals** `[HIGH] [v0.7] [1w]` — LLM-generates cases across categories: positive / negative / edge / red-team. Output is a *suggested* dataset for human review — never auto-merged.
+- [ ] **Synthetic test data generation** `[MED] [v0.7] [3-5d]` — opt-in via `mdk eval generate --synthetic`. Strong warning about over-reliance on synthetic data.
+- [ ] **Expected-results generation (optional)** `[LOW] [v0.7] [3d]` — LLM-generates expected output for cases that lack one. Marked `auto_generated: true` so human reviewer can flip.
+- [ ] **Test category tagging in dataset** `[MED] [v0.7] [1d]` — `tags: [positive | negative | edge | red_team | adversarial]`; eval table reports per-category pass rate.
+- [ ] **Multi-run consistency analysis** `[MED] [v0.7] [2d]` — partially shipped (`--runs N`); add stddev + p10/p90 + confidence-interval bands to the eval report.
+
+### Tier 4 — Knowledge architecture (v0.8 + v0.9, ~10-12 weeks total)
+
+- [ ] **Evaluate open-source vector DB candidates** `[HIGH] [v0.8] [3d]` — `pgvector` (recommended; already have Postgres), `Qdrant`, `Chroma`, `Weaviate`, `LanceDB`. Write a 1-page decision doc.
+- [ ] **Integrate pgvector (or chosen VDB)** `[HIGH] [v0.8] [1-2w]` — `MemoryProvider.vector_search()` + ingestion pipeline. `knowledge.yaml: vector_db:` config.
+- [ ] **Evaluate open-source knowledge graph candidates** `[HIGH] [v0.9] [3d]` — `Apache AGE` (recommended; Postgres extension), `Neo4j Community`, `Memgraph`, `Kuzu`. Decision doc.
+- [ ] **Integrate KG (Apache AGE or chosen)** `[HIGH] [v0.9] [1-2w]` — graph queries via Cypher; entity + relationship extraction at ingest.
+- [ ] **Canonical KB ingestion pipeline** `[HIGH] [v0.9] [2w]` — `mdk knowledge ingest <path>` runs: chunking → metadata → embedding → entity extraction → graph relationships. Configurable via `knowledge.yaml`.
+- [ ] **Hybrid retrieval (vector + KG)** `[HIGH] [v0.9] [1w]` — query fans out to both; merge by score with configurable weights.
+- [ ] **Avoid cloud-native proprietary services** `[MED] [v0.9] [—]` — already done at model layer (LiteLLM). Infra layer (Azure) — scope a separate Terraform/Helm pass for GCP/AWS if/when business case is clear.
+
+### Tier 5 — Memory architecture (v0.8, ~4 weeks parallel with VDB work)
+
+- [ ] **Memory provider Protocol** `[HIGH] [v0.8] [3d]` — `MemoryProvider.read(layer, key)` + `write(...)` + `search(...)`; per-layer backends.
+- [ ] **Session memory (per-run scratchpad, in-process)** `[HIGH] [v0.8] [2d]` — short-lived dict; cleared on run end.
+- [ ] **Working memory (conversation context)** `[HIGH] [v0.8] [3d]` — Redis or Postgres with TTL; keyed by `conversation_id`.
+- [ ] **Episodic memory (recent runs by tenant)** `[MED] [v0.8] [3d]` — already partially shipped (RunRecord); add retrieval helpers.
+- [ ] **Semantic memory (KB-grounded long-term)** `[HIGH] [v0.8] [—]` — backed by vector DB (above).
+- [ ] **Organizational memory (cross-tenant shared)** `[MED] [v0.9] [1w]` — separate VDB namespace + KG subgraph; opt-in per tenant.
+
+### Tier 6 — Adapter architecture (v1.0, ~4 weeks)
+
+- [ ] **Generic HTTP agent adapter** `[HIGH] [v1.0] [1w]` — POST to URL, expect JSON; black-box testing for any HTTP-served agent.
+- [ ] **Lyzr adapter** `[MED] [v1.0] [1w]` — gated on confirmation Lyzr matters. Spec out before committing.
+- [ ] **Browser/Playwright adapter** `[LOW] [v1.0] [2w]` — evaluate Web UIs. Gated on customer use case.
+- [ ] **Trace replay adapter** `[—] [done]` — already shipped as `mdk run --replay` and `mdk trace replay`.
+
+### Tier 7 — Comprehensive reporting + reconciliation (v1.0, ~3 weeks)
+
+- [ ] **Four-dimension eval reporting** `[HIGH] [v1.0] [1w]` — functionality / completeness / correctness / AI metrics. Each gets a subscore in the table.
+- [ ] **Per-objective scoring breakdown** `[HIGH] [v1.0] [3d]` — eval table shows pass/fail per `objective.id` defined on agent.yaml.
+- [ ] **Eval reconciliation across deterministic + LLM + HITL** `[HIGH] [v1.0] [1w]` — configurable precedence; "if all three disagree, fall back to HITL" pattern.
+- [ ] **HITL workflow nodes (formalize)** `[HIGH] [v1.0] [1w]` — already in v1.1 plan; specify the request/resolve API.
+- [ ] **Configurable fallback strategy chain (LLM → HITL → deterministic)** `[MED] [v1.0] [3d]` — per-eval-config; defaults to LLM-only.
+- [ ] **Persist evaluation results to datastore** `[—] [done]` — already shipped (EvalRecord); just add per-dimension subscores when v1.0 lands.
+
+### Tier 8 — Doctor + observability polish (v0.6+, ~1 week)
+
+- [ ] **`mdk doctor --explain`** `[HIGH] [v0.6] [3d]` — for each check, render: what it does, why it matters, what failure means, the copy-pasteable fix.
+- [ ] **Doctor output explainability doc** `[MED] [v0.6] [2d]` — `docs/doctor-explained.md` documents every line — what it tests, what's safe to ignore.
+
+### Tier 9 — Enterprise readiness (v1.0+, ongoing)
+
+- [ ] **Reusable enterprise policy enforcement** `[HIGH] [v1.0] [1w]` — `mdk policy export/import` so teams can share `policy.yaml` snippets. Marketplace later.
+- [ ] **Multi-tenant deployments (formalize)** `[HIGH] [v1.0] [—]` — mostly shipped; add tenant-creation API, per-tenant config overrides.
+- [ ] **Portable/open deployment architecture** `[MED] [v1.0+] [2w]` — scope after multi-cloud answer from Deva.
+- [ ] **Enterprise governance compliance (SOC2 / audit logs)** `[MED] [v1.0+] [—]` — depends on commercialization answer.
+
+---
+
 ## How to use this file
 
 1. Pick the highest item from §0 ("Top 10") that isn't blocked.
