@@ -21,9 +21,10 @@ from rich.console import Console
 from rich.table import Table
 
 from movate.cli._runtime import build_local_runtime, shutdown_runtime
+from movate.cli._theme import error_panel, kv_table, success_panel, warn_panel
 from movate.cli._workflow_path import is_workflow_path
 from movate.core.loader import AgentBundle, AgentLoadError, load_agent
-from movate.core.models import RunRequest, WorkflowStatus
+from movate.core.models import RunRequest, RunResponse, WorkflowStatus
 from movate.core.run_replay import (
     AgentReplayDiff,
     ReplayMismatchError,
@@ -202,13 +203,57 @@ async def _run_local_agent(
     finally:
         await shutdown_runtime(rt.storage, rt.tracer)
 
+    # Response body → stdout (pipeable: ``movate run … | jq .``).
     if output_format == "text":
         sys.stdout.write(response.human_readable + "\n")
     else:
         sys.stdout.write(response.model_dump_json(indent=2) + "\n")
 
+    # Verdict footer → stderr (informational; doesn't pollute pipes).
+    _render_run_verdict(response, bundle=bundle, mock=mock)
+
     if response.status == "error":
         raise typer.Exit(code=1)
+
+
+def _render_run_verdict(response: RunResponse, *, bundle: AgentBundle, mock: bool) -> None:
+    """Render the post-run verdict panel to stderr.
+
+    Three flavors based on ``response.status``:
+    - ``success`` → green panel
+    - ``safety_blocked`` → yellow panel
+    - ``error`` → red panel + error details
+
+    Stdout (response body) is untouched so piping to ``jq`` etc. still
+    works; the panel is informational only.
+    """
+    m = response.metrics
+    table = kv_table()
+    table.add_row("status", response.status)
+    table.add_row("latency", f"{m.latency_ms} ms")
+    table.add_row(
+        "cost",
+        f"${m.cost_usd:.4f}" + ("  [dim](mock)[/dim]" if mock else ""),
+    )
+    table.add_row(
+        "tokens",
+        f"[dim]{m.tokens.input}in + {m.tokens.output}out"
+        + (f" ({m.tokens.cached_input} cached)" if m.tokens.cached_input else "")
+        + "[/dim]",
+    )
+    if response.run_id:
+        table.add_row("run id", f"[dim]{response.run_id}[/dim]")
+    if response.error is not None:
+        table.add_row("error", f"[red]{response.error.message}[/red]")
+
+    name = bundle.spec.name
+    version = bundle.spec.version
+    if response.status == "success":
+        console.print(success_panel(table, name=name, version=version, kind="run"))
+    elif response.status == "safety_blocked":
+        console.print(warn_panel(table, name=name, version=version, kind="blocked"))
+    else:
+        console.print(error_panel(table, name=name, version=version, kind="run"))
 
 
 # ---------------------------------------------------------------------------
