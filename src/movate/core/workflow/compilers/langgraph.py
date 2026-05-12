@@ -252,10 +252,13 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
             if response.status != "success":
                 # Same as homegrown: persist an ERROR-status RunRecord
                 # for queries that join on workflow_run_id+node_id.
+                # Record FIRST failure only — later parallel branches
+                # may also fail concurrently, but the first one to hit
+                # this lock wins reporting precedence.
                 await storage.save_run(summary)
-                error_state["node_id"] = node_id
-                error_state["error"] = response.error
-                error_state["state_before"] = dict(state)
+                if "node_id" not in error_state:
+                    error_state["node_id"] = node_id
+                    error_state["error"] = response.error
                 return {} if use_typed_state else state
 
             if use_typed_state:
@@ -341,8 +344,21 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
     finished = time.monotonic()
 
     if error_state:
-        # Workflow halted mid-walk. Persist the WorkflowRunRecord with
-        # error_node_id + the pre-failure state, then build the result.
+        # Workflow halted mid-walk. We use LangGraph's post-merge state
+        # (not the failing node's pre-merge `state_before` snapshot) for
+        # the WorkflowRunRecord because:
+        #
+        #   * In SEQUENTIAL workflows the two values are equivalent — the
+        #     failing node received state X and returned state X unchanged
+        #     (our error short-circuit), so LangGraph's final state is X.
+        #
+        #   * In PARALLEL workflows the post-merge state includes sibling
+        #     branches' completed contributions (LangGraph reduces every
+        #     completed branch's writes before reporting back). The
+        #     pre-merge snapshot from a single failing branch would
+        #     DROP those sibling outputs — operators looking at
+        #     `WorkflowResult.final_state` expect to see what succeeded,
+        #     not what the failing branch saw.
         wf_record = WorkflowRunRecord(
             workflow_run_id=wf_id,
             tenant_id=tenant_id,
@@ -350,7 +366,7 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
             workflow_version=graph.version,
             status=WorkflowStatus.ERROR,
             initial_state=initial_state,
-            final_state=error_state["state_before"],
+            final_state=final_state,
             error_node_id=error_state["node_id"],
             error=error_state["error"],
         )
@@ -359,7 +375,7 @@ async def run_via_langgraph(  # noqa: PLR0912 — single orchestrator; splitting
             workflow_run_id=wf_id,
             status=WorkflowStatus.ERROR,
             initial_state=initial_state,
-            final_state=error_state["state_before"],
+            final_state=final_state,
             runs=captured_runs,
             error_node_id=error_state["node_id"],
             error=error_state["error"],

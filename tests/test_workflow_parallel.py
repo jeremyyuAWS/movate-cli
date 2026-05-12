@@ -512,6 +512,149 @@ async def test_fan_out_in_workflow_runs_and_reducer_concatenates(
     assert len(history) == 5, f"reducer should accumulate 5 entries, got {history}"
 
 
+class _OneBranchFailsProvider(BaseLLMProvider):
+    """Branch C returns invalid JSON; everyone else returns a clean
+    ``{"history": ["<letter>"]}`` based on which agent's prompt is
+    being rendered (each agent's prompt body contains its `name`)."""
+
+    name = "one_branch_fails"
+    version = "0.0.1"
+
+    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        body = request.messages[0].content
+        for letter in ("a", "b", "c", "d", "e"):
+            # Each scaffolded agent's prompt template embeds its name
+            # via the test's _make_agent helper.
+            if f"agent {letter}-agent:" in body:
+                if letter == "c":
+                    return CompletionResponse(text="not valid JSON")
+                return CompletionResponse(text=f'{{"history": ["{letter}"]}}')
+        return CompletionResponse(text='{"history": ["?"]}')
+
+    async def stream(self, request):  # pragma: no cover
+        raise NotImplementedError
+
+    async def embed(self, text, *, model):  # pragma: no cover
+        raise NotImplementedError
+
+
+def _scaffold_failing_branch_workflow(tmp_path: Path) -> Path:
+    """A → {B, C, D} → E with custom prompts so the provider can
+    discriminate per-agent (each prompt body includes the agent name)."""
+    workflow_dir = tmp_path / "wf-branch-fail"
+
+    def _scaffold(name: str) -> None:
+        agent_dir = workflow_dir / "agents" / name
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        (agent_dir / "prompt.md").write_text(f"agent {name}-agent: echo {{{{ input.text }}}}\n")
+        (agent_dir / "schema").mkdir(exist_ok=True)
+        (agent_dir / "schema" / "input.json").write_text(
+            json.dumps({"type": "object", "properties": {"text": {"type": "string"}}})
+        )
+        (agent_dir / "schema" / "output.json").write_text(
+            json.dumps(
+                {
+                    "type": "object",
+                    "required": ["history"],
+                    "additionalProperties": False,
+                    "properties": {"history": {"type": "array", "items": {"type": "string"}}},
+                }
+            )
+        )
+        (agent_dir / "agent.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "api_version": "movate/v1",
+                    "kind": "Agent",
+                    "name": f"{name}-agent",
+                    "version": "0.1.0",
+                    "lifecycle": "validated",
+                    "model": {"provider": "openai/gpt-4o-mini-2024-07-18"},
+                    "prompt": "./prompt.md",
+                    "schema": {
+                        "input": "./schema/input.json",
+                        "output": "./schema/output.json",
+                    },
+                }
+            )
+        )
+
+    for name in ("a", "b", "c", "d", "e"):
+        _scaffold(name)
+
+    return _make_workflow(
+        workflow_dir,
+        nodes=[
+            {"id": "a", "type": "agent", "ref": "./agents/a"},
+            {"id": "b", "type": "agent", "ref": "./agents/b"},
+            {"id": "c", "type": "agent", "ref": "./agents/c"},
+            {"id": "d", "type": "agent", "ref": "./agents/d"},
+            {"id": "e", "type": "agent", "ref": "./agents/e"},
+        ],
+        edges=[
+            {"from": "a", "to": "b", "kind": "parallel_fan_out"},
+            {"from": "a", "to": "c", "kind": "parallel_fan_out"},
+            {"from": "a", "to": "d", "kind": "parallel_fan_out"},
+            {"from": "b", "to": "e", "kind": "parallel_fan_in"},
+            {"from": "c", "to": "e", "kind": "parallel_fan_in"},
+            {"from": "d", "to": "e", "kind": "parallel_fan_in"},
+        ],
+    )
+
+
+@pytest.mark.unit
+async def test_parallel_branch_failure_preserves_sibling_outputs(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """Branch-level failure invalidation (Tier 2 #7).
+
+    When parallel branch C fails, sibling branches that completed
+    (B and D, or whichever completed before LangGraph aborted the
+    super-step) MUST have their contributions preserved in
+    ``final_state``. Before the fix the workflow halted with
+    ``final_state`` snapshotted at the failing branch's pre-merge
+    input — sibling outputs were dropped on the floor.
+    """
+    yaml_path = _scaffold_failing_branch_workflow(tmp_path)
+    executor = Executor(
+        provider=_OneBranchFailsProvider(),
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+    )
+    runner = WorkflowRunner(executor=executor, storage=storage)
+    spec, parent = load_workflow_spec(yaml_path)
+    graph = compile_workflow(spec, parent)
+    result = await runner.run(graph, initial_state={"text": "seed"})
+
+    # Workflow errored; error_node_id points at the failing branch.
+    assert result.status is WorkflowStatus.ERROR
+    assert result.error_node_id == "c"
+
+    # The fan-in node E never ran (it would need ALL upstream to succeed).
+    visited = [r.node_id for r in result.runs]
+    assert "e" not in visited
+
+    # A definitely ran (it's the entrypoint, before any branch).
+    assert "a" in visited
+
+    # At least ONE of B / D completed and its `history` contribution
+    # survived the failure. The exact set depends on LangGraph's
+    # super-step ordering, but the post-fix invariant is "any
+    # successful branch's writes are in final_state."
+    history = result.final_state.get("history", [])
+    assert isinstance(history, list)
+    assert "a" in history  # A always runs first
+    sibling_contribs = {x for x in history if x in ("b", "d")}
+    assert sibling_contribs, (
+        f"expected at least one of B/D to contribute to history, "
+        f"got {history!r}. Pre-fix this would be empty."
+    )
+
+
 @pytest.mark.unit
 async def test_pure_sequential_workflow_still_uses_dict_state(
     tmp_path: Path,
