@@ -226,6 +226,19 @@ class AgentSpec(BaseModel):
     budget: Budget = Field(default_factory=Budget)
     tags: list[str] = Field(default_factory=list)
 
+    tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tools the agent may invoke during a run. Each entry is the "
+            "name of a tool registered via :func:`movate.tools.tool`. The "
+            "executor builds the OpenAI / LiteLLM ``tools=[...]`` list at "
+            "call time by looking each name up in the registry; unknown "
+            "names raise :class:`movate.tools.ToolError` at first call. "
+            "Empty list (default) = no tool calls; the model is forced "
+            "to answer in plain text."
+        ),
+    )
+
     @field_validator("name")
     @classmethod
     def _validate_name(cls, v: str) -> str:

@@ -13,6 +13,8 @@ Workflow orchestration is Phase 3 (`movate.core.workflow`).
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import time
@@ -54,6 +56,7 @@ from movate.providers.base import (
 from movate.providers.pricing import PricingTable
 from movate.providers.registry import ProviderRegistry, UnregisteredRuntimeError
 from movate.storage.base import StorageProvider
+from movate.tools import ToolError, get_tool
 from movate.tracing.base import SpanCtx, Tracer
 
 log = logging.getLogger(__name__)
@@ -248,10 +251,27 @@ class Executor:
                     *(history or []),
                     *user_msgs,
                 ]
+                # Build the OpenAI / LiteLLM tool list from the agent's
+                # declared tools. Empty list → None so we don't pass
+                # ``tools=[]`` to the provider (LiteLLM warns / some
+                # providers reject the empty form).
+                openai_tools: list[dict[str, Any]] | None = None
+                if spec.tools:
+                    try:
+                        openai_tools = [get_tool(name).to_openai_tool() for name in spec.tools]
+                    except ToolError as exc:
+                        # Unknown tool name in agent.yaml — fail loudly at
+                        # first call. The validate command will eventually
+                        # catch this earlier (TODO: validate-time check).
+                        raise SchemaError(
+                            f"agent {spec.name!r} references unknown tool: {exc}"
+                        ) from exc
+
                 req = CompletionRequest(
                     provider=provider_str,
                     messages=conversation,
                     params=params,
+                    tools=openai_tools,
                 )
 
                 async def _invoke(req: CompletionRequest = req) -> CompletionResponse:
@@ -265,6 +285,23 @@ class Executor:
 
                 try:
                     completion = await run_with_retries(_invoke)
+                    # Tool-call loop. If the model emitted tool_calls,
+                    # invoke each registered tool, append the results
+                    # to the conversation, and re-call the provider
+                    # until the model emits a plain-text response (no
+                    # more tool_calls) or we hit the iteration cap.
+                    # Token usage accumulates across iterations so the
+                    # cost calc below sees the full provider spend.
+                    if openai_tools and completion.tool_calls:
+                        completion = await self._run_tool_loop(
+                            provider_for_run=provider_for_run,
+                            initial_completion=completion,
+                            conversation=conversation,
+                            params=params,
+                            provider_str=provider_str,
+                            openai_tools=openai_tools,
+                            span=span,
+                        )
                     chosen_provider = provider_str
                     break
                 except RetryExhaustedError as exc:
@@ -377,6 +414,128 @@ class Executor:
                 started=started,
                 err=exc.last_error,
             )
+
+    async def _run_tool_loop(
+        self,
+        *,
+        provider_for_run: BaseLLMProvider,
+        initial_completion: CompletionResponse,
+        conversation: list[Message],
+        params: dict[str, Any],
+        provider_str: str,
+        openai_tools: list[dict[str, Any]],
+        span: SpanCtx,
+    ) -> CompletionResponse:
+        """Iterate the model ↔ tool exchange until the model emits a
+        plain-text response (no ``tool_calls``) or we hit the cap.
+
+        Each iteration:
+
+        1. Invokes every tool the model requested. Sync tools run
+           in-thread; async tools are awaited. Tool exceptions surface
+           as :class:`ToolError` and fail the run (no inline retry).
+        2. Appends the assistant message (with the tool_calls metadata)
+           and a ``role: tool`` message per result to the conversation.
+        3. Re-calls the provider with the updated conversation +
+           ``tools=`` still passed so the model can chain follow-up calls.
+        4. Accumulates token usage across iterations into a single
+           ``CompletionResponse`` so the caller's cost calc sees the
+           full spend.
+
+        Iteration cap is 10 — catches runaway loops where the model
+        keeps requesting tools forever. Configurable later via
+        ``agent.yaml: tools_loop: max_iters: N`` if a real use case
+        demands it.
+        """
+        max_iterations = 10  # hard cap for v1.0
+
+        completion = initial_completion
+        # Accumulators — final returned CompletionResponse has the
+        # SUMMED token usage and the FINAL text response.
+        total_input = completion.tokens.input
+        total_output = completion.tokens.output
+        total_cached = completion.tokens.cached_input
+        # Carry through the latest raw payload for cost-drift checks.
+        raw = dict(completion.raw)
+
+        # Working conversation — starts with the original messages,
+        # grows by one assistant + N tool messages per iteration.
+        msgs = list(conversation)
+
+        iterations = 0
+        while completion.tool_calls and iterations < max_iterations:
+            iterations += 1
+            self._tracer.log_event(
+                span,
+                {
+                    "tool_loop_iteration": iterations,
+                    "tool_calls": [{"name": tc.name, "id": tc.id} for tc in completion.tool_calls],
+                },
+            )
+
+            # 1. Echo the assistant's tool-call request back into the
+            #    conversation (LiteLLM / OpenAI requires this so the
+            #    `role: tool` messages have a corresponding request to
+            #    pair with).
+            msgs.append(
+                Message(
+                    role="assistant",
+                    content="",
+                    tool_calls=list(completion.tool_calls),
+                )
+            )
+
+            # 2. Invoke each tool and append the result.
+            for tc in completion.tool_calls:
+                try:
+                    tool = get_tool(tc.name)
+                except ToolError as exc:
+                    raise SchemaError(f"model requested unknown tool {tc.name!r}: {exc}") from exc
+                result = await _invoke_tool(tool.callable, tc.arguments)
+                msgs.append(
+                    Message(
+                        role="tool",
+                        content=_serialize_tool_result(result),
+                        tool_call_id=tc.id,
+                        name=tc.name,
+                    )
+                )
+
+            # 3. Re-call the provider with the updated conversation.
+            next_req = CompletionRequest(
+                provider=provider_str,
+                messages=msgs,
+                params=params,
+                tools=openai_tools,
+            )
+
+            async def _invoke_iter(req: CompletionRequest = next_req) -> CompletionResponse:
+                return await provider_for_run.complete(req)
+
+            completion = await run_with_retries(_invoke_iter)
+            total_input += completion.tokens.input
+            total_output += completion.tokens.output
+            total_cached += completion.tokens.cached_input
+            raw = dict(completion.raw)  # last iteration's raw payload wins
+
+        if completion.tool_calls and iterations >= max_iterations:
+            raise SchemaError(
+                f"tool-call loop exceeded {max_iterations} iterations; "
+                f"the model keeps requesting tools. Check your prompt — "
+                f"agents that loop indefinitely usually have a contradictory "
+                f"instruction or missing termination clause."
+            )
+
+        return CompletionResponse(
+            text=completion.text,
+            tokens=TokenUsage(
+                input=total_input,
+                output=total_output,
+                cached_input=total_cached,
+            ),
+            raw=raw,
+            tool_calls=None,  # cleared — we consumed them
+        )
 
     async def _invoke_streaming(
         self,
@@ -585,6 +744,33 @@ class Executor:
             metrics=Metrics(latency_ms=elapsed_ms, tokens=TokenUsage()),
             error=info,
         )
+
+
+async def _invoke_tool(callable_: Callable[..., Any], args: dict[str, Any]) -> Any:
+    """Invoke a registered tool with parsed arguments.
+
+    Supports both sync and async callables — async ones are awaited;
+    sync ones are run in the default executor (so a slow sync tool
+    doesn't block the event loop). Exceptions from the tool itself
+    bubble up to the caller — the tool-loop converts them to
+    :class:`SchemaError` so the run records a typed failure.
+    """
+    if inspect.iscoroutinefunction(callable_):
+        return await callable_(**args)
+    return await asyncio.get_running_loop().run_in_executor(None, lambda: callable_(**args))
+
+
+def _serialize_tool_result(result: Any) -> str:
+    """Convert a tool's return value to the string content the model
+    sees in its conversation. Strings pass through; everything else
+    gets JSON-encoded so the model sees structured data the same way
+    it did the input arguments."""
+    if isinstance(result, str):
+        return result
+    try:
+        return json.dumps(result, default=str)
+    except (TypeError, ValueError):
+        return str(result)
 
 
 def _retry_rule_for(err: MovateError) -> Any:

@@ -15,11 +15,63 @@ from pydantic import BaseModel, ConfigDict, Field
 from movate.core.models import TokenUsage
 
 
+class ToolCall(BaseModel):
+    """One tool invocation requested by the model.
+
+    Fields mirror OpenAI's ``tool_calls[i]`` shape but with arguments
+    pre-parsed from JSON into a dict so callers don't re-parse. The
+    raw JSON string is preserved in :attr:`arguments_json` for
+    debugging / replay.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    """Provider-issued call id. Echoed back in the ``tool`` message that
+    carries the call's result so the model can match request → response
+    across multiple parallel tool calls."""
+
+    name: str
+    """Tool name as registered via :func:`movate.tools.tool`."""
+
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    """Parsed arguments. Empty dict for tools that take no args."""
+
+    arguments_json: str = ""
+    """Raw arguments JSON as the provider returned it. Kept for the
+    Tier 2 #3 resume path — replay needs the byte-exact payload."""
+
+
 class Message(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     role: Literal["system", "user", "assistant", "tool"]
     content: str
+    # Tool-call message fields. Set only on assistant messages that
+    # requested tool calls, and tool messages that carry results back.
+    tool_calls: list[ToolCall] | None = None
+    """Set on an assistant message that REQUESTED tool calls. The
+    follow-up user-side messages (role=tool) carry the results."""
+
+    tool_call_id: str | None = None
+    """Set on a tool-role message — points at the ToolCall.id this
+    message is the result of."""
+
+    name: str | None = None
+    """Set on tool-role messages — the tool name. Optional but lets
+    older providers route correctly."""
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        """Override default Pydantic dump to drop ``None`` fields.
+
+        Tool-call fields (``tool_calls`` / ``tool_call_id`` / ``name``)
+        are ``None`` on the vast majority of messages. Including them
+        in the serialized form pollutes provider payloads and breaks
+        adapters that strict-validate their request body — OpenAI's
+        Python SDK rejects ``tool_call_id: None`` on a user message,
+        and LiteLLM passes the dict through unchanged."""
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump(**kwargs)
 
 
 class CompletionRequest(BaseModel):
@@ -31,13 +83,37 @@ class CompletionRequest(BaseModel):
     messages: list[Message]
     params: dict[str, Any] = Field(default_factory=dict)
 
+    tools: list[dict[str, Any]] | None = None
+    """OpenAI / LiteLLM tool-format list (``[{type: function, function:
+    {name, description, parameters}}, ...]``). When set, the model can
+    emit tool calls in its response. Built by
+    :meth:`movate.tools.Tool.to_openai_tool` per registered tool.
+    Default is None — non-tool-using agents pass through unchanged."""
+
+    tool_choice: str | None = None
+    """Controls tool selection. Standard values: 'auto' (default in
+    LiteLLM when tools are present), 'required' (model MUST call a
+    tool), or 'none' (disable tool calls for this request). Most
+    callers leave this None and let the provider default apply."""
+
 
 class CompletionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str
+    """The model's text response. Empty string when the response is a
+    pure tool-call request (the model is asking the executor to invoke
+    tools first; text comes on a subsequent iteration after results
+    are fed back)."""
+
     tokens: TokenUsage = Field(default_factory=TokenUsage)
     raw: dict[str, Any] = Field(default_factory=dict)
+
+    tool_calls: list[ToolCall] | None = None
+    """Tool calls the model wants the executor to invoke. None / empty
+    means the response is a normal text completion. When present, the
+    executor's tool-call loop invokes each, appends the results, and
+    re-calls the provider until tool_calls is empty (or iteration cap)."""
 
 
 class StreamChunk(BaseModel):

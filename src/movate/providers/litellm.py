@@ -14,6 +14,7 @@ This is the only place in movate that imports LiteLLM. Two important choices:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any, cast
@@ -36,6 +37,7 @@ from movate.providers.base import (
     CompletionRequest,
     CompletionResponse,
     StreamChunk,
+    ToolCall,
 )
 
 log = logging.getLogger(__name__)
@@ -48,14 +50,23 @@ class LiteLLMProvider(BaseLLMProvider):
     name = "litellm"
     version = "0.0.1"
 
-    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def complete(  # noqa: PLR0912 — exception translation table
+        self, request: CompletionRequest
+    ) -> CompletionResponse:
+        # Build kwargs incrementally so tools / tool_choice are passed only
+        # when set. LiteLLM emits warnings on `tools=None` for some providers.
+        kwargs: dict[str, Any] = {
+            "model": request.provider,
+            "messages": [_serialize_message(m) for m in request.messages],
+            "num_retries": 0,  # movate owns retries
+            **request.params,
+        }
+        if request.tools is not None:
+            kwargs["tools"] = request.tools
+        if request.tool_choice is not None:
+            kwargs["tool_choice"] = request.tool_choice
         try:
-            resp = await litellm.acompletion(
-                model=request.provider,
-                messages=[m.model_dump() for m in request.messages],
-                num_retries=0,  # movate owns retries
-                **request.params,
-            )
+            resp = await litellm.acompletion(**kwargs)
         except lle.AuthenticationError as exc:
             raise AuthError(str(exc)) from exc
         except lle.RateLimitError as exc:
@@ -150,6 +161,71 @@ def _extract_retry_after(exc: Exception) -> float | None:
     return None
 
 
+def _serialize_message(m: Any) -> dict[str, Any]:
+    """Convert our :class:`Message` to LiteLLM's expected dict shape.
+
+    Drops keys that LiteLLM doesn't recognise (most providers reject
+    unknown fields). The OpenAI shape uses ``role`` / ``content`` /
+    ``tool_calls`` / ``tool_call_id`` / ``name`` — we mirror that
+    subset and omit any null fields so the dict matches what LiteLLM
+    expects byte-for-byte.
+    """
+    out: dict[str, Any] = {"role": m.role, "content": m.content}
+    if m.tool_calls:
+        # Assistant message that requested tools — re-serialize each
+        # ToolCall back to the OpenAI shape (the model returned this
+        # to us in the same shape; we just round-trip it).
+        out["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments_json or json.dumps(tc.arguments),
+                },
+            }
+            for tc in m.tool_calls
+        ]
+        # Assistant tool-call messages typically have empty content;
+        # some providers reject non-empty + tool_calls on the same
+        # message. Empty string is fine.
+    if m.tool_call_id is not None:
+        out["tool_call_id"] = m.tool_call_id
+    if m.name is not None:
+        out["name"] = m.name
+    return out
+
+
+def _parse_tool_calls(msg: Any) -> list[ToolCall] | None:
+    """Pull ``tool_calls`` off LiteLLM's message object and convert to
+    our :class:`ToolCall` shape. Returns None for messages without
+    tool calls (the common case)."""
+    raw_calls = getattr(msg, "tool_calls", None) or []
+    if not raw_calls:
+        return None
+    out: list[ToolCall] = []
+    for call in raw_calls:
+        fn = getattr(call, "function", None)
+        name = getattr(fn, "name", "") if fn is not None else ""
+        arg_json = getattr(fn, "arguments", "") if fn is not None else ""
+        try:
+            args = json.loads(arg_json) if arg_json else {}
+        except json.JSONDecodeError:
+            # Model emitted invalid JSON in arguments. Pass through
+            # the raw string and an empty dict; the executor will
+            # surface a schema error when it tries to invoke.
+            args = {}
+        out.append(
+            ToolCall(
+                id=getattr(call, "id", "") or "",
+                name=name,
+                arguments=args,
+                arguments_json=arg_json or "",
+            )
+        )
+    return out
+
+
 def _to_completion_response(resp: Any) -> CompletionResponse:
     """Convert a LiteLLM ModelResponse to our CompletionResponse.
 
@@ -159,10 +235,12 @@ def _to_completion_response(resp: Any) -> CompletionResponse:
     """
     choices = getattr(resp, "choices", None) or []
     text = ""
+    tool_calls: list[ToolCall] | None = None
     if choices:
         msg = getattr(choices[0], "message", None)
         if msg is not None:
             text = getattr(msg, "content", "") or ""
+            tool_calls = _parse_tool_calls(msg)
 
     usage = getattr(resp, "usage", None)
     tokens = TokenUsage(
@@ -180,7 +258,7 @@ def _to_completion_response(resp: Any) -> CompletionResponse:
         if cost is not None:
             raw["litellm_cost_usd"] = float(cost)
 
-    return CompletionResponse(text=text, tokens=tokens, raw=raw)
+    return CompletionResponse(text=text, tokens=tokens, raw=raw, tool_calls=tool_calls)
 
 
 def _stream_chunk_from_litellm(chunk: Any) -> StreamChunk:
