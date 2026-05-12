@@ -255,7 +255,7 @@ documented best practice.
 
 ---
 
-## What's already done (linear case, shipped)
+## What's already done (linear case + tenant-namespaced checkpointer)
 
 - [x] `workflow.yaml: runtime: <homegrown | langgraph>` field. Default
       `homegrown`; opt-in to `langgraph` per workflow.
@@ -270,6 +270,15 @@ documented best practice.
       cover happy path, partial-failure short-circuit, initial-state
       rejection, capability gate, and the missing-dep install-hint path.
 - [x] Spike (`scripts/langgraph_prototype.py`) deleted.
+- [x] **`workflow.yaml: checkpointer: <memory | sqlite | postgres>` field**
+      (Tier 2 #2). `TenantNamespacedCheckpointer` wraps LangGraph's
+      `BaseCheckpointSaver` so every checkpoint operation prefixes
+      `thread_id` with `tenant_id::` — tenant A's workflow threads are
+      invisible to tenant B even with colliding workflow_run_ids. v1.0
+      ships the **memory** backend; sqlite + postgres are queued
+      (`CheckpointerError` raised today with operator-facing pointer).
+      14 tests in
+      [`tests/test_workflow_checkpointer.py`](../tests/test_workflow_checkpointer.py).
 
 ## What to do at v1.1 (additive on the linear compiler)
 

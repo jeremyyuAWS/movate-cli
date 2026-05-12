@@ -57,6 +57,11 @@ langchain = [
 ]
 langgraph = [
     "langgraph>=1.0,<2",
+    # Checkpoint backends. `langgraph-checkpoint-sqlite` + `-postgres` are
+    # separate packages from the main `langgraph` distribution; both ship
+    # under the same release cadence and pin against the same protocol.
+    "langgraph-checkpoint-sqlite>=2.0,<3",
+    "langgraph-checkpoint-postgres>=2.0,<3",
 ]
 
 [dependency-groups]

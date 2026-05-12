@@ -115,6 +115,20 @@ class WorkflowSpec(BaseModel):
         ),
     )
 
+    checkpointer: str | None = Field(
+        default=None,
+        description=(
+            "Persistence backend for LangGraph checkpoints. One of "
+            "`memory` (in-process; fast; lost on restart), `sqlite` "
+            "(single-file persistence; deferred), `postgres` (multi-node "
+            "shared; deferred), or null to disable. Required for HITL "
+            "workflows once HUMAN nodes ship; optional for linear v1.0 "
+            "workflows where checkpoints are diagnostic only. Field has "
+            "no effect when `runtime: homegrown` — the homegrown runner "
+            "doesn't checkpoint between nodes."
+        ),
+    )
+
     state_schema: str = Field(
         ..., description="Path to a JSON Schema file, relative to workflow.yaml"
     )

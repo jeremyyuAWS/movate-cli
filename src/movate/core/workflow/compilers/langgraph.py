@@ -61,6 +61,11 @@ from movate.core.models import (
     WorkflowRunRecord,
     WorkflowStatus,
 )
+from movate.core.workflow.checkpointer import (
+    CheckpointerError,
+    TenantNamespacedCheckpointer,
+    make_checkpointer,
+)
 from movate.core.workflow.ir import EdgeKind, NodeType, WorkflowGraph
 from movate.storage.base import StorageProvider
 
@@ -270,11 +275,32 @@ async def run_via_langgraph(
     for sink in graph.sinks():
         state_graph.add_edge(sink, END)
 
-    compiled = state_graph.compile()
+    # Construct the checkpointer (if configured) and pass into compile().
+    # Tenant isolation is the load-bearing concern — every checkpoint
+    # operation runs through TenantNamespacedCheckpointer which prefixes
+    # the thread_id with `tenant_id::` so tenant A's threads are
+    # invisible to tenant B regardless of guessed / shared workflow_run_ids.
+    checkpointer: TenantNamespacedCheckpointer | None = None
+    if graph.checkpointer is not None:
+        try:
+            checkpointer = make_checkpointer(graph.checkpointer, tenant_id=tenant_id)
+        except CheckpointerError as exc:
+            # Re-raise as LangGraphCompileError so the runner's caller
+            # gets a single error type to handle for "compile failed",
+            # regardless of which sub-step failed.
+            raise LangGraphCompileError(str(exc)) from exc
 
-    # Invoke. LangGraph will walk every node; our short-circuit logic
-    # ensures downstream-of-error nodes are pass-throughs.
-    final_state = await compiled.ainvoke(dict(initial_state))
+    if checkpointer is not None:
+        compiled = state_graph.compile(checkpointer=checkpointer)
+        # LangGraph requires a thread_id when a checkpointer is attached.
+        # We use the workflow_run_id (the wf_id we just minted) so each
+        # invocation maps 1:1 to a checkpoint thread — matches how
+        # operators think about "this workflow run."
+        invoke_config: dict[str, Any] = {"configurable": {"thread_id": wf_id}}
+        final_state = await compiled.ainvoke(dict(initial_state), config=invoke_config)
+    else:
+        compiled = state_graph.compile()
+        final_state = await compiled.ainvoke(dict(initial_state))
 
     finished = time.monotonic()
 

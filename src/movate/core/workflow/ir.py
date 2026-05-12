@@ -98,6 +98,15 @@ class WorkflowGraph:
     ``"homegrown"`` (default; walks the IR directly) or ``"langgraph"``
     (compiles onto a LangGraph StateGraph)."""
 
+    checkpointer: str | None = None
+    """Checkpoint backend name (``"memory"`` / ``"sqlite"`` / ``"postgres"``)
+    or ``None`` to disable. See
+    :class:`movate.core.workflow.checkpointer.CheckpointerKind`.
+
+    The homegrown runner ignores this field; only the LangGraph compiler
+    consults it to construct a checkpointer for ``StateGraph.compile``.
+    """
+
     metadata: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ topology
