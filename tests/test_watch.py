@@ -16,6 +16,7 @@ works.
 
 from __future__ import annotations
 
+import inspect
 import json
 import threading
 import time
@@ -111,16 +112,34 @@ def test_dispatch_once_strict_promotes_warnings(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_cli_watch_help_renders() -> None:
-    # Pin COLUMNS wide so Typer/Rich don't truncate the option table
-    # (CI runners default to a narrow terminal width, which collapses
-    # the help body to an empty Rich panel and makes flag-existence
-    # assertions flake).
-    r = runner.invoke(cli_app, ["watch", "--help"], env={"COLUMNS": "120"})
+    """Smoke test: ``movate watch`` is registered as a top-level command
+    with the flags operators expect (``--poll-interval``, ``--strict``).
+
+    We introspect the Typer command graph directly rather than asserting
+    on the rendered ``--help`` text — Typer/Rich help rendering depends
+    on terminal width detection that varies across CI runners and can
+    collapse the option-table body to empty whitespace, making string
+    assertions flake. The graph-level check is both more direct (we're
+    verifying registration + parameter wiring, not display) and stable.
+    """
+    # Watch is wired as a top-level command.
+    by_name = {c.name: c for c in cli_app.registered_commands}
+    assert "watch" in by_name, "movate watch is not registered on the CLI app"
+    watch_cmd = by_name["watch"]
+    callback = watch_cmd.callback
+    assert callback is not None
+    assert callback.__module__ == "movate.cli.watch"
+
+    # The flags surface as parameters on the underlying function.
+    params = inspect.signature(callback).parameters
+    assert "poll_interval" in params, "--poll-interval flag missing from movate watch"
+    assert "strict" in params, "--strict flag missing from movate watch"
+
+    # Cheap sanity check on the help text itself — that it renders at all
+    # without raising. We pin COLUMNS so the panel is wide enough for any
+    # later assertions, but don't depend on rendered body content.
+    r = runner.invoke(cli_app, ["watch", "--help"], env={"COLUMNS": "200"})
     assert r.exit_code == 0
-    assert "hot-reload" in r.stdout.lower() or "validate" in r.stdout.lower()
-    # Flags surface in --help so operators can discover them.
-    assert "--poll-interval" in r.stdout
-    assert "--strict" in r.stdout
 
 
 # ---------------------------------------------------------------------------
