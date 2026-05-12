@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from movate.core.models import AgentRuntime
+
 if TYPE_CHECKING:
     from movate.core.models import AgentSpec
 
@@ -160,6 +162,53 @@ class ModelPolicy(BaseModel):
         return min(agent_budget, self.max_cost_per_run_usd)
 
 
+class RuntimePolicy(BaseModel):
+    """Project-wide gate on which ``AgentRuntime`` values an agent may use.
+
+    Default is permissive (``allowed=None``): any runtime an agent declares
+    is fine, provided its adapter is installed. Locking to a specific
+    subset enforces architectural direction. The canonical "A by default"
+    setup is::
+
+        # movate.yaml
+        runtime:
+          allowed: [litellm]
+
+    With that in place, ``movate validate`` rejects any agent that declares
+    ``runtime: native_anthropic`` (etc.) — operators have to either remove
+    the field (fall back to LiteLLM) or change the project policy explicitly.
+    Same pattern :class:`ModelPolicy` uses for provider gating.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed: list[AgentRuntime] | None = Field(
+        default=None,
+        description=(
+            "If set, agents may only declare runtimes in this list. "
+            "Permissive default (None): every installed runtime is fair game. "
+            "Set to ``[litellm]`` to enforce 'A by default' — every agent goes "
+            "through LiteLLM, no native-SDK or LangChain escape hatches."
+        ),
+    )
+
+    def is_permissive(self) -> bool:
+        return self.allowed is None
+
+    def check_agent(self, spec: AgentSpec) -> str | None:
+        """Return a human-readable violation string, or None if the agent
+        complies. Returns ``None`` on permissive default."""
+        if self.allowed is None:
+            return None
+        if spec.runtime in self.allowed:
+            return None
+        allowed_str = ", ".join(sorted(r.value for r in self.allowed))
+        return (
+            f"agent declares runtime={spec.runtime.value!r} but project policy "
+            f"only allows: {allowed_str}"
+        )
+
+
 class ProjectConfig(BaseModel):
     """Project-wide defaults — overrideable via CLI flags."""
 
@@ -174,6 +223,14 @@ class ProjectConfig(BaseModel):
         description=(
             "Org-wide model policy (allowed providers, deny-list, cost ceiling). "
             "Empty/absent = permissive default."
+        ),
+    )
+    runtime: RuntimePolicy = Field(
+        default_factory=RuntimePolicy,
+        description=(
+            "Project-wide gate on AgentRuntime values. Empty/absent = permissive "
+            "default (any installed runtime). Set ``runtime.allowed: [litellm]`` "
+            "to enforce 'A by default' — see RuntimePolicy."
         ),
     )
 

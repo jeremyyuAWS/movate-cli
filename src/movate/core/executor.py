@@ -16,12 +16,13 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
 from jsonschema import ValidationError as JsonSchemaError
 
-from movate.core.config import ModelPolicy
+from movate.core.config import ModelPolicy, RuntimePolicy
 from movate.core.failures import (
     DEFAULT_RETRY,
     BudgetExceededError,
@@ -51,6 +52,7 @@ from movate.providers.base import (
     Message,
 )
 from movate.providers.pricing import PricingTable
+from movate.providers.registry import ProviderRegistry, UnregisteredRuntimeError
 from movate.storage.base import StorageProvider
 from movate.tracing.base import SpanCtx, Tracer
 
@@ -63,14 +65,31 @@ class Executor:
     def __init__(
         self,
         *,
-        provider: BaseLLMProvider,
+        provider: BaseLLMProvider | None = None,
+        registry: ProviderRegistry | None = None,
         pricing: PricingTable,
         storage: StorageProvider,
         tracer: Tracer,
         tenant_id: str = "local",
         policy: ModelPolicy | None = None,
+        runtime_policy: RuntimePolicy | None = None,
     ) -> None:
-        self._provider = provider
+        """One of ``provider`` (legacy single-runtime) OR ``registry``
+        (multi-runtime, v0.6+) must be set. Passing ``provider`` is
+        equivalent to ``registry=ProviderRegistry(default_litellm=provider)``
+        and is preserved so the existing 100+ test sites keep working
+        unchanged. New code passes ``registry=`` so it can wire up
+        native-SDK adapters alongside LiteLLM."""
+        if provider is None and registry is None:
+            raise ValueError("Executor needs either provider= or registry=")
+        if provider is not None and registry is not None:
+            raise ValueError("pass either provider= OR registry=, not both")
+        if registry is not None:
+            self._registry = registry
+        else:
+            # mypy: provider is not None here (one of the two must be set).
+            assert provider is not None
+            self._registry = ProviderRegistry(default_litellm=provider)
         self._pricing = pricing
         self._storage = storage
         self._tracer = tracer
@@ -79,6 +98,10 @@ class Executor:
         # nothing, preserving v0.1-style behavior for callers that haven't
         # opted in yet (tests, downstream embedders).
         self._policy = policy or ModelPolicy()
+        # RuntimePolicy gates which AgentRuntime values are permitted —
+        # belt-and-braces against an agent.yaml that skipped `movate
+        # validate` (e.g. loaded over HTTP by a worker). Permissive default.
+        self._runtime_policy = runtime_policy or RuntimePolicy()
 
     async def execute(
         self,
@@ -89,6 +112,7 @@ class Executor:
         model_override: ModelConfig | None = None,
         workflow_run_id: str | None = None,
         node_id: str | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> RunResponse:
         """Execute one agent against one input.
 
@@ -100,7 +124,16 @@ class Executor:
         :class:`RunRecord` when the executor is invoked from a
         :class:`movate.core.workflow.WorkflowRunner` — keeps the runner from
         having to re-save the same run with a workflow link patched on.
-        """
+
+        ``on_token`` opts into streaming. When set, the executor calls
+        ``provider.stream()`` and invokes the callback with each text
+        delta as it arrives — useful for ``movate run --stream`` to
+        render tokens live in the terminal. The accumulated text is
+        still schema-validated, persisted, and returned the same way
+        as a non-streaming run; ``on_token`` only adds an observation
+        callback. Streaming inherits retries + fallback identically
+        to one-shot calls (a stream that exhausts retries falls
+        through to the next provider in the chain)."""
         job_id = job_id or str(uuid4())
         run_id = str(uuid4())
         spec = bundle.spec
@@ -121,8 +154,29 @@ class Executor:
 
         started = time.monotonic()
         try:
-            # Tenant-budget check FIRST — if the tenant's monthly cap
-            # is breached, no run should fire (not even a doomed one).
+            # Runtime POLICY check first — if the project bans this
+            # runtime (e.g. movate.yaml: runtime.allowed: [litellm]),
+            # surface as PolicyViolationError so the failure trail
+            # matches model-policy violations.
+            runtime_violation = self._runtime_policy.check_agent(spec)
+            if runtime_violation is not None:
+                raise PolicyViolationError(runtime_violation)
+
+            # Runtime AVAILABILITY check — if the agent declared a
+            # runtime we don't have an adapter for (e.g. opted into a
+            # native runtime whose optional extra isn't installed),
+            # fail fast with a SchemaError before doing any side
+            # effects or budget checks.
+            try:
+                provider_for_run = self._registry.get(spec.runtime)
+            except UnregisteredRuntimeError as exc:
+                # SchemaError is the closest fit in our taxonomy — the
+                # YAML declares a runtime that doesn't exist in this
+                # build. Retries won't help.
+                raise SchemaError(str(exc)) from exc
+
+            # Tenant-budget check — if the tenant's monthly cap is
+            # breached, no run should fire (not even a doomed one).
             # Cheap PK lookup + a single SUM aggregate; the index on
             # (tenant_id, created_at) is the perf path.
             await self._check_tenant_budget()
@@ -169,7 +223,13 @@ class Executor:
                 )
 
                 async def _invoke(req: CompletionRequest = req) -> CompletionResponse:
-                    return await self._provider.complete(req)
+                    if on_token is None:
+                        return await provider_for_run.complete(req)
+                    # Stream path. Accumulate chunks into a single
+                    # CompletionResponse so everything below this
+                    # (schema validation, cost calc, persistence) sees
+                    # the same shape regardless of streaming.
+                    return await self._invoke_streaming(provider_for_run, req, on_token)
 
                 try:
                     completion = await run_with_retries(_invoke)
@@ -194,7 +254,29 @@ class Executor:
                 assert last_error is not None
                 raise last_error
 
-            cost = self._pricing.cost_for(provider=chosen_provider, tokens=completion.tokens)
+            # Pricing-key dance: each adapter knows the canonical key for
+            # its provider strings (LiteLLM passes the agent's
+            # ``model.provider`` through unchanged; native_anthropic /
+            # native_openai prepend the family prefix; langchain returns
+            # None because the model is opaque). When None or the lookup
+            # misses we record cost=0 with an event — better than
+            # crashing on a runtime where pricing isn't applicable.
+            pricing_key = provider_for_run.pricing_key(chosen_provider)
+            if pricing_key is None:
+                cost = 0.0
+                self._tracer.log_event(
+                    span,
+                    {"cost_skipped": True, "reason": "runtime has no pricing key"},
+                )
+            else:
+                try:
+                    cost = self._pricing.cost_for(provider=pricing_key, tokens=completion.tokens)
+                except KeyError:
+                    cost = 0.0
+                    self._tracer.log_event(
+                        span,
+                        {"cost_skipped": True, "reason": f"no pricing for {pricing_key!r}"},
+                    )
             self._check_cost_drift(span, completion, cost)
 
             # The effective ceiling is the MIN of the agent's declared
@@ -263,6 +345,44 @@ class Executor:
                 started=started,
                 err=exc.last_error,
             )
+
+    async def _invoke_streaming(
+        self,
+        provider: BaseLLMProvider,
+        req: CompletionRequest,
+        on_token: Callable[[str], None],
+    ) -> CompletionResponse:
+        """Drive ``provider.stream()`` and accumulate into a single
+        :class:`CompletionResponse`.
+
+        Token totals come from the LAST chunk in the stream (providers
+        return them via ``stream_options={'include_usage': True}``).
+        If a stream ends without ever delivering usage stats — older
+        providers, mis-configured proxies — we fall through with
+        zeros. Cost accounting then reads zero, which is wrong but
+        survivable; the cost-drift check downstream will flag it.
+
+        Takes ``provider`` explicitly (rather than via ``self``) so
+        the executor can dispatch per-agent across multiple
+        registered providers — see :class:`ProviderRegistry`."""
+        text_parts: list[str] = []
+        final_tokens: TokenUsage | None = None
+        raw: dict[str, Any] = {}
+        async for chunk in provider.stream(req):
+            if chunk.text:
+                text_parts.append(chunk.text)
+                on_token(chunk.text)
+            if chunk.tokens is not None:
+                final_tokens = chunk.tokens
+            if chunk.raw:
+                # Last write wins — adapters that forward provider
+                # metadata typically only stamp it on the final chunk.
+                raw.update(chunk.raw)
+        return CompletionResponse(
+            text="".join(text_parts),
+            tokens=final_tokens or TokenUsage(),
+            raw=raw,
+        )
 
     async def _check_tenant_budget(self) -> None:
         """Abort the run if the tenant has hit its monthly cap.
@@ -380,7 +500,10 @@ class Executor:
             agent_version=bundle.spec.version,
             prompt_hash=bundle.prompt_hash,
             provider=chosen_provider,
-            provider_version=self._provider.version,
+            # provider_version stamps which adapter class produced this
+            # run — look up via the registry so multi-runtime executors
+            # record the right version per agent.
+            provider_version=self._registry.get(bundle.spec.runtime).version,
             pricing_version=self._pricing.version,
             status=JobStatus.SUCCESS,
             input=request.input,

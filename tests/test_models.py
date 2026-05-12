@@ -76,6 +76,66 @@ def test_agent_spec_rejects_invalid_name(bad: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# AgentSpec — runtime-aware provider validation (cross-field)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_agent_spec_litellm_runtime_requires_slash_provider() -> None:
+    """LiteLLM agents need the ``<provider>/<model>`` form so LiteLLM
+    can route the call. A bare ``gpt-4o-mini`` would be ambiguous."""
+    with pytest.raises(ValidationError, match="<provider>/<model>"):
+        AgentSpec.model_validate(_minimal_agent_dict(model={"provider": "gpt-4o-mini"}))
+
+
+@pytest.mark.unit
+def test_agent_spec_native_anthropic_accepts_bare_id() -> None:
+    """Native-Anthropic agents use bare model ids — that's the
+    convention the official SDK expects."""
+    spec = AgentSpec.model_validate(
+        _minimal_agent_dict(
+            runtime="native_anthropic",
+            model={"provider": "claude-sonnet-4-6"},
+        )
+    )
+    assert spec.model.provider == "claude-sonnet-4-6"
+
+
+@pytest.mark.unit
+def test_agent_spec_native_openai_accepts_bare_id() -> None:
+    spec = AgentSpec.model_validate(
+        _minimal_agent_dict(
+            runtime="native_openai",
+            model={"provider": "gpt-4o-mini-2024-07-18"},
+        )
+    )
+    assert spec.model.provider == "gpt-4o-mini-2024-07-18"
+
+
+@pytest.mark.unit
+def test_agent_spec_langchain_requires_entry_point_spec() -> None:
+    """LangChain agents declare a Python entry point — must contain a colon."""
+    with pytest.raises(ValidationError, match="entry-point spec"):
+        AgentSpec.model_validate(
+            _minimal_agent_dict(
+                runtime="langchain",
+                model={"provider": "just_a_module"},
+            )
+        )
+
+
+@pytest.mark.unit
+def test_agent_spec_langchain_accepts_entry_point_spec() -> None:
+    spec = AgentSpec.model_validate(
+        _minimal_agent_dict(
+            runtime="langchain",
+            model={"provider": "myapp.chains:build_chain"},
+        )
+    )
+    assert spec.model.provider == "myapp.chains:build_chain"
+
+
+# ---------------------------------------------------------------------------
 # ModelConfig — provider format + floating-tag rejection
 # ---------------------------------------------------------------------------
 
@@ -109,9 +169,14 @@ def test_model_config_rejects_floating_tags(provider: str) -> None:
 
 
 @pytest.mark.unit
-def test_model_config_rejects_missing_provider_prefix() -> None:
-    with pytest.raises(ValidationError, match="LiteLLM model string"):
-        ModelConfig.model_validate({"provider": "gpt-4o-mini"})
+def test_model_config_accepts_bare_provider_for_native_runtimes() -> None:
+    """``ModelConfig`` itself is liberal — bare model ids are valid here
+    because native_anthropic / native_openai agents need them. The
+    runtime-specific shape check lives on :class:`AgentSpec` (a
+    cross-field validator that sees both ``runtime`` and
+    ``model.provider``)."""
+    cfg = ModelConfig.model_validate({"provider": "gpt-4o-mini"})
+    assert cfg.provider == "gpt-4o-mini"
 
 
 @pytest.mark.unit

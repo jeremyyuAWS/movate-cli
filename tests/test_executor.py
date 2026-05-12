@@ -17,6 +17,7 @@ from movate.core.failures import (
 )
 from movate.core.loader import load_agent
 from movate.core.models import (
+    AgentRuntime,
     JobStatus,
     ModelConfig,
     RunRequest,
@@ -29,6 +30,7 @@ from movate.providers.base import (
 )
 from movate.providers.mock import MockProvider
 from movate.providers.pricing import PricingTable, load_pricing
+from movate.providers.registry import ProviderRegistry
 from movate.testing import InMemoryStorage, NullTracer, scaffold_agent
 
 # ---------------------------------------------------------------------------
@@ -119,6 +121,362 @@ async def test_executor_happy_path(
     assert len(storage.runs) == 1
     assert storage.runs[0].status == JobStatus.SUCCESS
     assert storage.runs[0].provider == "openai/gpt-4o-mini-2024-07-18"
+
+
+# ---------------------------------------------------------------------------
+# Streaming (executor.execute with on_token callback)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_executor_streaming_invokes_callback_with_chunks(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """When ``on_token`` is set, the executor uses ``provider.stream()``
+    and surfaces every text delta via the callback. The accumulated
+    response is still schema-validated and persisted normally —
+    streaming is purely an observation channel."""
+    bundle = load_agent(_scaffold(tmp_path / "demo"))
+    executor = Executor(
+        provider=MockProvider(response='{"message": "hello world"}'),
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+    )
+
+    chunks: list[str] = []
+
+    response = await executor.execute(
+        bundle,
+        RunRequest(agent="demo", input={"text": "hi"}),
+        on_token=chunks.append,
+    )
+
+    # Callback fired at least once with content (mock yields 10-char
+    # slices, so for "{\"message\": \"hello world\"}" we'd expect ≥ 2).
+    assert len(chunks) >= 1
+    # Concatenated chunks form the final response text.
+    assert "".join(chunks) == '{"message": "hello world"}'
+    # Same success path as non-streaming.
+    assert response.status == "success"
+    assert response.data == {"message": "hello world"}
+    # Same persistence (RunRecord saved).
+    assert len(storage.runs) == 1
+    # Cost still accounted (tokens come from the final usage-only
+    # stream chunk; if that path broke, cost would be 0).
+    assert response.metrics.cost_usd > 0
+
+
+@pytest.mark.unit
+async def test_executor_streaming_off_by_default_uses_complete(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """Without ``on_token``, the executor uses ``provider.complete()``
+    — proves we didn't accidentally tip the default path into the
+    streaming branch."""
+
+    class CountingMock(MockProvider):
+        complete_calls = 0
+        stream_calls = 0
+
+        async def complete(self, request):  # type: ignore[no-untyped-def]
+            CountingMock.complete_calls += 1
+            return await super().complete(request)
+
+        async def stream(self, request):  # type: ignore[no-untyped-def]
+            CountingMock.stream_calls += 1
+            async for chunk in super().stream(request):
+                yield chunk
+
+    bundle = load_agent(_scaffold(tmp_path / "demo"))
+    executor = Executor(
+        provider=CountingMock(response='{"message": "hi"}'),
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+    )
+
+    await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    assert CountingMock.complete_calls == 1
+    assert CountingMock.stream_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Provider registry dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_executor_dispatches_via_registry_when_runtime_registered(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """An agent declaring ``runtime: native_anthropic`` should be
+    dispatched to the registered provider for that runtime — proves
+    the registry seam works end-to-end when an adapter is wired."""
+    import yaml  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "anthropic-demo")
+    # Promote the agent to runtime: native_anthropic.
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.NATIVE_ANTHROPIC.value
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+
+    bundle = load_agent(bundle_dir)
+    assert bundle.spec.runtime == AgentRuntime.NATIVE_ANTHROPIC
+
+    # Build a registry with a distinct stub for the anthropic runtime
+    # so we can verify dispatch picked the right one.
+    litellm_stub = MockProvider(response='{"message": "from litellm"}')
+    anthropic_stub = MockProvider(response='{"message": "from anthropic"}')
+    registry = ProviderRegistry(default_litellm=litellm_stub)
+    registry.register(AgentRuntime.NATIVE_ANTHROPIC, anthropic_stub)
+
+    executor = Executor(
+        registry=registry,
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+    )
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    assert response.status == "success"
+    # The anthropic stub answered — not the litellm one.
+    assert response.data == {"message": "from anthropic"}
+
+
+@pytest.mark.unit
+async def test_executor_uses_pricing_key_translation_for_native_runtimes(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """Native-runtime agents declare bare model ids; the executor must
+    ask the adapter for its pricing-table key and use that, not the
+    bare id (which would KeyError).
+
+    Regression test for a real bug: before this fix, a working
+    ``runtime: native_anthropic`` agent crashed on the first run with
+    ``KeyError: 'claude-haiku-4-5-20251001'`` because pricing.yaml uses
+    the ``anthropic/`` prefix."""
+    import yaml  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "native-cost-demo")
+    # Bare-id native_anthropic agent.
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.NATIVE_ANTHROPIC.value
+    spec_dict["model"]["provider"] = "claude-haiku-4-5-20251001"
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+
+    bundle = load_agent(bundle_dir)
+
+    class FakeAnthropic(MockProvider):
+        """Mock that reports its pricing key the way AnthropicProvider does."""
+
+        def pricing_key(self, provider: str) -> str:
+            return f"anthropic/{provider}" if not provider.startswith("anthropic/") else provider
+
+    registry = ProviderRegistry(default_litellm=MockProvider())
+    registry.register(AgentRuntime.NATIVE_ANTHROPIC, FakeAnthropic())
+    executor = Executor(
+        registry=registry,
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+    )
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    # Run succeeded — no KeyError mid-flight.
+    assert response.status == "success"
+    # Cost > 0 — pricing lookup found the prefixed key. (Mock's tokens
+    # are non-zero; if the pricing_key translation had been skipped,
+    # this would have been 0.0 from the KeyError fallback.)
+    assert response.metrics.cost_usd > 0
+
+
+@pytest.mark.unit
+async def test_executor_records_zero_cost_when_pricing_key_is_none(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """LangChain adapter returns ``pricing_key=None`` because the model
+    is hidden inside the Runnable. The executor should record cost=0
+    rather than crash with KeyError."""
+    import yaml  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "langchain-demo")
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.LANGCHAIN.value
+    spec_dict["model"]["provider"] = "fake.module:fake_factory"
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+    bundle = load_agent(bundle_dir)
+
+    class OpaqueModelProvider(MockProvider):
+        def pricing_key(self, provider: str) -> str | None:
+            return None
+
+    registry = ProviderRegistry(default_litellm=MockProvider())
+    registry.register(AgentRuntime.LANGCHAIN, OpaqueModelProvider())
+    executor = Executor(registry=registry, pricing=pricing, storage=storage, tracer=tracer)
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    assert response.status == "success"
+    assert response.metrics.cost_usd == 0.0
+
+
+@pytest.mark.unit
+async def test_executor_rejects_unregistered_runtime_at_execute_time(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """If an agent's ``runtime:`` field doesn't have a registered
+    provider (the v0.5 baseline for native_anthropic / native_openai /
+    langchain), the executor surfaces a schema_error — same exit shape
+    as a bad input schema. Retries don't help here, so failing fast is
+    the right call."""
+    import yaml  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "unwired")
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.LANGCHAIN.value
+    # LangChain agents use entry-point specs (must contain a colon) —
+    # the AgentSpec cross-field validator rejects bare strings.
+    spec_dict["model"] = {"provider": "fake.module:fake_factory"}
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+
+    bundle = load_agent(bundle_dir)
+    executor = Executor(
+        provider=MockProvider(),
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+    )
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    assert response.status == "error"
+    assert response.error is not None
+    assert response.error.type == "schema_error"
+    # The error message names the missing runtime so the operator can
+    # tell what's not wired.
+    assert "langchain" in response.error.message
+
+
+@pytest.mark.unit
+def test_executor_requires_provider_or_registry(
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """At least one of ``provider=`` or ``registry=`` must be passed —
+    construct-time validation prevents the "no provider wired" footgun."""
+    with pytest.raises(ValueError, match="provider= or registry="):
+        Executor(pricing=pricing, storage=storage, tracer=tracer)
+
+
+@pytest.mark.unit
+def test_executor_rejects_both_provider_and_registry(
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """Passing BOTH is ambiguous — which one wins? Reject construction
+    so the caller picks one explicitly."""
+    with pytest.raises(ValueError, match="not both"):
+        Executor(
+            provider=MockProvider(),
+            registry=ProviderRegistry(default_litellm=MockProvider()),
+            pricing=pricing,
+            storage=storage,
+            tracer=tracer,
+        )
+
+
+@pytest.mark.unit
+async def test_executor_enforces_runtime_policy_at_execute_time(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """A bundle that opts into a banned runtime should fail at execute
+    time with a policy_violation error — even if validate was skipped.
+    Defense-in-depth: a worker that loaded an agent over HTTP can't
+    bypass the project's 'A by default' stance."""
+    import yaml  # noqa: PLC0415
+
+    from movate.core.config import RuntimePolicy  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "demo")
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.NATIVE_ANTHROPIC.value
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+    bundle = load_agent(bundle_dir)
+
+    # Build a registry that DOES have native_anthropic wired — so the
+    # rejection is from the policy, not from "runtime missing".
+    registry = ProviderRegistry(default_litellm=MockProvider())
+    registry.register(AgentRuntime.NATIVE_ANTHROPIC, MockProvider())
+
+    executor = Executor(
+        registry=registry,
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+        runtime_policy=RuntimePolicy(allowed=[AgentRuntime.LITELLM]),
+    )
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    assert response.status == "error"
+    assert response.error is not None
+    assert response.error.type == "policy_violation"
+    assert "native_anthropic" in response.error.message
+    assert "litellm" in response.error.message
+
+
+@pytest.mark.unit
+async def test_executor_runtime_policy_permissive_by_default(
+    tmp_path: Path,
+    pricing: PricingTable,
+    storage: InMemoryStorage,
+    tracer: NullTracer,
+) -> None:
+    """Without an explicit ``runtime_policy=``, the executor lets every
+    registered runtime through — matches the v0.5 baseline behavior so
+    existing tests / code paths aren't affected."""
+    import yaml  # noqa: PLC0415
+
+    bundle_dir = _scaffold(tmp_path / "demo")
+    yaml_path = bundle_dir / "agent.yaml"
+    spec_dict = yaml.safe_load(yaml_path.read_text())
+    spec_dict["runtime"] = AgentRuntime.NATIVE_ANTHROPIC.value
+    yaml_path.write_text(yaml.safe_dump(spec_dict))
+    bundle = load_agent(bundle_dir)
+
+    registry = ProviderRegistry(default_litellm=MockProvider())
+    registry.register(AgentRuntime.NATIVE_ANTHROPIC, MockProvider())
+
+    executor = Executor(
+        registry=registry,
+        pricing=pricing,
+        storage=storage,
+        tracer=tracer,
+        # No runtime_policy — permissive default.
+    )
+    response = await executor.execute(bundle, RunRequest(agent="demo", input={"text": "hi"}))
+    assert response.status == "success"
 
 
 # ---------------------------------------------------------------------------

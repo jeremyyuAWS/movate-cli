@@ -27,3 +27,13 @@ eval:
 #   deny_models:
 #     - openai/gpt-3.5-turbo
 #   max_cost_per_run_usd: 0.50
+
+# 'A by default': every agent goes through LiteLLM. Native-SDK escape
+# hatches (runtime: native_anthropic / native_openai / langchain) are
+# REJECTED at validate time. This is the project's strategic stance —
+# LiteLLM's portability beats per-provider feature parity for the
+# common case. Lift this restriction explicitly (add a runtime to the
+# allowed list) when a specific agent has a justified need for native
+# features (MCP, strict structured outputs, an existing LangChain chain).
+runtime:
+  allowed: [litellm]

@@ -26,6 +26,17 @@ console = Console()
 
 _REQUIRED_DEPS = ("typer", "rich", "pydantic", "yaml", "jinja2", "litellm", "aiosqlite")
 _OPTIONAL_DEPS = ("langfuse", "opentelemetry", "asyncpg", "fastapi")
+
+# Map each AgentRuntime to (probe-module, extras-install-hint). Used by
+# the runtime section of ``movate doctor`` to report what's wired vs.
+# what's an `uv add 'movate-cli[...]'` away.
+_RUNTIME_PROBES = (
+    # litellm is always wired (it's a required dep above).
+    ("litellm", "litellm", None),
+    ("native_anthropic", "anthropic", "anthropic"),
+    ("native_openai", "openai", "openai"),
+    ("langchain", "langchain_core", "langchain"),
+)
 _PROVIDER_KEYS = (
     ("OPENAI_API_KEY", "OpenAI"),
     ("ANTHROPIC_API_KEY", "Anthropic"),
@@ -87,6 +98,24 @@ def doctor(
     for mod in _OPTIONAL_DEPS:
         spec = importlib.util.find_spec(mod)
         table.add_row(f"opt: {mod}", _ok("") if spec else _missing("not installed"))
+
+    table.add_row("", "")
+
+    # AgentRuntime probes — which `runtime:` values in agent.yaml will
+    # actually resolve to an adapter on THIS install? litellm is always
+    # available; the rest depend on whether the matching extra is
+    # installed (`uv add 'movate-cli[anthropic]'` etc.).
+    for runtime_name, probe_module, extra_name in _RUNTIME_PROBES:
+        spec = importlib.util.find_spec(probe_module)
+        if spec is not None:
+            status = _ok("adapter available")
+        elif extra_name is not None:
+            status = _missing(f"install with: uv add 'movate-cli[{extra_name}]'")
+        else:
+            # Should not happen — litellm is in _REQUIRED_DEPS — but the
+            # branch keeps mypy happy.
+            status = "[red]missing[/red]"  # pragma: no cover
+        table.add_row(f"runtime: {runtime_name}", status)
 
     table.add_row("", "")
 
