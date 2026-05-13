@@ -247,8 +247,122 @@ class AgentCreatedView(BaseModel):
     "schema/input.json", "schema/output.json"]``."""
 
 
+class AgentDatasetInfo(BaseModel):
+    """Dataset metadata (size + sample row count + digest) for the
+    agent-detail view. Excludes row contents — the Angular UI shows
+    "150 cases" but doesn't render the full dataset inline.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    """Path relative to the agent dir, e.g. ``evals/dataset.jsonl``."""
+    case_count: int
+    """Non-empty lines in the JSONL — what ``mdk eval`` would walk."""
+    sha256_prefix: str
+    """First 12 chars of the dataset's SHA-256, for change detection."""
+    size_bytes: int
+
+
+class AgentDetailView(BaseModel):
+    """``GET /api/v1/agents/{name}`` response — everything the Angular
+    agent-profile view renders, in one round-trip.
+
+    Mirrors what ``mdk show <agent>`` prints, but as structured JSON
+    for the Angular UI to consume. Includes:
+
+    * Spec metadata (name, version, description, owner, marketplace
+      fields from item 29)
+    * Model config (provider + params + fallback chain)
+    * Prompt body + content-addressed hash (so the UI can show a
+      "prompt changed" badge when re-fetching)
+    * Resolved I/O schemas (the dicts MDK would feed to its validator
+      — the UI renders these as collapsible JSON blocks)
+    * Skills / contexts metadata
+    * Dataset stats (if present)
+    * The full canonical bundle's relative paths so the UI can show
+      "files in this agent"
+
+    NOT included (deferred to follow-up endpoints):
+
+    * Recent eval scores — that's ``GET /api/v1/evals?agent={name}``
+      (item 62)
+    * Run history — that's ``GET /api/v1/jobs?agent={name}`` (item 74)
+    * Trace replay — that's ``GET /api/v1/runs/{run_id}/trace``
+      (item 65)
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # --- Identity + metadata ---
+    name: str
+    version: str
+    description: str = ""
+    owner: str = ""
+
+    # Marketplace metadata (item 29, Group F). Always present (empty
+    # strings / empty list for agents that haven't opted in).
+    role: str = ""
+    persona: str = ""
+    capabilities: list[str] = []
+    tags: list[str] = []
+
+    # --- Model config ---
+    model_provider: str
+    """LiteLLM-style provider string, e.g. ``"openai/gpt-4o-mini-2024-07-18"``."""
+    model_params: dict[str, Any] = {}
+    """Optional temperature / max_tokens / etc."""
+    model_fallback: list[str] = []
+    """Ordered fallback provider strings; empty for single-model agents."""
+    runtime: str
+    """Which AgentRuntime adapter the agent targets: litellm,
+    native_anthropic, native_openai, langchain, lyzr."""
+
+    # --- Prompt + schemas (rendered for the UI) ---
+    prompt: str
+    """The prompt template body — rendered as-is (no Jinja
+    substitution). The UI shows this in a code editor."""
+    prompt_hash: str
+    """SHA-256 of the prompt body. UI uses this to detect changes
+    between fetches and show a "prompt changed" badge."""
+    input_schema: dict[str, Any]
+    """Resolved input JSON schema (inline or loaded from
+    schema/input.json). UI renders as a collapsible JSON block."""
+    output_schema: dict[str, Any]
+    """Resolved output JSON schema."""
+
+    # --- Skills + contexts (item 29 / ADR 002) ---
+    skills: list[str] = []
+    """Names referencing this project's skills/ registry. Empty list
+    = single-shot agent (no tool-use loop)."""
+    contexts: list[str] = []
+    """Names referencing this project's contexts/ folder. Empty list
+    = no shared context prepended."""
+
+    # --- Eval dataset stats ---
+    dataset: AgentDatasetInfo | None = None
+    """Dataset metadata if ``evals/dataset.jsonl`` exists. ``None``
+    means the agent has no dataset yet — the UI shows "no eval set
+    configured" and disables the "Run Eval" button."""
+
+    # --- Operational budgets / timeouts ---
+    timeout_call_ms: int
+    timeout_total_ms: int
+    max_cost_usd_per_run: float
+
+    # --- Canonical layout (mirrors AgentCreatedView.files_persisted) ---
+    agent_dir: str
+    """Path-relative-to-agents-root. Matches what POST returned."""
+    files: list[str]
+    """Sorted list of files in the canonical layout that exist on
+    disk for this agent. UI uses this to render "files in this
+    agent" + "View on GitHub" links per file."""
+
+
 __all__ = [
     "AgentCreatedView",
+    "AgentDatasetInfo",
+    "AgentDetailView",
     "AgentListView",
     "AgentView",
     "HealthView",
