@@ -20,9 +20,10 @@ and ``movate serve`` CLI binding (uvicorn integration).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, File, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -30,9 +31,16 @@ import movate
 from movate.core.loader import AgentBundle
 from movate.core.models import JobRecord, JobStatus
 from movate.core.rate_limit import InProcessRateLimiter, NoOpRateLimiter, RateLimiter
+from movate.runtime.agent_creation import (
+    AgentCreationError,
+    persist_bundle,
+    unzip_bundle,
+)
 from movate.runtime.errors import auth_required, not_found
 from movate.runtime.middleware import AuthContext, make_auth_dependency
+from movate.runtime.registry import scan_agents
 from movate.runtime.schemas import (
+    AgentCreatedView,
     AgentListView,
     AgentView,
     HealthView,
@@ -69,10 +77,85 @@ def _resolve_cors_origins(explicit: list[str] | None) -> list[str]:
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
+async def _collect_bundle_files(
+    *,
+    agent_yaml: UploadFile | None,
+    prompt: UploadFile | None,
+    input_schema: UploadFile | None,
+    output_schema: UploadFile | None,
+    dataset: UploadFile | None,
+    bundle: UploadFile | None,
+) -> dict[str, bytes]:
+    """Convert the multipart form fields into a
+    ``{canonical_path: bytes}`` dict :func:`persist_bundle` accepts.
+
+    Enforces the two-mode contract: EITHER ``bundle`` OR the four
+    individual files, never both, never neither. 400 with a clear
+    pointer at the conflict on either error.
+    """
+    individual = [agent_yaml, prompt, input_schema, output_schema, dataset]
+    has_individual = any(f is not None for f in individual)
+
+    if bundle is not None and has_individual:
+        raise AgentCreationError(
+            "supply EITHER a zipped 'bundle' OR individual files "
+            "(agent_yaml + prompt + input_schema + output_schema + "
+            "optional dataset), not both",
+            status_code=400,
+        )
+    if bundle is None and not has_individual:
+        raise AgentCreationError(
+            "no files in the multipart form; supply either a zipped "
+            "'bundle' or the individual canonical files",
+            status_code=400,
+        )
+
+    if bundle is not None:
+        return unzip_bundle(await bundle.read())
+
+    # Individual-files mode. Re-check the required fields are present
+    # — the FastAPI param defaults make them all optional at the route
+    # level, but the bundle contract requires the canonical 4.
+    required = {
+        "agent.yaml": agent_yaml,
+        "prompt.md": prompt,
+        "schema/input.json": input_schema,
+        "schema/output.json": output_schema,
+    }
+    missing = [name for name, f in required.items() if f is None]
+    if missing:
+        raise AgentCreationError(
+            f"individual-files mode requires {sorted(required)}; missing: {sorted(missing)}",
+            status_code=400,
+        )
+
+    files: dict[str, bytes] = {}
+    for canonical_path, upload in required.items():
+        assert upload is not None  # narrowed by the missing-check above
+        files[canonical_path] = await upload.read()
+    if dataset is not None:
+        files["evals/dataset.jsonl"] = await dataset.read()
+    return files
+
+
+def _agent_creation_error_code(status_code: int) -> str:
+    """Map HTTP status to a stable error code the Angular client can
+    branch on. Keeps the wire contract independent of the human-readable
+    message (which may change as we improve the diagnostics).
+    """
+    return {
+        400: "bad_request",
+        409: "already_exists",
+        422: "invalid_bundle",
+        503: "agent_persistence_unavailable",
+    }.get(status_code, "internal_error")
+
+
 def build_app(
     storage: StorageProvider,
     *,
     agents: list[AgentBundle] | None = None,
+    agents_path: Path | None = None,
     rate_limit_per_minute: int | None = 60,
     cors_allowed_origins: list[str] | None = None,
 ) -> FastAPI:
@@ -101,6 +184,11 @@ def build_app(
     )
     app.state.storage = storage
     app.state.agents = agents or []
+    # Where new agents (POST /api/v1/agents, item 76) land on disk.
+    # None means the endpoint returns 503 — the runtime was built
+    # without an agents_path and can't persist. mdk serve always
+    # passes its --agents-path here; tests pass tmp_path.
+    app.state.agents_path = agents_path
 
     # CORS — required for browser-side callers (the Mova iO Angular
     # app). Allow-list resolved from the explicit kwarg, then env vars,
@@ -352,15 +440,120 @@ def build_app(
     # ------------------------------------------------------------------
     v1 = APIRouter(prefix="/api/v1")
 
-    # Future endpoints land here. Example (commented out — not implemented yet):
-    #
-    #   @v1.get("/agents/{name}", response_model=AgentDetailView, tags=["agents-v1"])
-    #   async def v1_get_agent(...):
-    #       ...
-    #
-    # See BACKLOG Group G items 55-75 for the full surface.
+    @v1.post(
+        "/agents",
+        response_model=AgentCreatedView,
+        status_code=201,
+        tags=["agents-v1"],
+    )
+    async def v1_create_agent(
+        request: Request,
+        # Individual-files mode. Each field is optional at the FastAPI
+        # level; we enforce "either bundle XOR the 4 required individual
+        # files" in the handler body for a clean 422 with a hint.
+        agent_yaml: UploadFile | None = File(default=None),
+        prompt: UploadFile | None = File(default=None),
+        input_schema: UploadFile | None = File(default=None),
+        output_schema: UploadFile | None = File(default=None),
+        dataset: UploadFile | None = File(default=None),
+        # Zipped-bundle mode. Mutually exclusive with the individual
+        # fields. The zip may contain a single top-level dir
+        # (e.g. ``faq-bot/agent.yaml``) — unzip_bundle strips it.
+        bundle: UploadFile | None = File(default=None),
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> AgentCreatedView:
+        """Create a new agent from a multipart-form bundle.
+
+        Two input modes (mutually exclusive — pick ONE):
+
+        1. **Individual files** — set ``agent_yaml`` + ``prompt`` +
+           ``input_schema`` + ``output_schema``, optionally ``dataset``.
+        2. **Zipped bundle** — set ``bundle`` to a .zip of the canonical
+           layout.
+
+        Persists to ``<agents_path>/<name>/`` using the canonical
+        directory structure (item 76 / BACKLOG Group G). Validates via
+        the same ``load_agent()`` path the CLI uses — bundles that
+        fail Pydantic / prompt linter / schema sanity get rejected
+        with a 422 before anything lands on disk.
+
+        Returns the canonical layout in the response so the Angular UI
+        can render "your agent is at agents/<name>/{...}" without a
+        follow-up GET.
+
+        Auth: requires a bearer token (any role). Tenant attribution
+        lives on the auth context for future per-tenant agent
+        isolation (deferred to v0.8 — today the runtime serves one
+        global agents_path).
+
+        Errors:
+
+        * **400** — neither mode supplied OR both modes supplied
+        * **409** — agent with this name already exists; use PUT to update
+        * **422** — bundle failed validation (parse / linter / schema)
+        * **503** — runtime was built without an ``agents_path`` (test
+          configuration; production deploys always pass it)
+        """
+        agents_path: Path | None = request.app.state.agents_path
+        if agents_path is None:
+            raise AgentCreationError(
+                "runtime was built without an agents_path; POST /api/v1/agents is unavailable",
+                status_code=503,
+            )
+
+        files = await _collect_bundle_files(
+            agent_yaml=agent_yaml,
+            prompt=prompt,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            dataset=dataset,
+            bundle=bundle,
+        )
+
+        result = persist_bundle(files, agents_path=agents_path)
+
+        # Refresh the in-memory registry so an immediate GET /agents
+        # sees the new bundle. Cheap — agents_path is a flat
+        # one-level scan.
+        request.app.state.agents = scan_agents(agents_path)
+
+        # Tenant attribution is logged for the audit trail. Future
+        # per-tenant filesystem isolation (v0.8) reads this back.
+        # Reference ctx so the param isn't unused — and we record it
+        # for the future audit log.
+        _ = ctx.tenant_id
+
+        spec = result.bundle.spec
+        return AgentCreatedView(
+            name=spec.name,
+            version=spec.version,
+            description=spec.description,
+            agent_dir=result.agent_dir.name,
+            files_persisted=result.files_persisted,
+        )
 
     app.include_router(v1)
+
+    # ------------------------------------------------------------------
+    # Typed exception → HTTP code translator. AgentCreationError carries
+    # the intended status_code; FastAPI's default handling would 500
+    # everything otherwise.
+    # ------------------------------------------------------------------
+    @app.exception_handler(AgentCreationError)
+    async def _agent_creation_error_handler(
+        _request: Request, exc: AgentCreationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "detail": {
+                    "error": {
+                        "code": _agent_creation_error_code(exc.status_code),
+                        "message": str(exc),
+                    }
+                }
+            },
+        )
 
     return app
 

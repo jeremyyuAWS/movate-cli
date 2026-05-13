@@ -221,7 +221,34 @@ class AgentListView(BaseModel):
     agents: list[AgentView]
 
 
+class AgentCreatedView(BaseModel):
+    """``POST /api/v1/agents`` response — the canonical layout the
+    runtime persisted to disk, plus the resolved spec metadata so
+    the Angular UI can immediately render the new agent's profile
+    without a follow-up ``GET /api/v1/agents/{name}`` round-trip.
+
+    The ``files_persisted`` array is verbatim what landed under
+    ``<agents_path>/<name>/`` — the UI uses this to render
+    "your agent is at agents/faq-bot/{...}".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: str
+    description: str = ""
+    agent_dir: str
+    """Path-relative-to-agents-root where the bundle landed.
+    E.g. ``faq-bot`` (NOT the absolute filesystem path — the Angular
+    UI doesn't care about the runtime's CWD)."""
+    files_persisted: list[str]
+    """Sorted list of files written, relative to ``agent_dir``.
+    E.g. ``["agent.yaml", "evals/dataset.jsonl", "prompt.md",
+    "schema/input.json", "schema/output.json"]``."""
+
+
 __all__ = [
+    "AgentCreatedView",
     "AgentListView",
     "AgentView",
     "HealthView",

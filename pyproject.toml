@@ -30,6 +30,11 @@ runtime = [
     "uvicorn[standard]>=0.29",
     "asyncpg>=0.29",
     "bcrypt>=4.0",
+    # python-multipart is FastAPI's required dep for parsing
+    # multipart/form-data uploads. Used by POST /api/v1/agents
+    # (item 76) for the canonical-bundle creation flow. FastAPI
+    # doesn't pull it in transitively — it's an explicit extra.
+    "python-multipart>=0.0.9",
 ]
 langfuse = ["langfuse>=2.30,<3"]
 otel = [
