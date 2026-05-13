@@ -61,6 +61,29 @@ def render_eval_markdown(summary: EvalSummary, *, gate: float) -> str:
     lines.append(f"| Total cost | ${summary.total_cost_usd:.6f} |")
     lines.append("")
 
+    # Dimensional rollup — only when the dataset opted in to at least
+    # one dataset-driven dim (faithfulness via ``grounding`` or coverage
+    # via ``expected_coverage``). Latency is always scored on success
+    # but on its own it's not interesting enough to render the section;
+    # accuracy is already covered by the headline ``Mean score`` row.
+    # Net: legacy datasets keep the exact v0.5 view, no extra noise.
+    dm = summary.dimensional_means
+    if any(v is not None for v in (dm.faithfulness, dm.coverage)):
+        lines.append("**Dimensional breakdown**")
+        lines.append("")
+        lines.append("| Dimension | Mean |")
+        lines.append("|---|---|")
+        for name, value in (
+            ("accuracy", dm.accuracy),
+            ("faithfulness", dm.faithfulness),
+            ("coverage", dm.coverage),
+            ("latency", dm.latency),
+        ):
+            if value is None:
+                continue
+            lines.append(f"| {name} | {value:.3f} |")
+        lines.append("")
+
     if summary.cases:
         lines.append(f"<details><summary>Per-case results ({summary.sample_count})</summary>")
         lines.append("")

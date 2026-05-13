@@ -114,6 +114,59 @@ Rich table with per-case scores, mean, pass-rate, total cost, and a
 verdict. Exits 1 if the gate fails — wire this into CI to block bad
 PRs.
 
+#### Four-dimension scoring (v0.6+)
+
+Every eval run scores up to four dimensions per case:
+
+| Dimension | Always? | Driven by | Scoring |
+|---|---|---|---|
+| **accuracy** | yes | `expected` | exact-match OR LLM-as-judge (existing v0.5 logic) |
+| **faithfulness** | opt-in | `grounding` | LLM judge: "does the answer stay true to this context?" |
+| **coverage** | opt-in | `expected_coverage` | deterministic substring match — fraction of topics present |
+| **latency** | yes (on success) | `latency_budget_ms` *or* agent `timeouts.call_ms` | 1.0 within budget, linear decay to 0.0 at 2x budget |
+
+Dataset rows opt into the new dims by adding optional fields next to
+`input` / `expected`:
+
+```jsonl
+{"input": {"text": "warranty?"}, "expected": {"message": "1 year, parts only"},
+ "grounding": "Warranty terms: 1 year on parts, no labor coverage.",
+ "expected_coverage": ["parts", "1 year"],
+ "latency_budget_ms": 1500}
+```
+
+The CLI surfaces the per-dim rollup as a small `Dimensional breakdown`
+table beneath the main eval output — but **only when** at least one
+case opted in to faithfulness or coverage. Legacy datasets see the
+same v0.5 output, byte-for-byte.
+
+**Back-compat for the gate**: `--gate 0.7` still means "70% accuracy
+across cases". The other three dims are reporting-only. A future flag
+will add `--gate-faithfulness` / `--gate-coverage` for per-dim CI gates;
+until then the gate keeps the v0.5 contract intact.
+
+The JSON output (`--output json`) carries the rollup at the top level
+plus per-run dim scores under each case:
+
+```json
+{
+  "dimensional_means": {
+    "accuracy": 1.0,
+    "faithfulness": 0.92,
+    "coverage": 0.83,
+    "latency": 0.7
+  },
+  "cases": [{
+    "dimensions_per_run": [{
+      "accuracy":    {"value": 1.0, "rationale": "exact match"},
+      "faithfulness":{"value": 0.9, "rationale": "minor unsupported claim"},
+      "coverage":    {"value": 1.0, "rationale": "all topics covered"},
+      "latency":     {"value": 0.5, "rationale": "over budget by 750ms"}
+    }]
+  }]
+}
+```
+
 ### 4. Capture a baseline; detect regressions
 
 ```bash

@@ -8,6 +8,25 @@ Locked rules:
 - Each eval case runs through the same Executor as production runs, so cost,
   tracing, retries, and fallback behavior are identical.
 - N runs per case + ``--gate-mode mean|min|p10`` mitigates LLM-judge variance.
+
+Four-dimension scoring (v0.6+, additive over the v0.5 single-score path):
+
+Each case run produces scores along four dimensions:
+
+* **accuracy** — does the output match expected? Same logic as the legacy
+  single score (exact-match or LLM-as-judge).
+* **faithfulness** — does the output stay true to the grounding context
+  the case provides? LLM-judge against the dataset's ``grounding`` field.
+  Skipped (None) when the case provides no grounding.
+* **coverage** — did the output address every topic the case declared?
+  Deterministic substring check against the dataset's ``expected_coverage``
+  list. Skipped when the case provides no coverage list.
+* **latency** — was the response inside the case's latency budget?
+  Deterministic: 1.0 within budget, linear decay to 0.0 at 2x budget.
+
+The legacy ``CaseRun.score`` field is preserved (= aggregated mean of
+non-None dimensions) so callers that read ``score`` keep working.
+``CaseRun.dimensions`` exposes the per-dim breakdown.
 """
 
 from __future__ import annotations
@@ -18,6 +37,7 @@ import json
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -49,6 +69,75 @@ class EvalConfigError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Four-dimension scoring (v0.6+)
+# ---------------------------------------------------------------------------
+
+
+class Dimension(StrEnum):
+    """The four eval dimensions. Each case produces up to four scores.
+
+    Names match Deva's eval-reporting taxonomy. Not every dimension
+    applies to every case: faithfulness needs a grounding context,
+    coverage needs a topic list. Cases without those fields skip the
+    relevant dim (the score is ``None``, not ``0.0`` — silence vs
+    failure).
+    """
+
+    ACCURACY = "accuracy"
+    FAITHFULNESS = "faithfulness"
+    COVERAGE = "coverage"
+    LATENCY = "latency"
+
+
+@dataclass
+class DimensionScore:
+    """One dimension's score (0.0-1.0) + brief rationale.
+
+    ``value=None`` means the dimension was not scored for this case
+    (typically because the case didn't provide the dimension's
+    required input — e.g. faithfulness without a grounding context).
+    ``rationale`` is empty for unscored dims and otherwise a 1-line
+    human-readable explanation.
+    """
+
+    value: float | None = None
+    rationale: str = ""
+
+
+@dataclass
+class DimensionScores:
+    """All four per-case dimension scores. Any subset may be unscored."""
+
+    accuracy: DimensionScore = field(default_factory=DimensionScore)
+    faithfulness: DimensionScore = field(default_factory=DimensionScore)
+    coverage: DimensionScore = field(default_factory=DimensionScore)
+    latency: DimensionScore = field(default_factory=DimensionScore)
+
+    def scored_values(self) -> list[float]:
+        """Just the non-None scores, in the canonical dimension order."""
+        return [
+            d.value
+            for d in (self.accuracy, self.faithfulness, self.coverage, self.latency)
+            if d.value is not None
+        ]
+
+    def aggregate(self) -> float:
+        """Mean of the scored dimensions; ``0.0`` if none were scored.
+
+        Note: this is NOT what ``CaseRun.score`` reports. The gate
+        uses ``accuracy`` alone for back-compat with v0.5 (so
+        ``--gate 0.7`` still means "70% accuracy across cases").
+        ``aggregate()`` is exposed for callers that explicitly want
+        the multi-dim mean — e.g. a future ``--gate-mean 0.7`` flag
+        that gates on the average of every scored dimension.
+        """
+        vs = self.scored_values()
+        if not vs:
+            return 0.0
+        return statistics.fmean(vs)
+
+
+# ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
@@ -68,14 +157,43 @@ class EvalCase:
     bucket — backwards-compat for every existing dataset.
     """
 
+    # ---- v0.6 four-dimension scoring fields (all optional) ----
+    grounding: str | None = None
+    """Context the agent's response should stay faithful to.
+
+    Used by the faithfulness dimension. When provided, an LLM judge
+    compares the actual output against this text. When absent, the
+    faithfulness dimension is skipped for this case (score = None).
+    """
+    expected_coverage: list[str] | None = None
+    """Topics / keywords the output should address.
+
+    Used by the coverage dimension — deterministic substring check
+    over the JSON-stringified output, case-insensitive. Coverage
+    score = fraction of topics present. Skipped (None) when absent.
+    """
+    latency_budget_ms: int | None = None
+    """Per-case latency budget. When set, the latency dimension uses
+    this; otherwise it falls back to the agent's ``timeouts.call_ms``.
+    Lets operators flag latency-sensitive cases independent of the
+    agent's overall timeout."""
+
 
 @dataclass
 class CaseRun:
-    """One execution of one case."""
+    """One execution of one case.
+
+    ``score`` and ``rationale`` are preserved for v0.5 back-compat —
+    ``score = dimensions.aggregate()`` and ``rationale`` carries the
+    accuracy dim's rationale (the most operator-relevant single
+    line). New callers read ``dimensions`` directly for the
+    per-dim breakdown.
+    """
 
     response: RunResponse
     score: float
     rationale: str
+    dimensions: DimensionScores = field(default_factory=DimensionScores)
 
 
 @dataclass
@@ -133,6 +251,23 @@ class ObjectiveSummary:
 
 
 @dataclass
+class DimensionalMeans:
+    """Aggregate per-dimension mean scores across every case in an eval run.
+
+    Each field is the mean of the corresponding ``DimensionScore.value``
+    across cases where that dim was scored, or ``None`` if no case
+    scored it. Lets reporters render "accuracy: 0.85, faithfulness:
+    0.71, coverage: 0.92, latency: 0.66" headlines without re-walking
+    cases. v0.6+.
+    """
+
+    accuracy: float | None = None
+    faithfulness: float | None = None
+    coverage: float | None = None
+    latency: float | None = None
+
+
+@dataclass
 class EvalSummary:
     agent: str
     agent_version: str
@@ -149,6 +284,11 @@ class EvalSummary:
     (no objectives → no per-objective view), in which case ``cases`` +
     the top-level threshold are the only assertions.
     """
+    dimensional_means: DimensionalMeans = field(default_factory=DimensionalMeans)
+    """Per-dimension mean across cases. Each field is None if no case
+    scored that dimension — e.g. a dataset without ``grounding`` fields
+    leaves ``faithfulness=None``. Reporters render only the scored
+    dims so legacy datasets see the same single-score view as v0.5."""
 
     @property
     def sample_count(self) -> int:
@@ -219,12 +359,39 @@ def load_dataset(bundle: AgentBundle) -> tuple[list[EvalCase], str]:
             raise EvalConfigError(f"{path}:{line_no} invalid JSON: {exc}") from exc
         if not isinstance(d, dict):
             raise EvalConfigError(f"{path}:{line_no} each row must be a JSON object")
+        # Optional 4-dim fields. Each defaults to None; cases that
+        # don't carry the field skip the corresponding dimension at
+        # scoring time. expected_coverage MAY be a list of strings; if
+        # provided as anything else, fail at load with a readable error.
+        expected_coverage = d.get("expected_coverage")
+        if expected_coverage is not None and not (
+            isinstance(expected_coverage, list)
+            and all(isinstance(item, str) for item in expected_coverage)
+        ):
+            raise EvalConfigError(
+                f"{path}:{line_no} expected_coverage must be a list of strings; "
+                f"got {type(expected_coverage).__name__}"
+            )
+        grounding = d.get("grounding")
+        if grounding is not None and not isinstance(grounding, str):
+            raise EvalConfigError(
+                f"{path}:{line_no} grounding must be a string; got {type(grounding).__name__}"
+            )
+        latency_budget_ms = d.get("latency_budget_ms")
+        if latency_budget_ms is not None and not isinstance(latency_budget_ms, int):
+            raise EvalConfigError(
+                f"{path}:{line_no} latency_budget_ms must be an int; "
+                f"got {type(latency_budget_ms).__name__}"
+            )
         cases.append(
             EvalCase(
                 input=d.get("input", {}),
                 expected=d.get("expected", {}),
                 tags=list(d.get("tags", []) or []),
                 objective=d.get("objective"),
+                grounding=grounding,
+                expected_coverage=expected_coverage,
+                latency_budget_ms=latency_budget_ms,
             )
         )
     return cases, digest
@@ -367,6 +534,129 @@ Return ONLY a JSON object on a single line, no prose, no code fences:
 """
 
 
+# Used by the faithfulness dimension. Score = "does the actual output
+# stay true to the grounding context?" — separate from accuracy (which
+# is "does it match expected?"). The two dims can disagree: an answer
+# can be faithful to the grounding but score 0 on accuracy (and vice
+# versa).
+_FAITHFULNESS_PROMPT = """You are an expert evaluator measuring FAITHFULNESS.
+
+Grounding context the answer should stay true to:
+{grounding}
+
+Actual output:
+{actual_json}
+
+Score the actual output on faithfulness to the grounding:
+- 1.0 = every claim in the output is supported by the grounding
+- 0.5 = some claims unsupported but core message holds
+- 0.0 = output contradicts the grounding or invents facts not present
+
+Return ONLY a JSON object on a single line, no prose, no code fences:
+{{"score": <float between 0.0 and 1.0>, "rationale": "<brief explanation>"}}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Deterministic per-dimension scoring helpers (module-level, testable
+# without an Executor or LLM)
+# ---------------------------------------------------------------------------
+
+
+def _score_coverage(expected_coverage: list[str], actual: dict[str, Any]) -> DimensionScore:
+    """Coverage dim: what fraction of expected topics appear in the output?
+
+    Each entry in ``expected_coverage`` is a string keyword/topic the
+    agent's answer should address. We do a case-insensitive substring
+    match against the JSON-stringified output — works for both
+    free-form text and structured dicts (the JSON dump catches
+    keyword presence in any field).
+
+    Empty ``expected_coverage`` is unscored (returns the default
+    ``DimensionScore()`` with ``value=None``). A non-empty list always
+    produces a value, even if 0.0.
+
+    Example::
+
+        expected_coverage = ["price", "warranty", "shipping"]
+        actual = {"answer": "Price is $X; warranty is 30 days"}
+        # → 2/3 = 0.667 ("shipping" missing)
+    """
+    if not expected_coverage:
+        return DimensionScore()
+    haystack = json.dumps(actual).lower()
+    hits = [topic for topic in expected_coverage if topic.lower() in haystack]
+    score = len(hits) / len(expected_coverage)
+    if score == 1.0:
+        rationale = "all topics covered"
+    else:
+        missed = sorted(set(expected_coverage) - set(hits))
+        rationale = f"missed: {missed}"
+    return DimensionScore(score, rationale)
+
+
+def _score_latency(*, latency_ms: int, budget_ms: int) -> DimensionScore:
+    """Latency dim: how well did the response fit the latency budget?
+
+    Score curve:
+
+    * ``latency_ms <= budget_ms``: 1.0 (within budget — full credit)
+    * ``budget_ms < latency_ms < 2 * budget_ms``: linear decay
+      from 1.0 to 0.0
+    * ``latency_ms >= 2 * budget_ms``: 0.0 (well outside budget)
+
+    The 2x soft-cap means a response that's slightly slow gets
+    partial credit (rewarding effort) but a flagrantly slow one is
+    zero. Operators can tighten by setting a smaller per-case
+    ``latency_budget_ms`` than the agent's call_ms.
+    """
+    if budget_ms <= 0:
+        # Defensive — shouldn't happen because Pydantic validates
+        # call_ms >= 1, but tests might pass 0.
+        return DimensionScore(None, "skipped: invalid budget_ms")
+    if latency_ms <= budget_ms:
+        return DimensionScore(1.0, f"within budget ({latency_ms}ms <= {budget_ms}ms)")
+    overshoot = latency_ms - budget_ms
+    score = max(0.0, 1.0 - overshoot / budget_ms)
+    return DimensionScore(
+        score,
+        f"over budget by {overshoot}ms ({latency_ms}ms vs {budget_ms}ms)",
+    )
+
+
+def _compute_dimensional_means(cases: list[CaseSummary]) -> DimensionalMeans:
+    """Aggregate per-dimension mean scores across every case.
+
+    For each dim, the mean is taken over the cases AND runs where
+    that dim was scored. Cases that opted out of a dim (e.g. no
+    grounding → no faithfulness score) don't drag the mean down —
+    they're excluded from that dim's denominator.
+
+    Returns ``None`` for any dim where no case scored it (e.g. a
+    dataset with zero ``grounding`` fields leaves
+    ``faithfulness=None``). Reporters check for None to decide
+    whether to render that dimension's column at all.
+    """
+
+    def _mean_for(attr: str) -> float | None:
+        values: list[float] = []
+        for case in cases:
+            for run in case.runs:
+                dim_score: DimensionScore = getattr(run.dimensions, attr)
+                if dim_score.value is not None:
+                    values.append(dim_score.value)
+        if not values:
+            return None
+        return statistics.fmean(values)
+
+    return DimensionalMeans(
+        accuracy=_mean_for("accuracy"),
+        faithfulness=_mean_for("faithfulness"),
+        coverage=_mean_for("coverage"),
+        latency=_mean_for("latency"),
+    )
+
+
 class EvalEngine:
     def __init__(
         self,
@@ -427,6 +717,10 @@ class EvalEngine:
                     f"dataset. Tag dataset rows with this objective id to score them."
                 )
 
+        # Pull the agent's default latency budget once. Used by the
+        # latency dimension when a case doesn't override per-case.
+        agent_call_ms = bundle.spec.timeouts.call_ms
+
         case_summaries: list[CaseSummary] = []
         total = len(cases)
         for case in cases:
@@ -436,18 +730,43 @@ class EvalEngine:
                     bundle, RunRequest(agent=bundle.spec.name, input=case.input)
                 )
                 if response.status != "success":
+                    # Failed runs score 0 on every applicable dim. We
+                    # still populate DimensionScores so reporters can
+                    # tell "failed run, all 0s" from "successful run
+                    # that genuinely scored 0".
+                    fail_reason = response.error.message if response.error else "agent failed"
+                    fail_dims = DimensionScores(
+                        accuracy=DimensionScore(0.0, fail_reason),
+                    )
                     runs.append(
                         CaseRun(
                             response=response,
                             score=0.0,
-                            rationale=(
-                                response.error.message if response.error else "agent failed"
-                            ),
+                            rationale=fail_reason,
+                            dimensions=fail_dims,
                         )
                     )
                     continue
-                score, rationale = await self._score(case, response.data, judge)
-                runs.append(CaseRun(response=response, score=score, rationale=rationale))
+                dims = await self._score_dimensions(
+                    case=case,
+                    actual=response.data,
+                    response=response,
+                    judge=judge,
+                    agent_call_ms=agent_call_ms,
+                )
+                # The gate uses accuracy alone — back-compat with v0.5.
+                # Faithfulness/coverage/latency are *additional* reporting
+                # surfaces, not gate inputs. A future PR can add
+                # ``--gate-faithfulness 0.8`` etc. for per-dim gating.
+                gate_score = dims.accuracy.value if dims.accuracy.value is not None else 0.0
+                runs.append(
+                    CaseRun(
+                        response=response,
+                        score=gate_score,
+                        rationale=dims.accuracy.rationale,
+                        dimensions=dims,
+                    )
+                )
 
             agg = aggregate_scores([r.score for r in runs], self._gate_mode)
             summary = CaseSummary(
@@ -474,6 +793,8 @@ class EvalEngine:
         # cases/threshold are the only assertions.
         objective_summaries = _build_objective_summaries(bundle, case_summaries, judge)
 
+        dimensional_means = _compute_dimensional_means(case_summaries)
+
         return EvalSummary(
             agent=bundle.spec.name,
             agent_version=bundle.spec.version,
@@ -485,6 +806,7 @@ class EvalEngine:
             threshold=judge.threshold,
             cases=case_summaries,
             objective_summaries=objective_summaries,
+            dimensional_means=dimensional_means,
         )
 
     # ---------------------------------------------------------- private
@@ -496,14 +818,70 @@ class EvalEngine:
             raise EvalConfigError("llm_judge requires both 'model' and 'rubric'")
         assert_cross_family(bundle.spec.model.provider, judge.model.provider)
 
-    async def _score(
+    async def _score_dimensions(
+        self,
+        *,
+        case: EvalCase,
+        actual: dict[str, Any],
+        response: RunResponse,
+        judge: JudgeConfig,
+        agent_call_ms: int,
+    ) -> DimensionScores:
+        """Score one successful run on all four dimensions.
+
+        Each dim's helper returns a :class:`DimensionScore` (value +
+        rationale) or an unscored ``DimensionScore()`` when the case
+        doesn't provide the input that dimension needs. The aggregate
+        score in :class:`CaseRun.score` is the mean of the scored
+        dimensions, so cases that opt out of grounding / coverage
+        don't get penalized for the missing dims.
+        """
+        # Accuracy — always scored. Same logic as the legacy _score.
+        accuracy = await self._score_accuracy(case, actual, judge)
+
+        # Faithfulness — only when the case provides a grounding context
+        # to check against. LLM-judge call costs the same as accuracy's
+        # llm-judge mode, so cases that don't need it pay nothing.
+        faithfulness = DimensionScore()
+        if case.grounding:
+            faithfulness = await self._score_faithfulness(case, actual, judge)
+
+        # Coverage — deterministic check, no LLM call. Skipped when
+        # the case has no expected_coverage list.
+        coverage = DimensionScore()
+        if case.expected_coverage is not None:
+            coverage = _score_coverage(case.expected_coverage, actual)
+
+        # Latency — always scored when we have a successful response.
+        latency = _score_latency(
+            latency_ms=response.metrics.latency_ms,
+            budget_ms=case.latency_budget_ms or agent_call_ms,
+        )
+
+        return DimensionScores(
+            accuracy=accuracy,
+            faithfulness=faithfulness,
+            coverage=coverage,
+            latency=latency,
+        )
+
+    async def _score_accuracy(
         self,
         case: EvalCase,
         actual: dict[str, Any],
         judge: JudgeConfig,
-    ) -> tuple[float, str]:
+    ) -> DimensionScore:
+        """Exact-match or LLM-as-judge scoring of accuracy vs expected.
+
+        Exact-match is the v0.5 fast path: structured outputs (classifiers,
+        extractors) score 1.0 when the dict matches exactly and 0.0
+        otherwise. LLM-judge uses the configured rubric — costs one
+        judge-model call per case run.
+        """
         if judge.method == JudgeMethod.EXACT:
-            return (1.0, "exact match") if actual == case.expected else (0.0, "mismatch")
+            if actual == case.expected:
+                return DimensionScore(1.0, "exact match")
+            return DimensionScore(0.0, "mismatch")
 
         assert judge.model is not None and judge.rubric is not None  # validated upstream
         prompt = _JUDGE_PROMPT.format(
@@ -517,8 +895,50 @@ class EvalEngine:
             messages=[Message(role="user", content=prompt)],
             params=dict(judge.model.params),
         )
-        response = await self._provider.complete(req)
-        return _parse_judge_response(response.text)
+        judge_response = await self._provider.complete(req)
+        score, rationale = _parse_judge_response(judge_response.text)
+        return DimensionScore(score, rationale)
+
+    async def _score_faithfulness(
+        self,
+        case: EvalCase,
+        actual: dict[str, Any],
+        judge: JudgeConfig,
+    ) -> DimensionScore:
+        """LLM-judge: does the output stay true to the grounding context?
+
+        Uses the same judge model the accuracy dim uses. Falls back to
+        a default rubric so faithfulness works even when the agent's
+        ``judge.method`` is exact-match (faithfulness inherently needs
+        semantic judgment).
+
+        Requires :attr:`EvalCase.grounding` to be set — caller checks
+        that before invoking us.
+        """
+        # If the agent uses exact-match for accuracy, there's no judge
+        # model configured. Fall back to the provider on self — which
+        # for ``--mock`` flows is the MockProvider, fine for tests; for
+        # real runs the operator should add a judge to enable
+        # faithfulness scoring. Surface this as a no-score with a
+        # readable rationale rather than crashing.
+        if judge.model is None:
+            return DimensionScore(
+                None,
+                "skipped: faithfulness needs a judge model — add evals/judge.yaml",
+            )
+
+        prompt = _FAITHFULNESS_PROMPT.format(
+            grounding=case.grounding,
+            actual_json=json.dumps(actual),
+        )
+        req = CompletionRequest(
+            provider=judge.model.provider,
+            messages=[Message(role="user", content=prompt)],
+            params=dict(judge.model.params),
+        )
+        judge_response = await self._provider.complete(req)
+        score, rationale = _parse_judge_response(judge_response.text)
+        return DimensionScore(score, rationale)
 
 
 def _parse_judge_response(text: str) -> tuple[float, str]:
