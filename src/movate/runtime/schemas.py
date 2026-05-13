@@ -247,6 +247,51 @@ class AgentCreatedView(BaseModel):
     "schema/input.json", "schema/output.json"]``."""
 
 
+class RunTraceView(BaseModel):
+    """``GET /api/v1/runs/{run_id}/trace`` response.
+
+    Reconstructed view of a single agent run OR a workflow run +
+    per-node children. Mirrors the JSON shape ``mdk trace replay``
+    emits today; the Angular UI's trace-viewer component reads this
+    directly.
+
+    Discriminated by ``kind``:
+
+    * ``"agent"`` — single agent run; ``run`` is populated, ``workflow``
+      and ``nodes`` are null/empty.
+    * ``"workflow"`` — workflow run; ``workflow`` is the parent record,
+      ``nodes`` is the chronological list of per-node ``RunRecord``
+      dicts.
+
+    The inner dicts use ``Any`` because run input/output payloads are
+    arbitrary user content (the Angular UI doesn't structure-validate
+    them — it just renders the JSON tree). Authoritative shape lives
+    in :mod:`movate.core.replay`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    """One of ``"agent"`` or ``"workflow"``."""
+    run: dict[str, Any] | None = None
+    """Populated when ``kind=="agent"``. Carries run_id, agent
+    name+version, provider, status, input, output, error, metrics
+    (latency, cost, tokens), prompt_hash, created_at."""
+    workflow: dict[str, Any] | None = None
+    """Populated when ``kind=="workflow"``. Carries workflow_run_id,
+    workflow name+version, status, initial+final state, error_node_id
+    + error, created_at."""
+    nodes: list[dict[str, Any]] = []
+    """Per-node child runs for workflows. Chronological order
+    (oldest first). Empty for single-agent traces."""
+    total_cost_usd: float = 0.0
+    """Sum of cost across all child runs (workflows) or the single
+    run's cost (agents). Rounded to 6 decimals."""
+    total_latency_ms: int = 0
+    """Sum of latency across all child runs (workflows) or the
+    single run's latency (agents)."""
+
+
 class AgentRunSubmission(BaseModel):
     """``POST /api/v1/agents/{name}/runs`` request body.
 
@@ -466,5 +511,6 @@ __all__ = [
     "ReadyView",
     "RunAccepted",
     "RunSubmission",
+    "RunTraceView",
     "RunView",
 ]
