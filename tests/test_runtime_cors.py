@@ -67,9 +67,7 @@ def test_cors_kwarg_enables_middleware(storage: InMemoryStorage) -> None:
     """`build_app(cors_allowed_origins=[...])` mounts CORS without
     touching the environment. Used by tests; also lets ops construct
     apps with origins from a config file."""
-    client = TestClient(
-        build_app(storage, cors_allowed_origins=["http://localhost:4200"])
-    )
+    client = TestClient(build_app(storage, cors_allowed_origins=["http://localhost:4200"]))
     r = client.get(
         "/healthz",
         headers={"Origin": "http://localhost:4200"},
@@ -85,9 +83,7 @@ def test_cors_kwarg_with_unlisted_origin_does_not_echo_it(
     Access-Control-Allow-Origin doesn't include X. Verify the runtime
     is strict — an origin not in the allow-list gets no ACAO header
     back."""
-    client = TestClient(
-        build_app(storage, cors_allowed_origins=["https://mova-io.movate.com"])
-    )
+    client = TestClient(build_app(storage, cors_allowed_origins=["https://mova-io.movate.com"]))
     r = client.get(
         "/healthz",
         headers={"Origin": "http://attacker.example.com"},
@@ -105,9 +101,7 @@ def test_cors_kwarg_with_unlisted_origin_does_not_echo_it(
 # ---------------------------------------------------------------------------
 
 
-def test_cors_reads_mdk_env_var(
-    storage: InMemoryStorage, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cors_reads_mdk_env_var(storage: InMemoryStorage, monkeypatch: pytest.MonkeyPatch) -> None:
     """`MDK_CORS_ALLOWED_ORIGINS` is the canonical env var. Single
     origin, leading/trailing whitespace tolerated."""
     monkeypatch.setenv(
@@ -203,9 +197,7 @@ def test_preflight_options_returns_cors_headers(storage: InMemoryStorage) -> Non
     """Browsers send an OPTIONS preflight before any non-simple request
     (POST with JSON body, custom headers, etc.). Without correct
     preflight headers, the Angular app's actual request never fires."""
-    client = TestClient(
-        build_app(storage, cors_allowed_origins=["http://localhost:4200"])
-    )
+    client = TestClient(build_app(storage, cors_allowed_origins=["http://localhost:4200"]))
     r = client.options(
         "/run",
         headers={
@@ -238,9 +230,7 @@ def test_rate_limit_headers_exposed_to_browser_js(
     cross-origin response (NOT on the preflight OPTIONS), so we test
     against an unauthed GET that does cross-origin work.
     """
-    client = TestClient(
-        build_app(storage, cors_allowed_origins=["http://localhost:4200"])
-    )
+    client = TestClient(build_app(storage, cors_allowed_origins=["http://localhost:4200"]))
     r = client.get(
         "/healthz",
         headers={"Origin": "http://localhost:4200"},

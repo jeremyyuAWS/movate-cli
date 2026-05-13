@@ -133,9 +133,7 @@ async def _run_serve(
     # which lets build_app's env-fallback path also kick in if the user
     # set the env var via a wrapper script). Empty string → None.
     parsed_origins = (
-        [o.strip() for o in cors_origins.split(",") if o.strip()]
-        if cors_origins
-        else None
+        [o.strip() for o in cors_origins.split(",") if o.strip()] if cors_origins else None
     )
     app = build_app(
         storage,
@@ -151,9 +149,7 @@ async def _run_serve(
     if parsed_origins:
         hint(f"[dim]  CORS allowed origins: {', '.join(parsed_origins)}[/dim]")
     else:
-        hint(
-            "[dim]  CORS: [yellow]OFF[/yellow] (set --cors-origins for browser callers)[/dim]"
-        )
+        hint("[dim]  CORS: [yellow]OFF[/yellow] (set --cors-origins for browser callers)[/dim]")
 
     config = uvicorn.Config(
         app,
