@@ -55,6 +55,7 @@ from movate.runtime.schemas import (
     ReadyView,
     RunAccepted,
     RunSubmission,
+    RunTraceView,
     RunView,
 )
 from movate.storage.base import StorageProvider
@@ -860,6 +861,74 @@ def build_app(
         )
         views = [JobView.from_record(r) for r in records]
         return JobListView(jobs=views, count=len(views))
+
+    @v1.get(
+        "/runs/{run_id}/trace",
+        response_model=RunTraceView,
+        tags=["runs-v1"],
+    )
+    async def v1_run_trace(
+        run_id: str,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> RunTraceView:
+        """Reconstructed view of a run for the Angular trace-viewer.
+
+        Wraps the existing :func:`movate.core.replay.load_replay`
+        engine (same path ``mdk trace replay`` uses) and returns the
+        structured JSON the Angular trace component renders.
+
+        Resolves ``run_id`` against BOTH the runs table and the
+        workflow_runs table — the same id space is shared, so a
+        single endpoint serves both single-agent and workflow trace
+        replays. Discriminator is the ``kind`` field in the response.
+
+        Tenant-scoped: a cross-tenant id returns 404 (never 403),
+        which would leak the existence of the id.
+
+        Errors:
+
+        * **401** — missing / bad bearer token
+        * **404** — neither a run nor workflow_run matches the id
+          for this tenant
+        """
+        # Lazy import — keeps the runtime module's import-time cost low
+        # for callers (workers, tests) that never hit this endpoint.
+        from movate.core.replay import (  # noqa: PLC0415
+            ReplayNotFoundError,
+            load_replay,
+        )
+
+        store: StorageProvider = request.app.state.storage
+        try:
+            replay = await load_replay(store, run_id, tenant_id=ctx.tenant_id)
+        except ReplayNotFoundError as exc:
+            raise not_found("run", run_id) from exc
+
+        # Mirror the JSON shape render_replay_json produces but as a
+        # typed view. ``_run_to_dict`` / ``_workflow_to_dict`` live in
+        # core.replay alongside the engine — re-use them here so the
+        # Angular client and the CLI's ``mdk trace replay`` see byte-
+        # for-byte identical data.
+        from movate.core.replay import _run_to_dict, _workflow_to_dict  # noqa: PLC0415
+
+        if replay.kind == "agent":
+            assert replay.run is not None  # narrowed by replay.kind
+            return RunTraceView(
+                kind="agent",
+                run=_run_to_dict(replay.run),
+                total_cost_usd=replay.total_cost_usd,
+                total_latency_ms=replay.total_latency_ms,
+            )
+        # workflow path
+        assert replay.workflow is not None
+        return RunTraceView(
+            kind="workflow",
+            workflow=_workflow_to_dict(replay.workflow),
+            nodes=[_run_to_dict(r) for r in (replay.children or [])],
+            total_cost_usd=replay.total_cost_usd,
+            total_latency_ms=replay.total_latency_ms,
+        )
 
     app.include_router(v1)
 
