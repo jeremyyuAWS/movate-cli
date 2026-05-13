@@ -458,7 +458,7 @@ def wizard_to_bundle_files(submission: WizardAgentSubmission) -> dict[str, bytes
     # without manual sanitization.
     import yaml  # noqa: PLC0415
 
-    agent_yaml_data: dict = {
+    agent_yaml_data: dict[str, object] = {
         "api_version": "movate/v1",
         "kind": "Agent",
         "name": canonical_name,
