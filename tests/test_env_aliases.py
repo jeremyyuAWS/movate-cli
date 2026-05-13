@@ -18,13 +18,28 @@ from movate.cli._env_aliases import sync_env_aliases
 
 @pytest.fixture(autouse=True)
 def _reset_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Re-arm the one-shot warning for every test and scrub any
-    MDK_/MOVATE_ env vars that leaked in from the host shell."""
+    """Re-arm the one-shot warning for every test, scrub any
+    MDK_/MOVATE_ env vars that leaked in from the host shell, AND
+    scrub anything sync_env_aliases() wrote directly to os.environ
+    before the next test (in this file or another) runs.
+
+    ``sync_env_aliases()`` uses ``os.environ[key] = value`` (direct
+    assignment) so monkeypatch's setenv-tracking never sees those
+    writes. Without an explicit teardown scrub the MDK_/MOVATE_ vars
+    a test populates via sync leak into subsequent tests (in
+    particular tests/test_quiet_propagation.py, which reads
+    ``MDK_TARGET`` via Typer's envvar list)."""
     monkeypatch.setattr(env_aliases_mod, "_WARN_FIRED", False)
-    # Remove any test-stale or shell-set vars that would confuse assertions.
+    # Pre-test: scrub host-shell leaks via monkeypatch (auto-reverts on teardown).
     for key in list(os.environ.keys()):
         if key.startswith(("MDK_", "MOVATE_")):
             monkeypatch.delenv(key, raising=False)
+    yield
+    # Post-test: nuke ANY MDK_/MOVATE_ var still in os.environ. Covers
+    # the direct-assignment writes sync_env_aliases() does.
+    for key in list(os.environ.keys()):
+        if key.startswith(("MDK_", "MOVATE_")):
+            del os.environ[key]
 
 
 # ---------------------------------------------------------------------------

@@ -111,10 +111,10 @@ def eval_(
     api_key: str = typer.Option(
         None,
         "--api-key",
-        envvar="MOVATE_API_KEY",
+        envvar=["MDK_API_KEY", "MOVATE_API_KEY"],
         help=(
             "Bearer token for remote eval (path starts with http(s)://). "
-            "Falls back to the MOVATE_API_KEY env var."
+            "Falls back to the MDK_API_KEY env var (legacy MOVATE_API_KEY also accepted)."
         ),
     ),
     agent_yaml: Path = typer.Option(
@@ -132,22 +132,22 @@ def eval_(
     [bold]Examples:[/bold]
 
       [dim]# Exact-match scoring against the dataset[/dim]
-      $ movate eval ./faq-agent --gate 0.7
+      $ mdk eval ./faq-agent --gate 0.7
 
       [dim]# Compare against a stored (sqlite) baseline by id[/dim]
-      $ movate eval ./faq-agent --baseline 4f8a-... --regression-tolerance 0.05
+      $ mdk eval ./faq-agent --baseline 4f8a-... --regression-tolerance 0.05
 
       [dim]# CI flow: gate against a git-tracked baseline file[/dim]
-      $ movate eval ./faq-agent --mock --baseline-file .movate/baseline.json
+      $ mdk eval ./faq-agent --mock --baseline-file .movate/baseline.json
 
       [dim]# Refresh the committed baseline on main-branch merge[/dim]
-      $ movate eval ./faq-agent --mock --output-baseline .movate/baseline.json
+      $ mdk eval ./faq-agent --mock --output-baseline .movate/baseline.json
 
       [dim]# Hermetic CI run (no API keys needed)[/dim]
-      $ movate eval ./faq-agent --mock
+      $ mdk eval ./faq-agent --mock
 
-      [dim]# Black-box eval against a deployed movate runtime[/dim]
-      $ movate eval https://faq-runtime.example.com \\
+      [dim]# Black-box eval against a deployed mdk runtime[/dim]
+      $ mdk eval https://faq-runtime.example.com \\
           --agent-yaml ./faq-agent --api-key mvt_dev_...
     """
     if baseline is not None and baseline_file is not None:
@@ -166,7 +166,7 @@ def eval_(
             raise typer.Exit(code=2)
         if not api_key:
             err_console.print(
-                "[red]✗[/red] no API key for remote eval — pass --api-key or set MOVATE_API_KEY"
+                "[red]✗[/red] no API key for remote eval — pass --api-key or set MDK_API_KEY"
             )
             raise typer.Exit(code=2)
         try:

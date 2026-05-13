@@ -116,12 +116,12 @@ def _main(
         None,
         "--target",
         "-t",
-        envvar="MOVATE_TARGET",
+        envvar=["MDK_TARGET", "MOVATE_TARGET"],
         help=(
             "Default deployment target for remote commands "
             "(submit, jobs *). Overridden by a per-command --target. "
-            "Falls back to MOVATE_TARGET env var, then to the active "
-            "config target."
+            "Falls back to MDK_TARGET env var (or legacy MOVATE_TARGET), "
+            "then to the active config target."
         ),
     ),
     version: bool = typer.Option(

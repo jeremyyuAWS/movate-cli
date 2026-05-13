@@ -48,7 +48,7 @@ def serve(
     runtime_url: str = typer.Option(
         "http://127.0.0.1:8000",
         "--runtime-url",
-        envvar="MOVATE_RUNTIME_URL",
+        envvar=["MDK_RUNTIME_URL", "MOVATE_RUNTIME_URL"],
         help=(
             "Base URL of the Movate runtime the bot forwards "
             "`run` / `eval` commands to. Required when the bot is "
@@ -58,7 +58,7 @@ def serve(
     fleet_api_key: str = typer.Option(
         None,
         "--fleet-api-key",
-        envvar="MOVATE_TEAMS_FLEET_API_KEY",
+        envvar=["MDK_TEAMS_FLEET_API_KEY", "MOVATE_TEAMS_FLEET_API_KEY"],
         help=(
             "The bot's API key for the runtime. Required when "
             "--runtime-url is set. Falls back to the "
@@ -70,7 +70,7 @@ def serve(
     langfuse_public_host: str = typer.Option(
         None,
         "--langfuse-public-host",
-        envvar="MOVATE_TEAMS_LANGFUSE_PUBLIC_HOST",
+        envvar=["MDK_TEAMS_LANGFUSE_PUBLIC_HOST", "MOVATE_TEAMS_LANGFUSE_PUBLIC_HOST"],
         help=(
             "Public Langfuse base URL. When set, successful run cards "
             "include a 'View trace' button. Off by default — only "
@@ -90,7 +90,7 @@ def serve(
     require_binding: bool = typer.Option(
         False,
         "--require-binding",
-        envvar="MOVATE_TEAMS_REQUIRE_BINDING",
+        envvar=["MDK_TEAMS_REQUIRE_BINDING", "MOVATE_TEAMS_REQUIRE_BINDING"],
         help=(
             "Strict mode: reject `run` from users who haven't bound "
             "their own Movate API key. Default OFF (alpha) — the bot "

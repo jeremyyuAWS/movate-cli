@@ -46,7 +46,7 @@ def add_target(
     key_env: str = typer.Option(
         ...,
         "--key-env",
-        help="Name of the env var that holds the bearer token (e.g. MOVATE_PROD_KEY).",
+        help="Name of the env var that holds the bearer token (e.g. MDK_PROD_KEY).",
     ),
     set_active: bool = typer.Option(
         False,
@@ -84,12 +84,12 @@ def add_target(
     [bold]Examples:[/bold]
 
       [dim]# Local dev runtime (no deploy config)[/dim]
-      $ movate config add-target local --url http://127.0.0.1:8000 --key-env MOVATE_LOCAL_KEY
+      $ mdk config add-target local --url http://127.0.0.1:8000 --key-env MDK_LOCAL_KEY
 
       [dim]# Prod, with deploy enabled, and make it the default[/dim]
-      $ movate config add-target prod \\
+      $ mdk config add-target prod \\
             --url https://movate-prod-api.eastus2.azurecontainerapps.io \\
-            --key-env MOVATE_PROD_KEY \\
+            --key-env MDK_PROD_KEY \\
             --azure-subscription "$SUBSCRIPTION_ID" \\
             --azure-resource-group movate-prod-rg \\
             --azure-acr movateprodacr \\
@@ -129,7 +129,7 @@ def list_targets() -> None:
     """Show all registered targets, highlighting the active one."""
     cfg = load_user_config()
     if not cfg.targets:
-        hint("[dim]no targets registered — run `movate config add-target` first[/dim]")
+        hint("[dim]no targets registered — run `mdk config add-target` first[/dim]")
         return
 
     table = Table(title="movate targets")
@@ -150,10 +150,10 @@ def current() -> None:
     Use in shell prompts ("which env am I pointing at?") or as a
     sanity check before a destructive op:
 
-      $ movate config current
-      prod  https://movate-prod.azurecontainerapps.io  MOVATE_PROD_KEY
+      $ mdk config current
+      prod  https://movate-prod.azurecontainerapps.io  MDK_PROD_KEY
 
-      $ if [ "$(movate config current | awk '{print $1}')" = prod ]; then
+      $ if [ "$(mdk config current | awk '{print $1}')" = prod ]; then
             echo "refusing to run dev tooling against prod"
         fi
 
