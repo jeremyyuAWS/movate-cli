@@ -557,6 +557,47 @@ class AgentSpec(BaseModel):
     description: str = ""
     owner: str = ""
 
+    # ---- v0.8 Mova iO marketplace metadata (item 29 / Group F) ----
+    # All three default to empty; existing agent.yaml files load
+    # unchanged. The Mova iO Agent Marketplace UI (separate product)
+    # reads these as the source of truth for catalog / profiles /
+    # search / reviews; mdk show renders them and mdk validate
+    # type-checks them. Free-form natural language for persona + role
+    # (consumers don't enumerate values); capabilities is a slug list
+    # for search facets.
+
+    persona: str = Field(
+        default="",
+        max_length=512,
+        description=(
+            "Voice / tone / character of the agent's responses, in one "
+            "sentence. Example: 'Concise, technical, slightly dry — "
+            "answers in 1-2 lines, never apologetic.' Free-form natural "
+            "language; used by the marketplace to render a Profile and "
+            "by prompt-authoring tooling as a style anchor."
+        ),
+    )
+    role: str = Field(
+        default="",
+        max_length=128,
+        description=(
+            "Job category this agent fills, as a short noun phrase. "
+            "Example: 'support-triage', 'data-analyst', 'returns-processor'. "
+            "Used by the marketplace for grouping + filtering."
+        ),
+    )
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Slug-style list of things this agent can do. Example: "
+            "['faq-lookup', 'ticket-routing', 'language-detection']. "
+            "Each entry must be lowercase alphanumeric with hyphens "
+            "(matches tag rules). Used by the marketplace as search "
+            "facets; complements free-form `tags` (which can be any "
+            "string)."
+        ),
+    )
+
     runtime: AgentRuntime = Field(
         default=AgentRuntime.LITELLM,
         description=(
@@ -659,6 +700,25 @@ class AgentSpec(BaseModel):
     def _validate_semver(cls, v: str) -> str:
         if not SEMVER_RE.match(v):
             raise ValueError(f"agent version {v!r} must be semver (MAJOR.MINOR.PATCH)")
+        return v
+
+    @field_validator("capabilities")
+    @classmethod
+    def _validate_capabilities(cls, v: list[str]) -> list[str]:
+        """Each capability must be a slug (matches tag rules).
+
+        Same regex as agent name. Strict because the marketplace uses
+        these as URL-safe search facets; a stray space or uppercase
+        char breaks the catalog query. Free-form descriptive text
+        belongs in ``description`` or ``persona``.
+        """
+        for cap in v:
+            if not re.match(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$", cap):
+                raise ValueError(
+                    f"capability {cap!r} must be lowercase alphanumeric "
+                    f"with hyphens (e.g. 'faq-lookup'); use 'tags' for "
+                    f"free-form labels"
+                )
         return v
 
     @model_validator(mode="after")

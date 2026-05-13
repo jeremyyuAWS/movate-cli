@@ -68,6 +68,15 @@ def _show_agent(path: Path) -> None:
     table.add_row("version", spec.version)
     table.add_row("description", spec.description or "[dim]—[/dim]")
     table.add_row("owner", spec.owner or "[dim]—[/dim]")
+    # Marketplace metadata — only render rows the agent actually
+    # populated. Keeps the table compact for v0.5/v0.6 agents that
+    # don't opt in.
+    if spec.role:
+        table.add_row("role", spec.role)
+    if spec.persona:
+        table.add_row("persona", spec.persona)
+    if spec.capabilities:
+        table.add_row("capabilities", ", ".join(spec.capabilities))
     table.add_row("", "")
     table.add_row("model.provider", spec.model.provider)
     if spec.model.params:
