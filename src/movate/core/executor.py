@@ -472,6 +472,7 @@ class Executor:
         # a new backend is a single line + the new module — no other
         # wiring required.
         from movate.core.skill_backend import http as _http_backend  # noqa: F401, PLC0415
+        from movate.core.skill_backend import mcp as _mcp_backend  # noqa: F401, PLC0415
         from movate.core.skill_backend import python as _python_backend  # noqa: F401, PLC0415
 
         # Build a name → SkillBundle map for quick lookup inside the loop.

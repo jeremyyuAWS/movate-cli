@@ -381,6 +381,19 @@ class SkillImplementation(BaseModel):
         ),
     )
 
+    # ---- MCP-only field (ignored for python/http kinds) ----
+
+    tool: str | None = Field(
+        default=None,
+        description=(
+            "MCP tool name to invoke on the server. The ``entry`` field "
+            "names the subprocess to spawn (the MCP server); ``tool`` "
+            "names the specific tool exposed by that server to call when "
+            "the skill is invoked. Required for ``kind: mcp``; ignored "
+            "for python and http."
+        ),
+    )
+
 
 class SkillCost(BaseModel):
     """Cost accounting for a skill invocation.
@@ -514,6 +527,19 @@ class SkillSpec(BaseModel):
                 raise ValueError(
                     f"http skill implementation.auth must be 'bearer-from-env:<VAR>'; "
                     f"got {v.auth!r}"
+                )
+        if v.kind == SkillImplementationKind.MCP:
+            if not v.entry:
+                raise ValueError(
+                    "mcp skill implementation.entry must be the subprocess "
+                    "command for the MCP server (e.g. './mcp-servers/github' "
+                    "or 'npx -y @some/mcp-package'); got empty string"
+                )
+            if not v.tool:
+                raise ValueError(
+                    "mcp skill implementation.tool is required (the name "
+                    "of the tool to invoke on the MCP server); empty tool "
+                    "would mean 'no tool selected'"
                 )
         return v
 

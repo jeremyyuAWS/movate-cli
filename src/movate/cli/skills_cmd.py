@@ -60,11 +60,14 @@ def _register_skill_backends() -> None:
     import importlib  # noqa: PLC0415
 
     importlib.import_module("movate.core.skill_backend.python")
-    # HTTP backend lives in a sibling PR. Best-effort import — when
-    # it's available, register it; when not, dispatch_skill surfaces
-    # a clean error if an http skill is invoked.
+    # HTTP and MCP backends were added incrementally; best-effort
+    # imports keep this command working regardless of whether each
+    # backend module is in the build. dispatch_skill surfaces a clean
+    # error if a skill references a kind whose backend isn't loaded.
     with contextlib.suppress(ImportError):
         importlib.import_module("movate.core.skill_backend.http")
+    with contextlib.suppress(ImportError):
+        importlib.import_module("movate.core.skill_backend.mcp")
 
 
 console = Console()
