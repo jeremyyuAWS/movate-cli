@@ -127,6 +127,49 @@ out so you can prioritize the code + business work independently.
 17. [ ] **More templates as customer engagements demand** `[MED] [post-v1.0]` — extractor, RAG, function-caller; trivial to add now that the registry exists.
 18. [ ] **HTTP streaming for `POST /run?wait=true`** `[LOW] [post-v1.0]` — server-sent events for long jobs so the client streams instead of polling. Useful for interactive UIs; not needed for the current batch / dev-team workflows.
 
+### Group E — Next up after 2026-05-13 re-rank
+
+> _Today closed three major lines (ADR 002 fully done; 4-dim eval shipped;
+> Teams Slices 3.1.a + b + c live). This group is the **forward-looking
+> Top 10** — leverage-ranked at end-of-day 2026-05-13. Groups A-D above
+> are the historical priority order from earlier weeks; preserved for
+> context, not the active queue._
+
+**Ranked top-of-stack — pick from the top.** Each item is independently
+shippable; nothing here is gated by anything still open.
+
+19. [ ] **Teams Slice 3.1.d — file attachment handling** `[HIGH] [v0.7] [next]` `[≤1d]` — drag `agent.zip` + `dataset.jsonl` into Teams; bot validates via `load_agent` / `load_dataset` + ingests before run. New `@movate eval <agent>` command alongside `run`. The next demo-visible unlock — prospects can show their own agent + their own data in Teams. **Issue [#68](https://github.com/jeremyyuAWS/movate-cli/issues/68). Unblocked; no Azure dep.**
+
+20. [ ] **Skill-using default templates** `[HIGH] [v0.8] [≤1d]` — every `mdk init` today scaffolds a skill-less agent, so the entire Skills feature (now fully cross-runtime after ADR 002 closeout) is invisible until docs are read. Two new templates: `calc-agent` (Python skill) + `lookup-agent` (HTTP skill against a fake CRM). One of them becomes the new default. Big "first 5 minutes" demo lift for ~half a day of work. **Issue [#71](https://github.com/jeremyyuAWS/movate-cli/issues/71).**
+
+21. [ ] **v0.6 release tag + GitHub Release** `[MED] [v0.6] [≤2h]` — everything from #51 onwards (Skills + Contexts + canonical config split + native tool-use + 4-dim eval + side_effects policy) is a logical v0.6 boundary. Cut the tag, write release notes pointing at ADR 002 + the 4-dim eval section, set the README capability matrix's v0.6 row to ✓. Clarifies the v0.7 alpha boundary for what comes next. **No GH issue — just do it.**
+
+22. [ ] **Helm chart for the runtime** `[HIGH] [v0.8] [~2d]` — `infra/helm/movate-runtime/` with Deployment + Service + Ingress + worker Deployment + HPA + KEDA Postgres scaler (mirrors what we do on ACA via Bicep). Unblocks non-Azure customers — important for partners + the Helm-deploy paths a chunk of Movate's customer base prefers. CI gains `helm lint` + `kubeval` on every PR. **Issue [#73](https://github.com/jeremyyuAWS/movate-cli/issues/73).**
+
+23. [ ] **Parallel tool-use across all three runtimes** `[MED] [v0.8] [~2d]` — modern models (Claude Sonnet 4.6+, GPT-4o) emit parallel tool calls in a single turn; today all three adapters take only the first. Executor's tool-use loop gains a multi-dispatch path via `asyncio.gather`. Cap parallel count to bound runaway models. **~3x latency improvement on multi-tool turns. Issue [#74](https://github.com/jeremyyuAWS/movate-cli/issues/74).**
+
+24. [ ] **`mdk bench` support for native_anthropic / native_openai** `[MED] [v0.8] [≤1d]` — closes a gap from ADR 002 closeout. Bench today assumes LiteLLM-style provider strings; native runtimes use bare model ids. Wire the registry/pricing-key bridge through bench; add a `--runtime litellm,native_anthropic` flag for side-by-side LiteLLM-overhead comparisons. **Issue [#75](https://github.com/jeremyyuAWS/movate-cli/issues/75).**
+
+25. [ ] **ADR 003 status flip → Accepted** `[MED] [v0.7] [≤2h]` — resolve the four open questions called out in [ADR 003](docs/adr/003-teams-integration.md) (multi-tenant prospects, Langfuse trace linking across tenants, mobile UX verification, streaming responses) based on what 3.1.a/b/c have actually demonstrated, then flip Status: Proposed → Accepted. Cheap, signals the design is stable for the rest of the v0.7 slices to land against. **No GH issue — direct doc PR.**
+
+26. [ ] **Teams hardening — JWT validation of inbound Bot Framework requests** `[HIGH] [v1.0] [~1w]` — production-grade auth. Validates inbound JWTs against Microsoft's OpenID Connect JWKS endpoint (5-minute TTL cache); audience + issuer verification matches the bot's AAD app id. Bot Framework Emulator's "skip auth for local dev" gated by `MOVATE_TEAMS_SKIP_AUTH=1`. **Required before any public Teams app catalog rollout. Issue [#70](https://github.com/jeremyyuAWS/movate-cli/issues/70).**
+
+27. [ ] **ADR 004 — pgvector memory tiers (design)** `[HIGH] [v0.8] [~3-5d for ADR]` — unblocked by the canonical config split's `knowledge.yaml` stub. Drafts: storage layer (pgvector on existing Postgres vs separate vector DB), embedding model choice, schema for declaring which memory tier an agent reads/writes, cost-cap on embeddings, eval integration via the faithfulness/coverage dims that shipped today. Status: Proposed → reviewed → Accepted once at least one prototype validates the seam. **Issue [#76](https://github.com/jeremyyuAWS/movate-cli/issues/76).**
+
+28. [ ] **HITL workflow nodes (design)** `[MED] [v1.1+] [~3-5d for ADR]` — Phase 7 from the PRD. Pauses a workflow for an external human response, resumes on a webhook / Teams card button / email reply. Coordinates with ADR 003 — Teams Adaptive Cards with action buttons are the natural first transport. Needs design before code; one concrete use-case (refund approval) walked end-to-end. **Issue [#79](https://github.com/jeremyyuAWS/movate-cli/issues/79).**
+
+#### Demoted / deferred
+
+These items are below the top 10 — capture so we don't lose them, but
+don't pick from this list unless the top 10 are blocked or context shifts.
+
+- **ADR 005 — Apache AGE knowledge graph + d3.js viz** — flashy demo piece, no customer pull yet. Tracked in [#78](https://github.com/jeremyyuAWS/movate-cli/issues/78).
+- **SaaS onboarding flow** — no customer pull yet. Tracked in [#81](https://github.com/jeremyyuAWS/movate-cli/issues/81).
+- **Worktree hygiene** (`my-sandisk-agent/`, `openai-feedback.md` untracked) — 15-minute idle-time cleanup. Tracked in [#77](https://github.com/jeremyyuAWS/movate-cli/issues/77).
+- **Teams Slice 3.1.e — manifest + Bot Service registration** — gated on Azure tenant migration ([#65](https://github.com/jeremyyuAWS/movate-cli/issues/65)). Lift when the email response lands.
+- **First Azure deployment validation** — same Azure gate as 3.1.e. Item 3 above remains accurate.
+- **SMS notifications (items 11-15 above)** — code is small, business-side work (A2P 10DLC) is the long pole. Defer until a customer asks for SMS specifically.
+
 ---
 
 ## 1. Foundation — single agent (Phase 1 / v0.1)
