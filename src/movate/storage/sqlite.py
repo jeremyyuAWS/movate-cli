@@ -507,6 +507,7 @@ class SqliteProvider:
         *,
         tenant_id: str | None = None,
         status: JobStatus | None = None,
+        target: str | None = None,
         limit: int = 20,
     ) -> list[JobRecord]:
         clauses: list[str] = []
@@ -517,6 +518,9 @@ class SqliteProvider:
         if status is not None:
             clauses.append("status = ?")
             params.append(status.value)
+        if target is not None:
+            clauses.append("target = ?")
+            params.append(target)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ?"
         params.append(limit)

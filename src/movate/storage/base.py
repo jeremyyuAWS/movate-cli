@@ -144,6 +144,7 @@ class StorageProvider(Protocol):
         *,
         tenant_id: str | None = None,
         status: JobStatus | None = None,
+        target: str | None = None,
         limit: int = 20,
     ) -> list[JobRecord]:
         """List jobs newest-first, optionally filtered.
@@ -152,6 +153,10 @@ class StorageProvider(Protocol):
         path. Listing across tenants (``tenant_id=None``) is reserved for
         operator tooling (``movate worker --all-tenants``) — never exposed
         on the HTTP API.
+
+        ``target`` filters to one agent (or workflow) name — drives the
+        Angular agent-profile page's "recent runs" tab via
+        ``GET /api/v1/jobs?agent=<name>`` (item 74).
         """
 
     async def claim_next_job(self, *, tenant_id: str | None = None) -> JobRecord | None:
