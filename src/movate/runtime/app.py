@@ -41,6 +41,8 @@ from movate.runtime.middleware import AuthContext, make_auth_dependency
 from movate.runtime.registry import scan_agents
 from movate.runtime.schemas import (
     AgentCreatedView,
+    AgentDatasetInfo,
+    AgentDetailView,
     AgentListView,
     AgentView,
     HealthView,
@@ -149,6 +151,83 @@ def _agent_creation_error_code(status_code: int) -> str:
         422: "invalid_bundle",
         503: "agent_persistence_unavailable",
     }.get(status_code, "internal_error")
+
+
+def _render_agent_detail(bundle: AgentBundle) -> AgentDetailView:
+    """Build the ``AgentDetailView`` for ``GET /api/v1/agents/{name}``.
+
+    Reads dataset stats lazily (computed only if the dataset file
+    actually exists; ``None`` otherwise). Lists canonical files that
+    physically exist on disk — the UI's "files in this agent" view
+    should reflect reality, not the abstract canonical layout.
+
+    Pure function — no I/O beyond reading the dataset bytes for
+    digest/count + listing the bundle dir. Trivially testable.
+    """
+    import hashlib  # noqa: PLC0415
+
+    spec = bundle.spec
+    agent_dir = bundle.agent_dir
+
+    # Dataset info — read once, compute digest + line count.
+    dataset_info: AgentDatasetInfo | None = None
+    if spec.evals.dataset:
+        ds_path = (agent_dir / spec.evals.dataset).resolve()
+        if ds_path.exists() and ds_path.is_file():
+            raw = ds_path.read_bytes()
+            digest = hashlib.sha256(raw).hexdigest()[:12]
+            # Count non-empty lines — what mdk eval would walk.
+            count = sum(1 for line in raw.decode().splitlines() if line.strip())
+            dataset_info = AgentDatasetInfo(
+                path=spec.evals.dataset,
+                case_count=count,
+                sha256_prefix=digest,
+                size_bytes=len(raw),
+            )
+
+    # Canonical files that ACTUALLY exist on disk. Walks one level
+    # deep (matches scan_agents' depth convention).
+    candidate_files = [
+        "agent.yaml",
+        "prompt.md",
+        "schema/input.json",
+        "schema/output.json",
+        "evals/dataset.jsonl",
+    ]
+    files = sorted(f for f in candidate_files if (agent_dir / f).exists())
+
+    # Prompt body — read from disk so the response is self-contained.
+    # Same path the AgentBundle.render_prompt() goes through, but we
+    # want the raw template (no Jinja substitution).
+    prompt_path = (agent_dir / spec.prompt).resolve()
+    prompt_body = prompt_path.read_text() if prompt_path.exists() else ""
+
+    return AgentDetailView(
+        name=spec.name,
+        version=spec.version,
+        description=spec.description,
+        owner=spec.owner,
+        role=spec.role,
+        persona=spec.persona,
+        capabilities=list(spec.capabilities),
+        tags=list(spec.tags),
+        model_provider=spec.model.provider,
+        model_params=dict(spec.model.params) if spec.model.params else {},
+        model_fallback=[fb.provider for fb in spec.model.fallback] if spec.model.fallback else [],
+        runtime=spec.runtime.value,
+        prompt=prompt_body,
+        prompt_hash=bundle.prompt_hash,
+        input_schema=bundle.input_schema,
+        output_schema=bundle.output_schema,
+        skills=list(spec.skills),
+        contexts=list(spec.contexts),
+        dataset=dataset_info,
+        timeout_call_ms=spec.timeouts.call_ms,
+        timeout_total_ms=spec.timeouts.total_ms,
+        max_cost_usd_per_run=spec.budget.max_cost_usd_per_run,
+        agent_dir=agent_dir.name,
+        files=files,
+    )
 
 
 def build_app(
@@ -531,6 +610,50 @@ def build_app(
             agent_dir=result.agent_dir.name,
             files_persisted=result.files_persisted,
         )
+
+    @v1.get(
+        "/agents/{name}",
+        response_model=AgentDetailView,
+        tags=["agents-v1"],
+    )
+    async def v1_get_agent(
+        name: str,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> AgentDetailView:
+        """Return the full agent spec + bundle metadata for a single agent.
+
+        Drives the Mova iO Angular agent-profile view: the user clicks
+        an agent in the catalog and the UI fetches this single endpoint
+        to render the spec, prompt body, schemas, dataset stats, model
+        config, marketplace metadata (role/persona/capabilities), and
+        the list of canonical files on disk.
+
+        Source of truth is the in-memory registry populated at app
+        build + refreshed after every successful ``POST /api/v1/agents``.
+        Lookups are O(N) in registry size; for the typical tenant with
+        < 100 agents that's a non-issue. We could index by name in a
+        future revision if scan times start dominating.
+
+        Errors:
+
+        * **401** — missing / bad bearer token
+        * **404** — agent not in the registry (never registered, or
+          a different tenant's agent — today's runtime is global-
+          scoped, so 404 just means "not found")
+        """
+        # Tenant scoping — today's runtime is single-tenant per
+        # agents_path; future per-tenant filesystem isolation reads
+        # ctx.tenant_id and walks <agents_path>/<tenant_id>/. The
+        # reference here keeps the audit trail honest and prevents
+        # ruff from flagging the param as unused.
+        _ = ctx.tenant_id
+
+        agents: list[AgentBundle] = request.app.state.agents
+        bundle = next((b for b in agents if b.spec.name == name), None)
+        if bundle is None:
+            raise not_found("agent", name)
+        return _render_agent_detail(bundle)
 
     app.include_router(v1)
 
