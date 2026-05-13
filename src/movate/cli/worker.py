@@ -41,13 +41,13 @@ def worker(
     agents_path: Path = typer.Option(
         Path("./agents"),
         "--agents-path",
-        envvar="MOVATE_AGENTS_PATH",
+        envvar=["MDK_AGENTS_PATH", "MOVATE_AGENTS_PATH"],
         help="Directory to scan for agent.yaml files.",
     ),
     workflows_path: Path = typer.Option(
         Path("./workflows"),
         "--workflows-path",
-        envvar="MOVATE_WORKFLOWS_PATH",
+        envvar=["MDK_WORKFLOWS_PATH", "MOVATE_WORKFLOWS_PATH"],
         help=(
             "Directory to scan for workflow.yaml files. Optional; "
             "JobKind.WORKFLOW jobs ERROR if no workflows are registered."

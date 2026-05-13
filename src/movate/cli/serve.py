@@ -35,7 +35,7 @@ def serve(
     agents_path: Path = typer.Option(
         Path("./agents"),
         "--agents-path",
-        envvar="MOVATE_AGENTS_PATH",
+        envvar=["MDK_AGENTS_PATH", "MOVATE_AGENTS_PATH"],
         help="Directory to scan for agent.yaml files. Falls back to empty catalog if missing.",
     ),
     log_level: str = typer.Option(
@@ -46,7 +46,7 @@ def serve(
     rate_limit_per_minute: int = typer.Option(
         60,
         "--rate-limit-per-minute",
-        envvar="MOVATE_RATE_LIMIT_PER_MINUTE",
+        envvar=["MDK_RATE_LIMIT_PER_MINUTE", "MOVATE_RATE_LIMIT_PER_MINUTE"],
         help=(
             "Per-API-key token-bucket capacity (steady-state requests/min). "
             "Default 60. Set to 0 to disable rate limiting entirely "

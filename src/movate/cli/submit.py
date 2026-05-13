@@ -103,7 +103,7 @@ def submit(
         help=(
             "Email address the server-side worker emails when the job "
             "reaches a terminal status. Worker must have SMTP configured "
-            "(MOVATE_SMTP_HOST + creds) or it falls back to logging only."
+            "(MDK_SMTP_HOST + creds) or it falls back to logging only."
         ),
     ),
     output_format: TableJson = typer.Option(
