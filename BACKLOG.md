@@ -312,15 +312,92 @@ clarity; **no MDK backlog items**:
 
 75. [ ] **Server-Sent Events for long jobs: `GET /api/v1/jobs/{id}/events`** `[LOW] [post-v1] [~1d]` — Streams status transitions + cost updates. Useful for the agent-run UX where polling feels laggy. Defer until the polling experience is actually a problem.
 
-#### G-est — Friday scope estimate
+#### G-v1 — v1 deliverable: three pillars (refined 2026-05-13 PM)
 
-Realistic delivery for Friday 2026-05-15 with a 2-day window:
+> _Replaces the original G-est scope. The Friday demo is no longer
+> "agent CRUD + a basic eval card." The v1 Angular-compatible
+> endpoint set is now three pillars, each load-bearing for a
+> specific Mova iO UI flow:_
+>
+> **Pillar 1: Agent creation** — canonical folder structure + GitHub
+> integration so created agents are version-controlled from day one.
+> Not just `POST /agents` — the full bundle layout + git push pipeline.
+>
+> **Pillar 2: Evals** — kickoff + retrieval + history. Mostly covered
+> by items 60-62; nothing new needed here beyond what's already in
+> G-MUST.
+>
+> **Pillar 3: Observability** — runs, traces, replay surfaced via API.
+> Items 65 (`GET /runs/{id}/trace`) and 74 (filterable jobs) move
+> from G-NEXT → v1. Item 66 (`explain`) stays in G-NEXT (depends on
+> Group F item 35 design work).
+>
+> Marketplace facets (item 63), PUT update (item 57), bench (item 64),
+> models catalog, skills/workflows CRUD, tenant admin, API keys all
+> defer to v0.8 — the v1 demo doesn't need them.
 
-* **All four G-cross items (50-53)** — ~6h total, must land first
-* **G-MUST items 55, 56, 58, 59, 60, 61** — 4 endpoints + agent CRUD basics, ~6-8h total
-* **Stretch items if time allows:** 57 (PUT), 62 (eval history list), 63 (marketplace facets)
+##### Pillar 1: Agent creation with canonical folders + GitHub version control
 
-Total realistic Friday surface: **~10 endpoints** out of the 21 in this group. The remaining 11 land in the next sprint via Group G-NEXT. **Angular team can start scaffolding against the OpenAPI spec on Thursday once items 50 + 51 land** — they don't have to wait for every endpoint, the auto-generated client adapts as new routes are added.
+The existing items 55-58 cover the in-process side. **The GitHub
+piece is new** — these endpoints below close the version-control gap.
+
+76. [ ] **`POST /api/v1/agents` accepts a canonical bundle** `[HIGH] [v0.7] [~1d]` — Refines item 55. The endpoint persists agents in the canonical folder layout MDK already uses (`<agent-name>/agent.yaml` + `prompt.md` + `schema/{input,output}.json` + `evals/dataset.jsonl` + optional `skills/`, `contexts/`, `prompts/`, `knowledge.yaml`). The endpoint accepts EITHER (a) a multipart form with the individual files, or (b) a zipped bundle (multipart form `bundle.zip` field). Returns the canonical layout in the response so the Angular UI can render "your agent is now at `agents/faq-bot/...`". **Rejects bundles that violate the canonical layout** so we never persist a malformed structure to git.
+
+77. [ ] **ADR 007 — GitHub integration for agent version control** `[HIGH] [v0.7] [~3d ADR + impl]` — Design before code. Decisions: (a) one repo per agent vs one repo with subdirs? (b) GitHub App vs PAT auth? (c) commit-on-every-save vs explicit "publish" button? (d) PR-based review or direct push to main? **Recommend: one mono-repo per tenant (`mova-io-agents-<tenant>`); GitHub App auth for org installs; explicit publish action (NOT auto-commit on every save — too noisy); direct push to main with branch protection for sensitive agents.** Write the ADR Thursday, ship the code Friday.
+
+78. [ ] **`POST /api/v1/agents/{name}/publish` — commit + push to GitHub** `[HIGH] [v0.7] [~1d, gated on ADR 007]` — Takes a commit message + author. Stages the canonical agent bundle into the configured GitHub repo (per ADR 007), commits, pushes. Returns `{commit_sha, html_url}` so the UI can render a "View on GitHub" link on every published version. **Idempotent** — if the working tree matches HEAD, returns the existing SHA with a `no_changes: true` flag instead of an empty commit.
+
+79. [ ] **`GET /api/v1/agents/{name}/history` — git log + diff** `[HIGH] [v0.7] [≤1d, gated on ADR 007]` — Returns the agent's commit history (last 50, paginated). Each entry: `{sha, author, message, timestamp, html_url}`. Optional `?since=<sha>` to fetch only new commits since the UI's last poll. Drives the "version history" panel in the Mova iO agent profile view.
+
+80. [ ] **`POST /api/v1/agents/{name}/revert?to_sha=<sha>`** `[MED] [v0.7] [≤1d, gated on ADR 007]` — Resets the working bundle to a prior commit's content and re-commits forward (NOT `git reset --hard` — preserves history). Returns the new commit SHA. Use case: "this last edit broke the eval, roll back to yesterday's version."
+
+81. [ ] **Repo provisioning command: `mdk github bootstrap`** `[MED] [v0.7] [≤1d, gated on ADR 007]` — Operator one-time setup. Creates the per-tenant `mova-io-agents-<tenant>` repo (or attaches to an existing one), installs the GitHub App, writes the integration config into `~/.mdk/config.yaml` under `github:`. **Friday: optional polish** — the v1 demo can land with a manually-provisioned repo + pasted credentials; this CLI wraps the setup for production rollout.
+
+##### Pillar 3: Observability via API (moved up from G-NEXT)
+
+These three were originally G-NEXT (v0.8); promoted to v1 per the
+new scope.
+
+* Item 65 (`GET /api/v1/runs/{run_id}/trace`) — promote to v1
+* Item 74 (`GET /api/v1/jobs?agent={}&status={}&tenant={}`) — promote to v1
+* Item 75 (SSE for long jobs) — **stays deferred** (nice-to-have; polling is fine for v1)
+
+#### G-est — Friday scope estimate (UPDATED 2026-05-13 PM)
+
+Realistic delivery for the v1 Angular-compatible deliverable in the
+remaining Wed PM → Fri window:
+
+**Wednesday PM (today, done):**
+* ✅ Items 50-54 G-cross (shipped via PR #94)
+
+**Thursday — agent creation core + observability:**
+* Item 76 — `POST /api/v1/agents` with canonical layout (~3h)
+* Item 77 — ADR 007 GitHub integration design (~4h, parallel with the above)
+* Item 56 — `GET /api/v1/agents/{name}` (~2h)
+* Item 58 — `POST /api/v1/agents/{name}/validate` (~2h)
+* Item 59 — `POST /api/v1/agents/{name}/runs` (~2h)
+* Item 65 — `GET /api/v1/runs/{run_id}/trace` (~2h)
+* Item 74 — `GET /api/v1/jobs?...` enhancement (~1h)
+
+**Friday — GitHub publish + evals + integration test:**
+* Item 78 — `POST /api/v1/agents/{name}/publish` (~3h)
+* Item 79 — `GET /api/v1/agents/{name}/history` (~2h)
+* Item 60 — `POST /api/v1/agents/{name}/evals` (~3h)
+* Item 61 — `GET /api/v1/evals/{eval_id}` (~2h)
+* Item 62 — `GET /api/v1/evals?agent={name}` (~1h)
+* Integration smoke + buffer (~2h)
+
+**Stretch (if time allows on Friday PM):**
+* Item 80 — revert endpoint (~1h)
+* Item 81 — `mdk github bootstrap` CLI (~2h)
+
+**Deferred to v0.8 (NOT in Friday v1):**
+* Item 55 → superseded by item 76
+* Item 57 — `PUT /api/v1/agents/{name}` (use revert + publish + new POST for now)
+* Item 63 — marketplace facets (the Catalog UI uses item 56's per-agent metadata for now)
+* Items 64, 66-73, 75 — all G-NEXT items not promoted above
+
+Total realistic v1 surface: **~12 endpoints + 1 ADR + ~3 CLI helpers**. The Angular team can continue scaffolding against the OpenAPI spec — every endpoint that lands adds a typed service method via `npm run client:gen`.
 
 #### Demoted / deferred
 

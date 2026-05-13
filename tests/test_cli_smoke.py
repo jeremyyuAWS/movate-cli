@@ -5,7 +5,9 @@ remaining stubs exit non-zero with the "not implemented" message.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import yaml
@@ -113,14 +115,39 @@ def test_doctor_runs() -> None:
 
 
 @pytest.mark.unit
+def test_doctor_renders_purpose_column() -> None:
+    """The Purpose column sits between Result and License and surfaces
+    a one-line role description per dep (item from the 2026-05-13
+    UI-feedback batch). Verifies (a) the header exists, (b) at least
+    one dep's purpose string makes it into the rendered output."""
+    # Force a wide terminal so Rich doesn't drop the column.
+    with mock.patch.dict(os.environ, {"COLUMNS": "200"}):
+        result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "Purpose" in result.stdout
+    # Pick a dep whose purpose string is short + stable + unlikely to
+    # change wording: "Multi-provider LLM SDK" describes litellm.
+    assert "Multi-provider LLM SDK" in result.stdout
+
+
+@pytest.mark.unit
 def test_doctor_reports_runtime_adapter_availability() -> None:
     """``movate doctor`` should surface which AgentRuntime adapters are
     available — operators need this when deciding whether ``runtime:
     native_anthropic`` will resolve on their install. We assert that
-    every AgentRuntime value is named in the doctor table."""
+    every AgentRuntime value is named in the doctor table.
+
+    Force COLUMNS=200 so Rich's table doesn't truncate the longer
+    runtime names (native_anthropic / native_openai). With the 4-column
+    doctor table (Check / Result / Purpose / License), the default
+    80-col terminal compresses the Check column enough to clip
+    ``native_anthropic`` to ``native_anthrop`` and break the substring
+    assertion.
+    """
     from movate.core.models import AgentRuntime  # noqa: PLC0415
 
-    result = runner.invoke(app, ["doctor"])
+    with mock.patch.dict(os.environ, {"COLUMNS": "200"}):
+        result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     for runtime in AgentRuntime:
         # Each runtime gets a row labelled "runtime: <name>".

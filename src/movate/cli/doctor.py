@@ -52,6 +52,28 @@ _DEP_LICENSES: dict[str, str] = {
     "httpx": "BSD-3-Clause",
 }
 
+# One-line role description per dep — surfaced in ``mdk doctor`` so
+# operators glancing at the table can answer "wait, why do we depend
+# on this?" without leaving the terminal. Keep entries terse (≤50
+# chars) — Rich wraps but a one-liner reads cleanly. Detailed defense
+# of each choice lives in docs/stack-defense.md.
+_DEP_PURPOSE: dict[str, str] = {
+    # Required deps
+    "typer": "CLI argument parsing",
+    "rich": "Terminal tables + colors",
+    "pydantic": "Schema validation + parsing",
+    "yaml": "YAML config parsing (agent.yaml, movate.yaml)",
+    "jinja2": "Prompt templating",
+    "litellm": "Multi-provider LLM SDK",
+    "aiosqlite": "Async sqlite driver (local storage)",
+    # Optional deps
+    "langfuse": "LLM trace + cost observability",
+    "opentelemetry": "OTel spans for distributed tracing",
+    "asyncpg": "Async Postgres driver (deployed runtime)",
+    "fastapi": "HTTP runtime + Teams bot webhook",
+    "httpx": "Async HTTP client (LiteLLM, Lyzr, etc.)",
+}
+
 # Map each AgentRuntime to (probe-module, extras-install-hint). Used by
 # the runtime section of ``movate doctor`` to report what's wired vs.
 # what's an `uv add 'movate-cli[...]'` away.
@@ -141,30 +163,39 @@ def doctor(  # noqa: PLR0912 — branch count is inherent to a multi-section dia
     table = Table(title="movate doctor", show_header=True, header_style="bold")
     table.add_column("Check")
     table.add_column("Result")
-    table.add_column("License", style="dim")  # blank for non-dep rows
+    # Purpose sits LEFT of License so operators reading top-to-bottom hit
+    # the "what is this for?" answer before the "is it permissive?"
+    # answer — most operators only care about license posture during the
+    # `--licenses` audit, but want to recognize what a dep does at a
+    # glance every time they run doctor. Blank for non-dep rows.
+    table.add_column("Purpose", style="dim", overflow="fold")
+    table.add_column("License", style="dim")
 
-    table.add_row("Python", sys.version.split()[0], "")
-    table.add_row("movate", __version__, "")
-    table.add_row("", "", "")
+    table.add_row("Python", sys.version.split()[0], "", "")
+    table.add_row("movate", __version__, "", "")
+    table.add_row("", "", "", "")
 
-    # Required deps — now with SPDX license column. Every entry in
-    # _REQUIRED_DEPS should have a matching entry in _DEP_LICENSES;
-    # a missing entry renders as a yellow "?" prompting the operator
-    # to update both maps (see docs/license-posture.md).
+    # Required deps — Purpose + SPDX license columns. Every entry in
+    # _REQUIRED_DEPS should have a matching entry in both _DEP_LICENSES
+    # and _DEP_PURPOSE; a missing entry renders as a yellow "?"
+    # prompting the operator to update the maps (see
+    # docs/license-posture.md and docs/stack-defense.md).
     for mod in _REQUIRED_DEPS:
         spec = importlib.util.find_spec(mod)
         status = _ok("") if spec else "[red]missing (install fail)[/red]"
+        purpose = _DEP_PURPOSE.get(mod, "[yellow]?[/yellow]")
         license_str = _DEP_LICENSES.get(mod, "[yellow]?[/yellow]")
-        table.add_row(f"dep: {mod}", status, license_str)
+        table.add_row(f"dep: {mod}", status, purpose, license_str)
 
-    table.add_row("", "", "")
+    table.add_row("", "", "", "")
 
     # Optional deps
     for mod in _OPTIONAL_DEPS:
         spec = importlib.util.find_spec(mod)
         status = _ok("") if spec else _missing("not installed")
+        purpose = _DEP_PURPOSE.get(mod, "[yellow]?[/yellow]")
         license_str = _DEP_LICENSES.get(mod, "[yellow]?[/yellow]")
-        table.add_row(f"opt: {mod}", status, license_str)
+        table.add_row(f"opt: {mod}", status, purpose, license_str)
 
     table.add_row("", "")
 
