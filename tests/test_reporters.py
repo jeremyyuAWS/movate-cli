@@ -162,6 +162,57 @@ async def test_eval_markdown_escapes_pipe_in_input(
 
 
 # ---------------------------------------------------------------------------
+# render_eval_markdown — dimensional breakdown (v0.6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_eval_markdown_omits_dimensional_section_for_legacy_dataset(
+    tmp_path: Path, pricing: PricingTable, storage: InMemoryStorage, tracer: NullTracer
+) -> None:
+    """A dataset with no grounding/coverage/budget → no dimensional table.
+
+    Pure back-compat with v0.5 markdown: only accuracy is computed, and
+    the headline ``Mean score`` row already covers it.
+    """
+    agent_dir = scaffold_agent(tmp_path / "demo", template="default")
+    (agent_dir / "evals" / "dataset.jsonl").write_text(
+        '{"input": {"text": "hi"}, "expected": {"message": "ok"}}\n'
+    )
+    bundle = load_agent(agent_dir)
+    provider = MockProvider(response='{"message": "ok"}')
+    executor = Executor(provider=provider, pricing=pricing, storage=storage, tracer=tracer)
+    summary = await EvalEngine(executor=executor, provider=provider).run(bundle)
+
+    md = render_eval_markdown(summary, gate=0.7)
+    assert "Dimensional breakdown" not in md
+
+
+@pytest.mark.unit
+async def test_eval_markdown_includes_dimensional_section_with_coverage(
+    tmp_path: Path, pricing: PricingTable, storage: InMemoryStorage, tracer: NullTracer
+) -> None:
+    """Once a dataset opts into expected_coverage, the breakdown table renders."""
+    agent_dir = scaffold_agent(tmp_path / "demo", template="default")
+    (agent_dir / "evals" / "dataset.jsonl").write_text(
+        '{"input": {"text": "hi"}, "expected": {"message": "price warranty"}, '
+        '"expected_coverage": ["price", "warranty"]}\n'
+    )
+    bundle = load_agent(agent_dir)
+    provider = MockProvider(response='{"message": "price warranty"}')
+    executor = Executor(provider=provider, pricing=pricing, storage=storage, tracer=tracer)
+    summary = await EvalEngine(executor=executor, provider=provider).run(bundle)
+
+    md = render_eval_markdown(summary, gate=0.7)
+    assert "Dimensional breakdown" in md
+    assert "| accuracy |" in md
+    assert "| coverage |" in md
+    assert "| latency |" in md  # always scored on success
+    # Faithfulness wasn't opted into for this dataset → row absent.
+    assert "| faithfulness |" not in md
+
+
+# ---------------------------------------------------------------------------
 # render_bench_markdown
 # ---------------------------------------------------------------------------
 

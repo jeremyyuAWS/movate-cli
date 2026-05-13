@@ -25,6 +25,7 @@ from movate.core.baseline import BaselineDiff, compute_baseline_diff, format_del
 from movate.core.client import MovateClient
 from movate.core.eval import (
     CaseSummary,
+    DimensionalMeans,
     EvalConfigError,
     EvalEngine,
     EvalSummary,
@@ -335,6 +336,12 @@ async def _run_eval(  # noqa: PLR0912 — orchestrator; branch count is inherent
             overall_pass=overall_pass,
             objective_filter=objective,
         )
+        # Dimensional breakdown — only shown when at least one dim was
+        # scored beyond accuracy. A dataset with no grounding / no
+        # expected_coverage / no latency_budget_ms gets the same view
+        # as v0.5 (silent, accuracy-only).
+        if _has_extra_dims(summary.dimensional_means):
+            _emit_dimensional_breakdown(summary.dimensional_means)
         if summary.objective_summaries and objective is None:
             # Per-objective breakdown — only when there are objectives
             # declared AND we're showing the full eval (not a single-
@@ -412,6 +419,50 @@ def _emit_table(
             _truncate(first_rat, 60),
         )
     console.print(cases)
+
+
+def _has_extra_dims(means: DimensionalMeans) -> bool:
+    """True iff the dataset opted in to faithfulness or coverage.
+
+    Accuracy and latency are scored on every successful run — accuracy is
+    the gate input (already shown as ``mean score``), and latency is
+    derived from the agent's call budget regardless of whether the
+    dataset asked for it. The breakdown table only adds value when a
+    dataset opts in to faithfulness (via ``grounding``) or coverage
+    (via ``expected_coverage``). Legacy datasets keep the exact v0.5
+    single-score view — no extra section.
+    """
+    return any(v is not None for v in (means.faithfulness, means.coverage))
+
+
+def _emit_dimensional_breakdown(means: DimensionalMeans) -> None:
+    """Render the per-dimension rollup as a small two-column table.
+
+    Only scored dims (non-``None``) get a row — silent on dims the
+    dataset didn't opt into. Accuracy is always present (it's the gate)
+    but the other three are conditional, so a dataset with grounding
+    but no expected_coverage sees a two-row table.
+    """
+    table = Table(
+        title="Dimensional breakdown",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("dimension", style="bold")
+    table.add_column("mean", justify="right")
+    table.add_column("notes", style="dim")
+
+    rows: list[tuple[str, float | None, str]] = [
+        ("accuracy", means.accuracy, "judge / exact-match score"),
+        ("faithfulness", means.faithfulness, "answer grounded in context"),
+        ("coverage", means.coverage, "expected substrings present"),
+        ("latency", means.latency, "1.0 within budget, decays to 2x budget"),
+    ]
+    for name, value, note in rows:
+        if value is None:
+            continue
+        table.add_row(name, f"{value:.3f}", note)
+    console.print(table)
 
 
 def _emit_objective_breakdown(summaries: list[ObjectiveSummary]) -> None:
@@ -553,6 +604,15 @@ def _emit_json(
         else 0.0,
         "total_cost_usd": summary.total_cost_usd,
         "overall_pass": overall_pass,
+        # Per-dimension rollup. Each value is the mean across cases
+        # that scored that dim, or null if no case opted in (e.g. a
+        # dataset without grounding fields leaves faithfulness=null).
+        "dimensional_means": {
+            "accuracy": _round_or_none(summary.dimensional_means.accuracy),
+            "faithfulness": _round_or_none(summary.dimensional_means.faithfulness),
+            "coverage": _round_or_none(summary.dimensional_means.coverage),
+            "latency": _round_or_none(summary.dimensional_means.latency),
+        },
         "cases": [
             {
                 "input": c.case.input,
@@ -561,6 +621,12 @@ def _emit_json(
                 "passed": c.passed,
                 "scores_per_run": [round(r.score, 6) for r in c.runs],
                 "rationales": [r.rationale for r in c.runs],
+                # Per-run dimension scores. Each dim is { "value": float|null,
+                # "rationale": str }; null means the dim wasn't scored for
+                # that case (no grounding / no expected_coverage / no budget).
+                "dimensions_per_run": [
+                    _serialize_dimensions(r.dimensions) for r in c.runs
+                ],
             }
             for c in summary.cases
         ],
@@ -586,6 +652,29 @@ def _emit_json(
 
 def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _round_or_none(value: float | None) -> float | None:
+    """Round to 6dp for stable JSON output; preserve ``None`` for unscored dims."""
+    return None if value is None else round(value, 6)
+
+
+def _serialize_dimensions(dims: object) -> dict[str, dict[str, float | str | None]]:
+    """Serialize a :class:`DimensionScores` to a JSON-safe dict.
+
+    Typed as ``object`` so this helper has no static import dependency
+    on :mod:`movate.core.eval`'s dataclass — the JSON emitter doesn't
+    need a tight type binding here, and accepting ``object`` keeps this
+    file's import surface narrow.
+    """
+    out: dict[str, dict[str, float | str | None]] = {}
+    for name in ("accuracy", "faithfulness", "coverage", "latency"):
+        ds = getattr(dims, name)
+        out[name] = {
+            "value": _round_or_none(ds.value),
+            "rationale": ds.rationale,
+        }
+    return out
 
 
 async def _resolve_storage_baseline(
