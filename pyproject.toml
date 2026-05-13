@@ -106,6 +106,10 @@ ignore = ["PLR0913", "PLR0915", "PLR0911"]
 # the top-level Typer callback writes it once on startup, every command reads it. A
 # class wrapper would just push the same single instance through every signature.
 "src/movate/cli/_console.py" = ["B008", "PLW0603"]
+# Doctor-explain prose: each CheckExplanation has operator-facing sentences
+# rendered by Rich. Enforcing 100-char wrapping in the source would splatter
+# awkward continuations; Rich handles terminal wrap at render time.
+"src/movate/cli/_doctor_explanations.py" = ["E501"]
 # FastAPI's idiomatic pattern is identical (`Depends(...)` as a default); same exemption.
 "src/movate/runtime/*.py" = ["B008"]
 # Compiler is naturally branch-heavy (one branch per validation rule) — splitting it

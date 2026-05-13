@@ -102,6 +102,16 @@ def doctor(  # noqa: PLR0912 — branch count is inherent to a multi-section dia
             "Use this when `movate deploy` is failing."
         ),
     ),
+    explain: bool = typer.Option(
+        False,
+        "--explain",
+        help=(
+            "After the doctor table, print a per-check explanation block: "
+            "what each check tests, why it matters, what failure means, and "
+            "the copy-pasteable fix command. Useful for new operators trying "
+            "to interpret a red row."
+        ),
+    ),
     licenses: bool = typer.Option(
         False,
         "--licenses",
@@ -233,10 +243,68 @@ def doctor(  # noqa: PLR0912 — branch count is inherent to a multi-section dia
     console.print(table)
 
     # ------------------------------------------------------------------
+    # Optional: per-check explanation block when --explain is set
+    # ------------------------------------------------------------------
+    if explain:
+        _render_explanations()
+
+    # ------------------------------------------------------------------
     # Optional: Azure preflight when --target is set
     # ------------------------------------------------------------------
     if target is not None:
         _render_azure_preflight(target)
+
+
+def _render_explanations() -> None:
+    """Print a per-check explanation block beneath the doctor table.
+
+    Renders every check that has an entry in the explanations registry
+    (see ``cli/_doctor_explanations.py``) with what it tests, why it
+    matters, what failure means, and the copyable fix command. Operators
+    new to the stack use this to interpret a red row without diving into
+    the codebase.
+
+    Groups output by section heading (deps / runtimes / keys / tracing
+    / storage) so a long scroll is still scannable.
+    """
+    from movate.cli._doctor_explanations import EXPLANATIONS  # noqa: PLC0415
+
+    sections = [
+        ("Required dependencies", [k for k in EXPLANATIONS if k.startswith("dep: ")]),
+        ("Optional dependencies", [k for k in EXPLANATIONS if k.startswith("opt: ")]),
+        ("Runtime adapters", [k for k in EXPLANATIONS if k.startswith("runtime: ")]),
+        ("Provider API keys", [k for k in EXPLANATIONS if k.endswith("_API_KEY")]),
+        (
+            "Tracing",
+            [
+                k
+                for k in EXPLANATIONS
+                if k.startswith(("LANGFUSE_", "OTEL_", "MOVATE_TRACER"))
+            ],
+        ),
+        (
+            "Storage & project",
+            ["storage (sqlite)", "pricing", "movate.yaml"],
+        ),
+    ]
+
+    console.print()
+    console.print("[bold]═══ Check details (--explain) ═══[/bold]")
+    console.print()
+    for section_title, check_ids in sections:
+        if not check_ids:
+            continue
+        console.print(f"[bold cyan]▸ {section_title}[/bold cyan]")
+        console.print()
+        for cid in check_ids:
+            entry = EXPLANATIONS[cid]
+            console.print(f"  [bold]{cid}[/bold]")
+            console.print(f"    [dim]WHAT:[/dim]   {entry.what}")
+            console.print(f"    [dim]WHY:[/dim]    {entry.why}")
+            console.print(f"    [dim]ON FAIL:[/dim] {entry.failure_impact}")
+            if entry.fix:
+                console.print(f"    [dim]FIX:[/dim]    [green]{entry.fix}[/green]")
+            console.print()
 
 
 # Allowlist of SPDX licenses that are safe to embed in customer
