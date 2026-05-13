@@ -366,6 +366,258 @@ async def test_stream_forces_include_usage_option() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Tool-use (PR 6b): tools passthrough + tool_calls parsing
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeFunctionCall:
+    """Mirrors the SDK's ``Function`` shape inside a ``tool_calls`` entry."""
+
+    name: str
+    arguments: str  # JSON-encoded
+
+
+@dataclass
+class _FakeToolCall:
+    """Mirrors the SDK's ``ChatCompletionMessageToolCall`` shape."""
+
+    id: str
+    function: _FakeFunctionCall
+    type: str = "function"
+
+
+@dataclass
+class _FakeMessageWithTools:
+    """Variant of _FakeMessage that also carries ``tool_calls`` — used when
+    the model emits a tool call instead of a final answer."""
+
+    content: str | None = None
+    tool_calls: list[_FakeToolCall] = field(default_factory=list)
+
+
+@pytest.mark.unit
+async def test_complete_passes_tools_through_to_sdk() -> None:
+    """When ``request.tools`` is set, it's forwarded to ``chat.completions.create``
+    as the ``tools`` kwarg — unchanged (the default to_tool_spec already
+    produces the OpenAI shape the SDK accepts)."""
+    fake = _FakeClient()
+    fake.chat.completions.create_response = _FakeChatCompletion(
+        choices=[_FakeChoice(message=_FakeMessage(content="ok"))],
+        usage=_FakeUsage(),
+    )
+    provider = OpenAIProvider(client=fake)  # type: ignore[arg-type]
+
+    tool_specs = [
+        {
+            "type": "function",
+            "function": {
+                "name": "calc",
+                "description": "Adds",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    await provider.complete(
+        CompletionRequest(
+            provider="gpt-4o-mini-2024-07-18",
+            messages=[Message(role="user", content="hi")],
+            tools=tool_specs,
+        )
+    )
+    assert fake.chat.completions.last_create_call.get("tools") == tool_specs
+
+
+@pytest.mark.unit
+async def test_complete_omits_tools_kwarg_when_none() -> None:
+    """Single-shot agents (no skills) don't get a tools= kwarg. The SDK
+    handles ``tools=None`` cleanly but explicit-only keeps wire payload
+    minimal — important under upstream Azure-OpenAI proxies that have
+    historically choked on empty tool arrays."""
+    fake = _FakeClient()
+    fake.chat.completions.create_response = _FakeChatCompletion(
+        choices=[_FakeChoice(message=_FakeMessage(content="ok"))],
+        usage=_FakeUsage(),
+    )
+    provider = OpenAIProvider(client=fake)  # type: ignore[arg-type]
+
+    await provider.complete(
+        CompletionRequest(
+            provider="gpt-4o-mini-2024-07-18",
+            messages=[Message(role="user", content="hi")],
+        )
+    )
+    assert "tools" not in fake.chat.completions.last_create_call
+
+
+@pytest.mark.unit
+async def test_complete_surfaces_tool_call_response() -> None:
+    """A response with ``message.tool_calls`` → ``CompletionResponse(kind="tool_use", ...)``."""
+    fake = _FakeClient()
+    msg = _FakeMessageWithTools(
+        content=None,
+        tool_calls=[
+            _FakeToolCall(
+                id="call_abc",
+                function=_FakeFunctionCall(name="calc", arguments='{"a": 2, "b": 3}'),
+            )
+        ],
+    )
+    fake.chat.completions.create_response = _FakeChatCompletion(
+        choices=[_FakeChoice(message=msg, finish_reason="tool_calls")],
+        usage=_FakeUsage(prompt_tokens=10, completion_tokens=4),
+    )
+    provider = OpenAIProvider(client=fake)  # type: ignore[arg-type]
+
+    resp = await provider.complete(
+        CompletionRequest(
+            provider="gpt-4o-mini-2024-07-18",
+            messages=[Message(role="user", content="2+3?")],
+        )
+    )
+    assert resp.kind == "tool_use"
+    assert resp.tool_name == "calc"
+    assert resp.tool_id == "call_abc"
+    assert resp.tool_input == {"a": 2, "b": 3}
+    # Tokens still surfaced for cost accounting.
+    assert resp.tokens.input == 10
+    assert resp.tokens.output == 4
+
+
+@pytest.mark.unit
+async def test_complete_takes_first_tool_call_when_multiple_emitted() -> None:
+    """Parallel tool calls aren't supported in this cut — first wins,
+    matches LiteLLM PR 1 and native_anthropic PR 6a. Multi-dispatch
+    lands when the executor's tool-use loop gains a parallel path."""
+    fake = _FakeClient()
+    msg = _FakeMessageWithTools(
+        tool_calls=[
+            _FakeToolCall(
+                id="call_1",
+                function=_FakeFunctionCall(name="calc", arguments='{"a": 1, "b": 2}'),
+            ),
+            _FakeToolCall(
+                id="call_2",
+                function=_FakeFunctionCall(name="other", arguments='{"x": 99}'),
+            ),
+        ],
+    )
+    fake.chat.completions.create_response = _FakeChatCompletion(
+        choices=[_FakeChoice(message=msg, finish_reason="tool_calls")],
+        usage=_FakeUsage(),
+    )
+    provider = OpenAIProvider(client=fake)  # type: ignore[arg-type]
+
+    resp = await provider.complete(
+        CompletionRequest(
+            provider="gpt-4o-mini-2024-07-18",
+            messages=[Message(role="user", content="?")],
+        )
+    )
+    assert resp.tool_id == "call_1"
+    assert resp.tool_name == "calc"
+
+
+@pytest.mark.unit
+async def test_complete_handles_malformed_tool_call_arguments() -> None:
+    """Upstream-bug case: ``arguments`` isn't valid JSON. The adapter
+    falls through with empty input rather than crashing — the executor's
+    input-schema validator will surface a readable error on dispatch."""
+    fake = _FakeClient()
+    msg = _FakeMessageWithTools(
+        tool_calls=[
+            _FakeToolCall(
+                id="call_x",
+                function=_FakeFunctionCall(name="calc", arguments="{not valid json"),
+            )
+        ],
+    )
+    fake.chat.completions.create_response = _FakeChatCompletion(
+        choices=[_FakeChoice(message=msg, finish_reason="tool_calls")],
+        usage=_FakeUsage(),
+    )
+    provider = OpenAIProvider(client=fake)  # type: ignore[arg-type]
+
+    resp = await provider.complete(
+        CompletionRequest(
+            provider="gpt-4o-mini-2024-07-18",
+            messages=[Message(role="user", content="?")],
+        )
+    )
+    assert resp.kind == "tool_use"
+    assert resp.tool_input == {}
+
+
+@pytest.mark.unit
+async def test_complete_handles_dict_shape_tool_calls() -> None:
+    """Some SDK versions surface tool_calls as dicts rather than Pydantic
+    models. The adapter accepts both shapes via ``_func_field``."""
+    fake = _FakeClient()
+
+    # Use a plain dict instead of the dataclass — exercise the dict path.
+    tool_call_as_dict = {
+        "id": "call_dict",
+        "type": "function",
+        "function": {"name": "calc", "arguments": '{"a": 1}'},
+    }
+    msg = _FakeMessageWithTools(tool_calls=[tool_call_as_dict])  # type: ignore[list-item]
+    fake.chat.completions.create_response = _FakeChatCompletion(
+        choices=[_FakeChoice(message=msg, finish_reason="tool_calls")],
+        usage=_FakeUsage(),
+    )
+    provider = OpenAIProvider(client=fake)  # type: ignore[arg-type]
+
+    resp = await provider.complete(
+        CompletionRequest(
+            provider="gpt-4o-mini-2024-07-18",
+            messages=[Message(role="user", content="?")],
+        )
+    )
+    assert resp.tool_id == "call_dict"
+    assert resp.tool_name == "calc"
+    assert resp.tool_input == {"a": 1}
+
+
+@pytest.mark.unit
+async def test_complete_passes_through_openai_style_tool_history() -> None:
+    """Continuing-loop history: the executor's OpenAI-style assistant
+    turn (with ``tool_calls``) + ``role="tool"`` result pass straight
+    through to the SDK. No translation needed — OpenAI IS the wire
+    format the executor builds in."""
+    fake = _FakeClient()
+    fake.chat.completions.create_response = _FakeChatCompletion(
+        choices=[_FakeChoice(message=_FakeMessage(content="5"))],
+        usage=_FakeUsage(),
+    )
+    provider = OpenAIProvider(client=fake)  # type: ignore[arg-type]
+
+    history = [
+        Message(role="user", content="2+3?"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_42",
+                    "type": "function",
+                    "function": {"name": "calc", "arguments": '{"a": 2, "b": 3}'},
+                }
+            ],
+        ),
+        Message(role="tool", content='{"sum": 5}', tool_call_id="call_42"),
+    ]
+    await provider.complete(CompletionRequest(provider="gpt-4o-mini-2024-07-18", messages=history))
+    sent = fake.chat.completions.last_create_call["messages"]
+    # Same three messages on the wire, with tool_calls / tool_call_id
+    # preserved (none stripped by ``model_dump(exclude_none=True)``).
+    assert len(sent) == 3
+    assert sent[1]["role"] == "assistant"
+    assert sent[1]["tool_calls"][0]["id"] == "call_42"
+    assert sent[2]["role"] == "tool"
+    assert sent[2]["tool_call_id"] == "call_42"
+
+
+# ---------------------------------------------------------------------------
 # Optional-dep gate
 # ---------------------------------------------------------------------------
 

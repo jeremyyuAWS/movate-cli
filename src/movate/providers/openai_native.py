@@ -10,18 +10,29 @@ Module name is ``openai_native`` (not ``openai``) so we don't shadow
 the SDK package — ``from movate.providers.openai_native import …``
 stays unambiguous.
 
-Scope of this first cut (mirrors the Anthropic adapter)
--------------------------------------------------------
+Scope (v0.6+)
+-------------
 
 * Text-in, text-out :meth:`complete` against
   ``chat.completions.create``.
 * Token-aware :meth:`stream` (``stream=True`` + ``stream_options``).
+* **Native tool-use loop** (PR 6b, v0.6.1): ``tools=`` is passed
+  through to the SDK; responses with ``choices[0].message.tool_calls``
+  are surfaced as ``CompletionResponse(kind="tool_use", ...)`` so the
+  executor's provider-agnostic tool-use loop drives the dispatch.
+
+  The OpenAI SDK accepts the same flat-message + nested-tool-spec
+  format the LiteLLM path uses, so the adapter doesn't need a
+  translation layer like native_anthropic — message history passes
+  through unchanged. The default :meth:`BaseLLMProvider.to_tool_spec`
+  emits the OpenAI shape, so we inherit it without an override.
+
 * Exception translation matching :class:`LiteLLMProvider`'s taxonomy.
 
-Tool-use, structured outputs (``response_format``), Assistants API,
-and vision are intentionally deferred — they need schema /
-Message-type changes that compound the diff. The architecture is
-ready; the features land as follow-ups.
+Structured outputs (``response_format``), Assistants API, and vision
+are intentionally deferred — they need schema / Message-type changes
+that compound the diff. The architecture is ready; the features land
+as follow-ups.
 
 Optional install:
 
@@ -30,6 +41,7 @@ Optional install:
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
@@ -83,12 +95,20 @@ class OpenAIProvider(BaseLLMProvider):
             self._client = _openai.AsyncOpenAI()
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        # Only forward ``tools`` when the agent has skills wired —
+        # matches LiteLLM's behaviour. ``tools=None`` would be cleanly
+        # accepted by the SDK, but being explicit keeps the wire
+        # payload minimal and avoids any upstream-proxy quirks.
+        extra_kwargs: dict[str, Any] = {}
+        if request.tools:
+            extra_kwargs["tools"] = request.tools
         try:
             resp = await self._client.chat.completions.create(
                 model=request.provider,
                 # mypy: the SDK takes ``Iterable[ChatCompletionMessageParam]``
                 # (a TypedDict); our runtime dicts satisfy the same keys.
                 messages=[m.model_dump(exclude_none=True) for m in request.messages],  # type: ignore[misc]
+                **extra_kwargs,
                 **request.params,
             )
         except Exception as exc:
@@ -153,23 +173,79 @@ class OpenAIProvider(BaseLLMProvider):
 def _to_completion_response(resp: Any) -> CompletionResponse:
     """Convert ``chat.completions.create`` response → :class:`CompletionResponse`.
 
-    Text comes from ``choices[0].message.content``. Tool-call shapes
-    are intentionally not extracted in this first cut."""
+    Text comes from ``choices[0].message.content``. If the response
+    carries ``tool_calls``, the FIRST call's name + id + parsed JSON
+    arguments are surfaced via ``kind="tool_use"`` for the executor's
+    tool-use loop. Multiple parallel tool calls in one turn aren't
+    supported in this cut (matches LiteLLM PR 1 and native_anthropic
+    PR 6a) — first wins.
+
+    The SDK delivers ``tool_calls`` as objects with ``id``, ``type``,
+    and a nested ``function`` (``name``, ``arguments`` — a JSON-encoded
+    string). We accept both attribute-style and dict-key access so
+    test fakes can use either; production always sees the attribute
+    form.
+    """
     text = ""
+    tool_calls: list[Any] = []
     choices = getattr(resp, "choices", None) or []
     if choices:
         msg = getattr(choices[0], "message", None)
         if msg is not None:
             text = getattr(msg, "content", "") or ""
+            tool_calls = list(getattr(msg, "tool_calls", None) or [])
 
-    return CompletionResponse(
-        text=text,
-        tokens=_tokens_from_usage(getattr(resp, "usage", None)),
-        raw={
-            "openai_model": getattr(resp, "model", ""),
-            "finish_reason": getattr(choices[0], "finish_reason", "") if choices else "",
-        },
-    )
+    tokens = _tokens_from_usage(getattr(resp, "usage", None))
+    raw = {
+        "openai_model": getattr(resp, "model", ""),
+        "finish_reason": getattr(choices[0], "finish_reason", "") if choices else "",
+    }
+
+    if tool_calls:
+        first = tool_calls[0]
+        function = getattr(first, "function", None)
+        if function is None and isinstance(first, dict):
+            function = first.get("function") or {}
+        if function is None:
+            function = {}
+        tool_name = _func_field(function, "name")
+        args_raw = _func_field(function, "arguments")
+        tool_id = getattr(first, "id", "") or (
+            first.get("id", "") if isinstance(first, dict) else ""
+        )
+        try:
+            parsed = json.loads(args_raw) if args_raw else {}
+        except (TypeError, ValueError):
+            parsed = {}
+        tool_input = parsed if isinstance(parsed, dict) else {}
+        return CompletionResponse(
+            text=text,
+            tokens=tokens,
+            raw=raw,
+            kind="tool_use",
+            tool_name=tool_name,
+            tool_id=tool_id,
+            tool_input=tool_input,
+        )
+
+    return CompletionResponse(text=text, tokens=tokens, raw=raw)
+
+
+def _func_field(function: Any, name: str) -> str:
+    """Pull a tool-call function field whether ``function`` is an
+    attribute-style object or a plain dict.
+
+    Mirrors the LiteLLM provider helper of the same name — the SDK
+    sometimes surfaces these as Pydantic models, sometimes as dicts
+    depending on version, and test fakes use whichever shape is
+    simplest. Returning ``""`` on missing is fine — downstream treats
+    an empty name as "no tool call we can dispatch."
+    """
+    if isinstance(function, dict):
+        v = function.get(name, "")
+        return str(v) if v is not None else ""
+    v = getattr(function, name, "")
+    return str(v) if v is not None else ""
 
 
 def _stream_chunk_from_openai(chunk: Any) -> StreamChunk | None:
