@@ -1,0 +1,6 @@
+# Manager routing is deterministic — every question has exactly one
+# correct lane. Exact match compares the agent's full output against
+# the case's `expected` block. Since manager only emits
+# `{"classification": "..."}`, the comparison just checks the
+# classification field.
+method: exact
