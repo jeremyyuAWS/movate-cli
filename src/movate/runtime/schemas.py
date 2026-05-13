@@ -247,6 +247,30 @@ class AgentCreatedView(BaseModel):
     "schema/input.json", "schema/output.json"]``."""
 
 
+class AgentRunSubmission(BaseModel):
+    """``POST /api/v1/agents/{name}/runs`` request body.
+
+    Agent-scoped run (REST-clean: the resource being created is a
+    *run* under the *agent* parent). Body just carries the input
+    payload — the agent name lives in the URL, ``kind=AGENT`` is
+    implicit, no target field needed.
+
+    Same shape as :class:`RunSubmission` minus ``kind`` and
+    ``target`` (URL-anchored).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    input: dict[str, Any]
+    notify_email: str | None = Field(
+        default=None,
+        description=(
+            "Optional email address. If set, the worker emails this "
+            "address when the run reaches a terminal status."
+        ),
+    )
+
+
 class AgentValidationIssue(BaseModel):
     """One finding from ``POST /api/v1/agents/{name}/validate``.
 
@@ -431,6 +455,7 @@ __all__ = [
     "AgentDatasetInfo",
     "AgentDetailView",
     "AgentListView",
+    "AgentRunSubmission",
     "AgentValidationCostForecast",
     "AgentValidationIssue",
     "AgentValidationView",
