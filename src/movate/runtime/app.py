@@ -820,6 +820,47 @@ def build_app(
         await store.save_job(job)
         return RunAccepted(job_id=job.job_id, status=job.status)
 
+    @v1.get(
+        "/jobs",
+        response_model=JobListView,
+        tags=["jobs-v1"],
+    )
+    async def v1_list_jobs(
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+        status: JobStatus | None = None,
+        agent: str | None = None,
+        limit: int = 20,
+    ) -> JobListView:
+        """Filterable + paginatable job history for the Angular UI's
+        run-history table.
+
+        Extends the legacy ``GET /jobs`` (which only filtered by
+        ``status``) with:
+
+        * ``agent=<name>`` — drives the agent-profile page's
+          "recent runs" tab. Filters server-side via the new
+          ``list_jobs(target=...)`` storage method.
+        * Same tenant-scoping as the legacy endpoint — a tenant
+          can never see another tenant's jobs.
+
+        Limit is hard-capped at 100 for response size + perf.
+
+        Errors:
+
+        * **401** — missing / bad bearer token
+        """
+        capped_limit = max(1, min(limit, 100))
+        store: StorageProvider = request.app.state.storage
+        records = await store.list_jobs(
+            tenant_id=ctx.tenant_id,
+            status=status,
+            target=agent,
+            limit=capped_limit,
+        )
+        views = [JobView.from_record(r) for r in records]
+        return JobListView(jobs=views, count=len(views))
+
     app.include_router(v1)
 
     # ------------------------------------------------------------------

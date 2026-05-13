@@ -161,6 +161,7 @@ class InMemoryStorage:
         *,
         tenant_id: str | None = None,
         status: JobStatus | None = None,
+        target: str | None = None,
         limit: int = 20,
     ) -> list[JobRecord]:
         rows = self.jobs
@@ -168,6 +169,8 @@ class InMemoryStorage:
             rows = [j for j in rows if j.tenant_id == tenant_id]
         if status:
             rows = [j for j in rows if j.status == status]
+        if target:
+            rows = [j for j in rows if j.target == target]
         # Newest-first to match SqliteProvider's ORDER BY.
         return sorted(rows, key=lambda j: j.created_at, reverse=True)[:limit]
 

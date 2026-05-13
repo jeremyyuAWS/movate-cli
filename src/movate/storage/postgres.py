@@ -509,6 +509,7 @@ class PostgresProvider:
         *,
         tenant_id: str | None = None,
         status: JobStatus | None = None,
+        target: str | None = None,
         limit: int = 20,
     ) -> list[JobRecord]:
         clauses: list[str] = []
@@ -519,6 +520,9 @@ class PostgresProvider:
         if status is not None:
             params.append(status.value)
             clauses.append(f"status = ${len(params)}")
+        if target is not None:
+            params.append(target)
+            clauses.append(f"target = ${len(params)}")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
         sql = f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ${len(params)}"
