@@ -55,9 +55,7 @@ def test_neither_file_returns_defaults(in_empty_dir: Path) -> None:
 def test_only_movate_yaml_loads_with_deprecation_warning(
     in_empty_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    (in_empty_dir / "movate.yaml").write_text(
-        "policy:\n  allowed_providers: [legacy]\n"
-    )
+    (in_empty_dir / "movate.yaml").write_text("policy:\n  allowed_providers: [legacy]\n")
     cfg = load_project_config()
     assert cfg.policy.allowed_providers == ["legacy"]
     captured = capsys.readouterr()
@@ -68,9 +66,7 @@ def test_only_movate_yaml_loads_with_deprecation_warning(
 def test_only_policy_yaml_loads_without_warning(
     in_empty_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    (in_empty_dir / "policy.yaml").write_text(
-        "policy:\n  allowed_providers: [canonical]\n"
-    )
+    (in_empty_dir / "policy.yaml").write_text("policy:\n  allowed_providers: [canonical]\n")
     cfg = load_project_config()
     assert cfg.policy.allowed_providers == ["canonical"]
     captured = capsys.readouterr()
@@ -83,12 +79,8 @@ def test_both_files_present_policy_yaml_wins(
 ) -> None:
     """Mid-rename state: an operator dropped policy.yaml in but didn't
     delete movate.yaml yet. We pick the canonical name silently."""
-    (in_empty_dir / "movate.yaml").write_text(
-        "policy:\n  allowed_providers: [legacy]\n"
-    )
-    (in_empty_dir / "policy.yaml").write_text(
-        "policy:\n  allowed_providers: [canonical]\n"
-    )
+    (in_empty_dir / "movate.yaml").write_text("policy:\n  allowed_providers: [legacy]\n")
+    (in_empty_dir / "policy.yaml").write_text("policy:\n  allowed_providers: [canonical]\n")
     cfg = load_project_config()
     assert cfg.policy.allowed_providers == ["canonical"]
     # No deprecation warning when policy.yaml exists — the migration
@@ -149,9 +141,7 @@ def test_deprecation_warning_fires_once_per_process(
     """Single CLI invocation may load the config multiple times (validate
     + run + deploy all call load_project_config independently). We only
     want the operator to see one deprecation line, not three."""
-    (in_empty_dir / "movate.yaml").write_text(
-        "policy:\n  allowed_providers: [a]\n"
-    )
+    (in_empty_dir / "movate.yaml").write_text("policy:\n  allowed_providers: [a]\n")
     load_project_config()
     load_project_config()
     load_project_config()

@@ -116,9 +116,7 @@ async def test_complete_happy_path(monkeypatch) -> None:
 async def test_complete_caller_supplies_session_id(monkeypatch) -> None:
     """When ``params.session_id`` is set, the adapter uses it verbatim
     so multi-turn conversation history can be preserved across calls."""
-    client = _FakeAsyncClient(
-        response=_FakeResponse(status_code=200, json_data={"response": "ok"})
-    )
+    client = _FakeAsyncClient(response=_FakeResponse(status_code=200, json_data={"response": "ok"}))
     _patch_httpx(monkeypatch, client)
 
     provider = LyzrProvider(api_key="sk-default-test")
@@ -151,9 +149,7 @@ async def test_missing_api_key_raises_auth_error(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_401_raises_auth_error(monkeypatch) -> None:
-    client = _FakeAsyncClient(
-        response=_FakeResponse(status_code=401, text="unauthorized")
-    )
+    client = _FakeAsyncClient(response=_FakeResponse(status_code=401, text="unauthorized"))
     _patch_httpx(monkeypatch, client)
     provider = LyzrProvider(api_key="sk-default-bogus")
     with pytest.raises(AuthError):
@@ -184,9 +180,7 @@ async def test_429_raises_rate_limit_error_with_retry_after(monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_500_raises_model_unavailable(monkeypatch) -> None:
-    client = _FakeAsyncClient(
-        response=_FakeResponse(status_code=503, text="lyzr down")
-    )
+    client = _FakeAsyncClient(response=_FakeResponse(status_code=503, text="lyzr down"))
     _patch_httpx(monkeypatch, client)
     provider = LyzrProvider(api_key="sk-default-test")
     with pytest.raises(ModelUnavailableError):
@@ -200,9 +194,7 @@ async def test_500_raises_model_unavailable(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_400_raises_schema_error(monkeypatch) -> None:
-    client = _FakeAsyncClient(
-        response=_FakeResponse(status_code=400, text="bad request")
-    )
+    client = _FakeAsyncClient(response=_FakeResponse(status_code=400, text="bad request"))
     _patch_httpx(monkeypatch, client)
     provider = LyzrProvider(api_key="sk-default-test")
     with pytest.raises(SchemaError):
@@ -247,9 +239,7 @@ async def test_extract_user_message_picks_last_user_role(monkeypatch) -> None:
     """When multiple messages are passed, adapter uses the LAST user message
     (Lyzr's chat endpoint takes a single string; system + assistant messages
     are encoded server-side via agent_instructions and session state)."""
-    client = _FakeAsyncClient(
-        response=_FakeResponse(status_code=200, json_data={"response": "ok"})
-    )
+    client = _FakeAsyncClient(response=_FakeResponse(status_code=200, json_data={"response": "ok"}))
     _patch_httpx(monkeypatch, client)
     provider = LyzrProvider(api_key="sk-default-test")
     await provider.complete(

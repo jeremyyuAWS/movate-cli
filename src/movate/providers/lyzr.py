@@ -105,11 +105,7 @@ class LyzrProvider(BaseLLMProvider):
         be slow for fan-out — 60s is generous and matches the
         anthropic/openai adapters."""
         self._api_key = api_key or os.environ.get("LYZR_API_KEY")
-        self._base_url = (
-            base_url
-            or os.environ.get("LYZR_API_BASE")
-            or _DEFAULT_BASE
-        ).rstrip("/")
+        self._base_url = (base_url or os.environ.get("LYZR_API_BASE") or _DEFAULT_BASE).rstrip("/")
         self._timeout = timeout
         # We don't fail in __init__ if api_key is missing — the
         # registry constructs adapters opportunistically and a missing
@@ -131,9 +127,7 @@ class LyzrProvider(BaseLLMProvider):
         # Session ID: callers can pass a stable one for multi-turn;
         # otherwise we generate a fresh one per call so each eval case
         # is independent (no conversation bleeding across runs).
-        session_id = request.params.get(
-            "session_id"
-        ) or f"{agent_id}-{uuid.uuid4().hex[:11]}"
+        session_id = request.params.get("session_id") or f"{agent_id}-{uuid.uuid4().hex[:11]}"
         user_id = request.params.get("user_id") or "mdk-runtime"
 
         body = {
@@ -156,13 +150,10 @@ class LyzrProvider(BaseLLMProvider):
                 )
         except httpx.TimeoutException as exc:
             raise MovateTimeoutError(
-                f"Lyzr inference timed out after {self._timeout}s "
-                f"(agent_id={agent_id})"
+                f"Lyzr inference timed out after {self._timeout}s (agent_id={agent_id})"
             ) from exc
         except httpx.RequestError as exc:
-            raise ModelUnavailableError(
-                f"Lyzr API request failed: {exc}"
-            ) from exc
+            raise ModelUnavailableError(f"Lyzr API request failed: {exc}") from exc
 
         if resp.status_code in {_HTTP_UNAUTHORIZED, _HTTP_FORBIDDEN}:
             raise AuthError(
@@ -176,31 +167,20 @@ class LyzrProvider(BaseLLMProvider):
                 retry_after=_parse_retry_after(resp.headers),
             )
         if resp.status_code >= _HTTP_INTERNAL_SERVER_ERROR:
-            raise ModelUnavailableError(
-                f"Lyzr returned {resp.status_code}: {resp.text[:200]}"
-            )
+            raise ModelUnavailableError(f"Lyzr returned {resp.status_code}: {resp.text[:200]}")
         if resp.status_code >= _HTTP_BAD_REQUEST:
-            raise SchemaError(
-                f"Lyzr returned {resp.status_code}: {resp.text[:200]}"
-            )
+            raise SchemaError(f"Lyzr returned {resp.status_code}: {resp.text[:200]}")
 
         try:
             data: dict[str, Any] = resp.json()
         except ValueError as exc:  # pragma: no cover — defensive
-            raise SchemaError(
-                f"Lyzr response was not valid JSON: {resp.text[:200]}"
-            ) from exc
+            raise SchemaError(f"Lyzr response was not valid JSON: {resp.text[:200]}") from exc
 
         # Lyzr's chat endpoint returns text in a "response" key based
         # on observed behavior. We fall back to common alternatives so
         # we're robust to minor API shape changes. If a future Lyzr
         # release adds token counts we'll lift them into TokenUsage.
-        text = (
-            data.get("response")
-            or data.get("message")
-            or data.get("output")
-            or ""
-        )
+        text = data.get("response") or data.get("message") or data.get("output") or ""
 
         return CompletionResponse(
             text=text,
@@ -229,9 +209,7 @@ class LyzrProvider(BaseLLMProvider):
     async def embed(
         self, text: str, *, model: str
     ) -> list[float]:  # pragma: no cover — not supported
-        raise NotImplementedError(
-            "Embedding is not supported on runtime: lyzr"
-        )
+        raise NotImplementedError("Embedding is not supported on runtime: lyzr")
 
     # ----- helpers --------------------------------------------------------
 
@@ -243,14 +221,10 @@ class LyzrProvider(BaseLLMProvider):
         we re-check here so the adapter is robust if called directly
         (e.g. in tests)."""
         if not provider.startswith("lyzr/"):
-            raise SchemaError(
-                f"Lyzr provider string must be 'lyzr/<agent_id>', got {provider!r}"
-            )
+            raise SchemaError(f"Lyzr provider string must be 'lyzr/<agent_id>', got {provider!r}")
         agent_id = provider[len("lyzr/") :]
         if not agent_id:
-            raise SchemaError(
-                "Lyzr provider string is missing the agent id after 'lyzr/'"
-            )
+            raise SchemaError("Lyzr provider string is missing the agent id after 'lyzr/'")
         return agent_id
 
     @staticmethod

@@ -117,10 +117,7 @@ def import_lyzr(
     for diffing + audit.
     """
     if runtime not in ("lyzr", "litellm"):
-        err.print(
-            f"[red]✗ bad flag:[/red] --runtime must be 'lyzr' or 'litellm', "
-            f"got {runtime!r}"
-        )
+        err.print(f"[red]✗ bad flag:[/red] --runtime must be 'lyzr' or 'litellm', got {runtime!r}")
         raise typer.Exit(code=2)
 
     try:
@@ -164,9 +161,7 @@ def _build_plan(lyzr_def: dict[str, Any], *, runtime: str) -> dict[str, Any]:
     """
     raw_name = lyzr_def.get("name") or ""
     if not raw_name:
-        raise _LyzrImportError(
-            "Lyzr definition is missing the required 'name' field"
-        )
+        raise _LyzrImportError("Lyzr definition is missing the required 'name' field")
     agent_name = _slugify_name(raw_name)
 
     lyzr_id = lyzr_def.get("_id") or ""
@@ -174,8 +169,7 @@ def _build_plan(lyzr_def: dict[str, Any], *, runtime: str) -> dict[str, Any]:
     instructions = (lyzr_def.get("agent_instructions") or "").strip()
     if not instructions:
         raise _LyzrImportError(
-            "Lyzr definition is missing 'agent_instructions' — "
-            "MDK requires a non-empty prompt"
+            "Lyzr definition is missing 'agent_instructions' — MDK requires a non-empty prompt"
         )
 
     goals: list[str] = []
@@ -213,9 +207,7 @@ def _build_plan(lyzr_def: dict[str, Any], *, runtime: str) -> dict[str, Any]:
                 f"Edit agent.yaml after import or open an issue to add a mapping."
             )
         if not model:
-            raise _LyzrImportError(
-                "Lyzr definition is missing the 'model' field"
-            )
+            raise _LyzrImportError("Lyzr definition is missing the 'model' field")
         provider_str = f"{family}/{model}"
 
     # Numeric coercion — Lyzr ships these as strings (e.g. "0.8", "1").
@@ -266,9 +258,7 @@ def _slugify_name(raw: str) -> str:
     # Lowercase + replace runs of non-alphanumerics with hyphens
     slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
     if not slug:
-        raise _LyzrImportError(
-            f"Could not slugify Lyzr agent name {raw!r}"
-        )
+        raise _LyzrImportError(f"Could not slugify Lyzr agent name {raw!r}")
     # MDK agent names must start with a letter or digit and end the same way
     return slug
 
@@ -306,9 +296,7 @@ def _coerce_float(raw: Any, field: str) -> float:
     try:
         return float(raw)
     except (TypeError, ValueError) as exc:
-        raise _LyzrImportError(
-            f"Lyzr field {field!r} is not a valid number: {raw!r}"
-        ) from exc
+        raise _LyzrImportError(f"Lyzr field {field!r} is not a valid number: {raw!r}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -316,9 +304,7 @@ def _coerce_float(raw: Any, field: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _write_agent(
-    agent_dir: Path, plan: dict[str, Any], lyzr_def: dict[str, Any]
-) -> None:
+def _write_agent(agent_dir: Path, plan: dict[str, Any], lyzr_def: dict[str, Any]) -> None:
     """Write the agent directory: agent.yaml + prompt.md + schemas + examples
     + lyzr-original.json. Idempotent — overwrites unconditionally
     once the caller has handled the --force gate."""
@@ -326,9 +312,7 @@ def _write_agent(
     (agent_dir / "schema").mkdir(parents=True, exist_ok=True)
 
     # Preserve the source JSON for diff + audit
-    (agent_dir / "lyzr-original.json").write_text(
-        json.dumps(lyzr_def, indent=2) + "\n"
-    )
+    (agent_dir / "lyzr-original.json").write_text(json.dumps(lyzr_def, indent=2) + "\n")
 
     (agent_dir / "agent.yaml").write_text(_render_agent_yaml(plan))
     (agent_dir / "prompt.md").write_text(_render_prompt_md(plan))
@@ -351,21 +335,20 @@ def _render_agent_yaml(plan: dict[str, Any]) -> str:
         desc = plan["description"].replace("\n", "\n  ")
         lines.append(f"description: |\n  {desc}")
 
-    lines.extend([
-        "",
-        f"# Imported from Lyzr agent _id={plan['lyzr_id']!r}",
-        f"# Original name: {plan['raw_name']!r}",
-        "# See ./lyzr-original.json for the source definition.",
-    ])
+    lines.extend(
+        [
+            "",
+            f"# Imported from Lyzr agent _id={plan['lyzr_id']!r}",
+            f"# Original name: {plan['raw_name']!r}",
+            "# See ./lyzr-original.json for the source definition.",
+        ]
+    )
     if plan["managed_agents"]:
         lines.append(
             f"# Lyzr 'managed_agents' ({len(plan['managed_agents'])} role agents) "
             f"are routed internally by Lyzr today."
         )
-        lines.append(
-            "# Migration target: replicate as MDK workflow with conditional "
-            "edges (v1.1)."
-        )
+        lines.append("# Migration target: replicate as MDK workflow with conditional edges (v1.1).")
     if plan["max_iterations"]:
         lines.append(
             f"# Lyzr max_iterations={plan['max_iterations']} (ReAct loop "
@@ -381,37 +364,43 @@ def _render_agent_yaml(plan: dict[str, Any]) -> str:
         for goal in plan["goals"]:
             lines.append(f"#   - {goal}")
 
-    lines.extend([
-        "",
-        f"# runtime={plan['runtime']}: "
-        + (
-            "calls back to Lyzr at inference time (eval/bench an existing agent)"
-            if plan["runtime"] == "lyzr"
-            else "MDK-native (LiteLLM does the model call)"
-        ),
-        f"runtime: {plan['runtime']}",
-        "model:",
-        f"  provider: {plan['provider_str']}",
-    ])
+    lines.extend(
+        [
+            "",
+            f"# runtime={plan['runtime']}: "
+            + (
+                "calls back to Lyzr at inference time (eval/bench an existing agent)"
+                if plan["runtime"] == "lyzr"
+                else "MDK-native (LiteLLM does the model call)"
+            ),
+            f"runtime: {plan['runtime']}",
+            "model:",
+            f"  provider: {plan['provider_str']}",
+        ]
+    )
     if plan["params"]:
         lines.append("  params:")
         for key, val in plan["params"].items():
             lines.append(f"    {key}: {val}")
 
-    lines.extend([
-        "",
-        "prompt: ./prompt.md",
-        "",
-        "schema:",
-        "  input: ./schema/input.json",
-        "  output: ./schema/output.json",
-    ])
+    lines.extend(
+        [
+            "",
+            "prompt: ./prompt.md",
+            "",
+            "schema:",
+            "  input: ./schema/input.json",
+            "  output: ./schema/output.json",
+        ]
+    )
 
     if plan["examples"]:
-        lines.extend([
-            "",
-            "# Imported examples — smoke-test on `mdk validate` (v0.7 feature).",
-        ])
+        lines.extend(
+            [
+                "",
+                "# Imported examples — smoke-test on `mdk validate` (v0.7 feature).",
+            ]
+        )
 
     if plan["tags"]:
         lines.append("")
@@ -440,16 +429,18 @@ def _render_prompt_md(plan: dict[str, Any]) -> str:
             parts.append(f"Assistant: {ex['assistant']}")
             parts.append("")
 
-    parts.extend([
-        "",
-        "# Customer message",
-        "",
-        "{{ input.message }}",
-        "",
-        "# Output format",
-        "",
-        'Return JSON of the shape: `{"response": "<your answer>"}`. No prose, no code fences.',
-    ])
+    parts.extend(
+        [
+            "",
+            "# Customer message",
+            "",
+            "{{ input.message }}",
+            "",
+            "# Output format",
+            "",
+            'Return JSON of the shape: `{"response": "<your answer>"}`. No prose, no code fences.',
+        ]
+    )
     return "\n".join(parts) + "\n"
 
 
@@ -481,9 +472,7 @@ _OUTPUT_SCHEMA = """{
 # ---------------------------------------------------------------------------
 
 
-def _render_summary(
-    plan: dict[str, Any], agent_dir: Path, json_file: Path
-) -> None:
+def _render_summary(plan: dict[str, Any], agent_dir: Path, json_file: Path) -> None:
     """Print a Rich summary table showing what was imported + next steps."""
     table = Table(
         title=f"✓ {plan['agent_name']} — imported from lyzr → runtime: {plan['runtime']}",
@@ -514,13 +503,11 @@ def _render_summary(
     if plan["runtime"] == "lyzr":
         console.print("[dim]Next:[/dim]")
         console.print(
-            "  export LYZR_API_KEY=sk-default-...   "
-            "[dim](from Lyzr Studio → Agent → API Key)[/dim]"
+            "  export LYZR_API_KEY=sk-default-...   [dim](from Lyzr Studio → Agent → API Key)[/dim]"
         )
         console.print(f"  mdk validate {agent_dir}")
         console.print(
-            f"  mdk run {agent_dir} '{{\"message\": \"hi\"}}'   "
-            "[dim](calls Lyzr at runtime)[/dim]"
+            f'  mdk run {agent_dir} \'{{"message": "hi"}}\'   [dim](calls Lyzr at runtime)[/dim]'
         )
         if plan["managed_agents"]:
             console.print(
@@ -532,6 +519,5 @@ def _render_summary(
         console.print("[dim]Next:[/dim]")
         console.print(f"  mdk validate {agent_dir}")
         console.print(
-            f"  mdk run {agent_dir} '{{\"message\": \"hi\"}}'   "
-            "[dim](MDK-native via LiteLLM)[/dim]"
+            f'  mdk run {agent_dir} \'{{"message": "hi"}}\'   [dim](MDK-native via LiteLLM)[/dim]'
         )
