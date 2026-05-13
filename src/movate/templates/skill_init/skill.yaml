@@ -1,0 +1,36 @@
+api_version: movate/v1
+kind: Skill
+
+name: __SKILL_NAME__
+version: 0.1.0
+description: >-
+  A starter Python skill. Replace this description with what the skill
+  actually does (one or two sentences max — the LLM sees this when
+  deciding whether to call the tool).
+
+# Input + output schemas. Inline shorthand (PR #47): each field is
+# `name: type` with `?` for optional. Drop the dict form and use
+# `input: ./schema/input.json` if you need a full JSON Schema with
+# refs / oneOf / regex.
+schema:
+  input:
+    # Replace these with the fields your skill actually accepts.
+    query: string
+  output:
+    # Replace this with the shape your skill returns.
+    result: string
+
+implementation:
+  kind: python
+  # Edit impl.py and update this entry to match (pkg.mod:func).
+  # The default points at the sample impl shipped alongside this file.
+  entry: __SKILL_NAME__.impl:run
+
+cost:
+  # Most local Python skills are free. Bump this if your skill calls a
+  # paid API, so the per-run budget enforcement is accurate.
+  per_call_usd: 0.0
+
+# `read-only` | `network` | `filesystem` | `mutates-state`.
+# Documentary today; a later PR adds project-policy gates on this field.
+side_effects: read-only

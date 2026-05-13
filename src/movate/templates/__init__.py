@@ -28,6 +28,14 @@ TEMPLATES: dict[str, str] = {
     "extractor": "extractor_agent",
 }
 
+# Skill templates live alongside agent templates but are reached via
+# ``mdk skills scaffold`` rather than ``mdk init``. Only one entry
+# today — the python-backend echo skill — but the registry pattern
+# generalizes (e.g. an http-backend starter could ship later).
+SKILL_TEMPLATES: dict[str, str] = {
+    "default": "skill_init",
+}
+
 
 def list_templates() -> list[str]:
     """Sorted list of template names."""

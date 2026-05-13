@@ -427,6 +427,26 @@ The backend handles the failure modes you'd expect:
 Only `bearer-from-env:VAR` auth is supported today; basic-auth and
 arbitrary-header forms land in a follow-up PR.
 
+### Operator commands
+
+```bash
+# Drop a starter skill from the packaged template
+mdk skills scaffold calculator
+
+# See every skill the project's `skills/` folder exposes
+mdk skills list
+
+# Test a skill in isolation without wiring it into an agent
+mdk skills run calculator '{"query": "what is 41+1?"}'
+```
+
+`mdk skills run` validates the input against the skill's schema,
+dispatches via the registered backend, validates the output, and
+prints the result on stdout. Identical code path to what the
+executor runs per tool call inside a real agent — but without the
+LLM cost. Great for iterating on `impl.py` (or the HTTP API behind
+an http skill) before committing to a full agent run.
+
 See [docs/adr/002-skills-and-contexts.md](docs/adr/002-skills-and-contexts.md)
 for the full design.
 
