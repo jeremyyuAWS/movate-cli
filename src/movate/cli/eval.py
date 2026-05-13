@@ -22,6 +22,7 @@ from movate.cli._output import Report
 from movate.cli._progress import progress_bar
 from movate.cli._runtime import build_local_runtime, shutdown_runtime
 from movate.core.baseline import BaselineDiff, compute_baseline_diff, format_delta
+from movate.core.client import MovateClient
 from movate.core.eval import (
     CaseSummary,
     EvalConfigError,
@@ -29,8 +30,10 @@ from movate.core.eval import (
     EvalSummary,
     ObjectiveSummary,
 )
+from movate.core.executor import Executor
 from movate.core.loader import AgentBundle, AgentLoadError, load_agent
 from movate.core.models import EvalRecord
+from movate.core.remote_executor import RemoteExecutor
 from movate.core.reporters import render_eval_markdown
 from movate.storage.base import StorageProvider
 
@@ -39,9 +42,16 @@ err_console = Console(stderr=True)
 
 
 def eval_(
-    path: Path = typer.Argument(
+    path: str = typer.Argument(
         ...,
-        help="Path to agent directory.",
+        help=(
+            "Path to an agent directory OR a base URL of a deployed movate "
+            "runtime (http://… or https://…). With a URL, each dataset case "
+            "is submitted as a job, polled to terminal, and the resulting "
+            "RunRecord is scored — no local provider is invoked. Requires "
+            "--agent-yaml so the local copy provides the dataset and output "
+            "schema for scoring."
+        ),
         shell_complete=complete_agent_path,
     ),
     gate: float = typer.Option(0.7, "--gate", help="Per-case score required to pass (0.0-1.0)."),
@@ -97,6 +107,24 @@ def eval_(
         ),
     ),
     output_format: Report = typer.Option(Report.TABLE, "--output", "-o", case_sensitive=False),
+    api_key: str = typer.Option(
+        None,
+        "--api-key",
+        envvar="MOVATE_API_KEY",
+        help=(
+            "Bearer token for remote eval (path starts with http(s)://). "
+            "Falls back to the MOVATE_API_KEY env var."
+        ),
+    ),
+    agent_yaml: Path = typer.Option(
+        None,
+        "--agent-yaml",
+        help=(
+            "Local agent directory used for dataset + output schema when "
+            "evaluating a deployed runtime. Required when path is a URL; "
+            "ignored when path is a directory."
+        ),
+    ),
 ) -> None:
     """Run the eval suite for an agent and gate on a threshold.
 
@@ -116,16 +144,41 @@ def eval_(
 
       [dim]# Hermetic CI run (no API keys needed)[/dim]
       $ movate eval ./faq-agent --mock
+
+      [dim]# Black-box eval against a deployed movate runtime[/dim]
+      $ movate eval https://faq-runtime.example.com \\
+          --agent-yaml ./faq-agent --api-key mvt_dev_...
     """
     if baseline is not None and baseline_file is not None:
         err_console.print("[red]✗[/red] --baseline and --baseline-file are mutually exclusive")
         raise typer.Exit(code=2)
 
-    try:
-        bundle = load_agent(path)
-    except AgentLoadError as exc:
-        err_console.print(f"[red]✗ load failed:[/red] {exc}")
-        raise typer.Exit(code=2) from None
+    remote_url = _resolve_remote_url(path)
+    if remote_url is not None:
+        # Remote eval: dataset + schemas come from --agent-yaml, but
+        # execution lands on the deployed runtime via MovateClient.
+        if agent_yaml is None:
+            err_console.print(
+                "[red]✗[/red] --agent-yaml is required when path is a URL "
+                "(the local copy provides the dataset and output schema for scoring)"
+            )
+            raise typer.Exit(code=2)
+        if not api_key:
+            err_console.print(
+                "[red]✗[/red] no API key for remote eval — pass --api-key or set MOVATE_API_KEY"
+            )
+            raise typer.Exit(code=2)
+        try:
+            bundle = load_agent(agent_yaml)
+        except AgentLoadError as exc:
+            err_console.print(f"[red]✗ load failed:[/red] {exc}")
+            raise typer.Exit(code=2) from None
+    else:
+        try:
+            bundle = load_agent(Path(path))
+        except AgentLoadError as exc:
+            err_console.print(f"[red]✗ load failed:[/red] {exc}")
+            raise typer.Exit(code=2) from None
 
     asyncio.run(
         _run_eval(
@@ -140,8 +193,23 @@ def eval_(
             regression_tolerance=regression_tolerance,
             objective=objective,
             output_format=output_format,
+            remote_url=remote_url,
+            remote_api_key=api_key if remote_url else None,
         )
     )
+
+
+def _resolve_remote_url(path: str) -> str | None:
+    """Return ``path`` if it's an ``http(s)://`` URL, else ``None``.
+
+    Lets the eval command accept either a filesystem agent directory
+    OR a deployed runtime base URL in the same positional argument
+    without splitting it across two commands.
+    """
+    lower = path.lower()
+    if lower.startswith(("http://", "https://")):
+        return path
+    return None
 
 
 async def _run_eval(  # noqa: PLR0912 — orchestrator; branch count is inherent
@@ -157,8 +225,25 @@ async def _run_eval(  # noqa: PLR0912 — orchestrator; branch count is inherent
     regression_tolerance: float = 0.0,
     objective: str | None = None,
     output_format: Report = Report.TABLE,
+    remote_url: str | None = None,
+    remote_api_key: str | None = None,
 ) -> None:
     rt = await build_local_runtime(mock=mock)
+    # When path was a URL, swap the local in-process Executor for a
+    # RemoteExecutor that submits each case as a job and polls. The
+    # local runtime is still built because we need its provider (for
+    # the LLM judge), storage (for saving the EvalRecord baseline),
+    # and tracer — only the executor changes.
+    remote_client: MovateClient | None = None
+    if remote_url is not None:
+        # MovateClient.__aenter__ doesn't actually open a connection
+        # (httpx is lazy on first request), so building it here without
+        # entering the context manager is safe — RemoteExecutor uses
+        # it for the duration of the eval.
+        remote_client = MovateClient(base_url=remote_url, api_key=remote_api_key or "")
+        executor_for_eval: Executor | RemoteExecutor = RemoteExecutor(remote_client)
+    else:
+        executor_for_eval = rt.executor
     baseline_record: EvalRecord | None = None
     try:
         # Progress UI is on for human-facing output (table); off for
@@ -169,7 +254,7 @@ async def _run_eval(  # noqa: PLR0912 — orchestrator; branch count is inherent
 
         with _maybe_eval_progress(show_progress) as on_case:
             engine = EvalEngine(
-                executor=rt.executor,
+                executor=executor_for_eval,  # type: ignore[arg-type]
                 provider=rt.provider,
                 runs_per_case=runs,
                 gate_mode=gate_mode,
@@ -187,6 +272,12 @@ async def _run_eval(  # noqa: PLR0912 — orchestrator; branch count is inherent
         baseline_record = await _resolve_storage_baseline(rt.storage, baseline_id)
     finally:
         await shutdown_runtime(rt.storage, rt.tracer)
+        if remote_client is not None:
+            # MovateClient owns the httpx connection pool; closing here
+            # rather than via async-with so the pool stays alive across
+            # the whole eval run (one TCP+TLS handshake amortised across
+            # every case) instead of being torn down per request.
+            await remote_client.aclose()
 
     # Resolve a file-based baseline outside the storage block — pure I/O,
     # no runtime needed. (`baseline_id` and `baseline_file` are mutually
