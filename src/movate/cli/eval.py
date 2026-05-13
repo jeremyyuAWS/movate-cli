@@ -624,9 +624,7 @@ def _emit_json(
                 # Per-run dimension scores. Each dim is { "value": float|null,
                 # "rationale": str }; null means the dim wasn't scored for
                 # that case (no grounding / no expected_coverage / no budget).
-                "dimensions_per_run": [
-                    _serialize_dimensions(r.dimensions) for r in c.runs
-                ],
+                "dimensions_per_run": [_serialize_dimensions(r.dimensions) for r in c.runs],
             }
             for c in summary.cases
         ],

@@ -77,9 +77,7 @@ def tracer() -> NullTracer:
     return NullTracer()
 
 
-def _executor(
-    provider: BaseLLMProvider, pricing: PricingTable, storage, tracer
-) -> Executor:
+def _executor(provider: BaseLLMProvider, pricing: PricingTable, storage, tracer) -> Executor:
     return Executor(provider=provider, pricing=pricing, storage=storage, tracer=tracer)
 
 
@@ -260,12 +258,8 @@ def test_dimensional_means_no_cases_is_all_none() -> None:
 def test_dimensional_means_skips_none_in_denominator() -> None:
     """A dim with one scored + one None case → mean is the scored value alone."""
     cases = [
-        _case_summary_with(
-            [DimensionScores(accuracy=DimensionScore(1.0, ""))]
-        ),
-        _case_summary_with(
-            [DimensionScores(accuracy=DimensionScore(0.0, ""))]
-        ),
+        _case_summary_with([DimensionScores(accuracy=DimensionScore(1.0, ""))]),
+        _case_summary_with([DimensionScores(accuracy=DimensionScore(0.0, ""))]),
         _case_summary_with(
             [DimensionScores(accuracy=DimensionScore())]  # unscored
         ),
@@ -288,9 +282,7 @@ def test_dimensional_means_averages_across_runs_too() -> None:
                 DimensionScores(accuracy=DimensionScore(0.0, "")),
             ]
         ),
-        _case_summary_with(
-            [DimensionScores(accuracy=DimensionScore(1.0, ""))]
-        ),
+        _case_summary_with([DimensionScores(accuracy=DimensionScore(1.0, ""))]),
     ]
     means = _compute_dimensional_means(cases)  # type: ignore[arg-type]
     # (1.0 + 0.0 + 1.0) / 3 = 0.667
@@ -330,8 +322,7 @@ def test_load_dataset_parses_expected_coverage(tmp_path: Path) -> None:
 def test_load_dataset_parses_latency_budget_ms(tmp_path: Path) -> None:
     agent_dir = _scaffold(tmp_path / "demo")
     (agent_dir / "evals" / "dataset.jsonl").write_text(
-        '{"input": {"text": "hi"}, "expected": {"message": "ok"}, '
-        '"latency_budget_ms": 2500}\n'
+        '{"input": {"text": "hi"}, "expected": {"message": "ok"}, "latency_budget_ms": 2500}\n'
     )
     bundle = load_agent(agent_dir)
     cases, _ = load_dataset(bundle)
@@ -434,9 +425,7 @@ class _FaithfulnessStubProvider(BaseLLMProvider):
             )
         return CompletionResponse(text=self._agent_response)
 
-    async def stream(
-        self, request: CompletionRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamChunk]:
         resp = await self.complete(request)
         yield StreamChunk(text=resp.text)
         yield StreamChunk(text="", tokens=resp.tokens)
@@ -515,9 +504,7 @@ async def test_engine_scores_faithfulness_via_llm_judge(
     )
     bundle = load_agent(agent_dir)
 
-    provider = _FaithfulnessStubProvider(
-        agent_response='{"message": "ok"}', faithfulness_score=0.9
-    )
+    provider = _FaithfulnessStubProvider(agent_response='{"message": "ok"}', faithfulness_score=0.9)
     executor = _executor(provider, pricing, storage, tracer)
     engine = EvalEngine(executor=executor, provider=provider)
 
@@ -606,8 +593,7 @@ async def test_summary_carries_dimensional_means(
     """``EvalSummary.dimensional_means`` is populated on every run."""
     agent_dir = _scaffold(tmp_path / "demo")
     (agent_dir / "evals" / "dataset.jsonl").write_text(
-        '{"input": {"text": "hi"}, "expected": {"message": "ok"}, '
-        '"expected_coverage": ["ok"]}\n'
+        '{"input": {"text": "hi"}, "expected": {"message": "ok"}, "expected_coverage": ["ok"]}\n'
     )
     bundle = load_agent(agent_dir)
 
@@ -643,9 +629,7 @@ def test_cli_eval_json_includes_dimensional_means(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("MOVATE_MOCK_RESPONSE", '{"message": "price warranty"}')
     runner = CliRunner(mix_stderr=False)
-    result = runner.invoke(
-        app, ["init", "dim-agent", "-t", "default", "--target", str(tmp_path)]
-    )
+    result = runner.invoke(app, ["init", "dim-agent", "-t", "default", "--target", str(tmp_path)])
     assert result.exit_code == 0, result.stdout
     agent_dir = tmp_path / "dim-agent"
 
@@ -655,9 +639,7 @@ def test_cli_eval_json_includes_dimensional_means(
         '"expected_coverage": ["price", "warranty"]}\n'
     )
 
-    result = runner.invoke(
-        app, ["eval", str(agent_dir), "--mock", "--gate", "0.0", "-o", "json"]
-    )
+    result = runner.invoke(app, ["eval", str(agent_dir), "--mock", "--gate", "0.0", "-o", "json"])
     assert result.exit_code == 0, result.stdout
     payload = _json.loads(result.stdout)
 

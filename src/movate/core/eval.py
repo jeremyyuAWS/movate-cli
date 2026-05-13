@@ -375,8 +375,7 @@ def load_dataset(bundle: AgentBundle) -> tuple[list[EvalCase], str]:
         grounding = d.get("grounding")
         if grounding is not None and not isinstance(grounding, str):
             raise EvalConfigError(
-                f"{path}:{line_no} grounding must be a string; "
-                f"got {type(grounding).__name__}"
+                f"{path}:{line_no} grounding must be a string; got {type(grounding).__name__}"
             )
         latency_budget_ms = d.get("latency_budget_ms")
         if latency_budget_ms is not None and not isinstance(latency_budget_ms, int):
@@ -564,9 +563,7 @@ Return ONLY a JSON object on a single line, no prose, no code fences:
 # ---------------------------------------------------------------------------
 
 
-def _score_coverage(
-    expected_coverage: list[str], actual: dict[str, Any]
-) -> DimensionScore:
+def _score_coverage(expected_coverage: list[str], actual: dict[str, Any]) -> DimensionScore:
     """Coverage dim: what fraction of expected topics appear in the output?
 
     Each entry in ``expected_coverage`` is a string keyword/topic the
@@ -737,9 +734,7 @@ class EvalEngine:
                     # still populate DimensionScores so reporters can
                     # tell "failed run, all 0s" from "successful run
                     # that genuinely scored 0".
-                    fail_reason = (
-                        response.error.message if response.error else "agent failed"
-                    )
+                    fail_reason = response.error.message if response.error else "agent failed"
                     fail_dims = DimensionScores(
                         accuracy=DimensionScore(0.0, fail_reason),
                     )
@@ -763,9 +758,7 @@ class EvalEngine:
                 # Faithfulness/coverage/latency are *additional* reporting
                 # surfaces, not gate inputs. A future PR can add
                 # ``--gate-faithfulness 0.8`` etc. for per-dim gating.
-                gate_score = (
-                    dims.accuracy.value if dims.accuracy.value is not None else 0.0
-                )
+                gate_score = dims.accuracy.value if dims.accuracy.value is not None else 0.0
                 runs.append(
                     CaseRun(
                         response=response,
