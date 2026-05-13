@@ -6,8 +6,8 @@ implemented (Python function, HTTP endpoint, MCP server). Backends are
 matched to skills by ``SkillSpec.implementation.kind`` at registry
 build time.
 
-v0.6 ships the Python backend only. HTTP + MCP land in follow-up PRs
-without changes to the Protocol or to the executor's tool-use loop.
+v0.6 ships Python + HTTP backends. MCP lands in a follow-up PR without
+changes to the Protocol or the executor's tool-use loop.
 
 See ``docs/adr/002-skills-and-contexts.md`` for the design.
 """
@@ -19,6 +19,12 @@ from movate.core.skill_backend.base import (
     SkillExecutionContext,
     dispatch_skill,
 )
+
+# Backend submodules (``python``, ``http``) are NOT re-exported here:
+# the stdlib has a top-level ``http`` module so a bare
+# ``from movate.core.skill_backend import http`` confuses mypy under
+# strict mode. Callers import the submodules by their full dotted
+# path instead — see :mod:`movate.cli.skills_cmd` for the pattern.
 
 __all__ = [
     "SkillBackend",
