@@ -107,6 +107,103 @@ class Budget(BaseModel):
     max_cost_usd_per_run: float = Field(default=1.0, ge=0)
 
 
+class Objective(BaseModel):
+    """A measurable success criterion for an agent.
+
+    Goals are aspirational ("be helpful"); objectives are testable
+    ("score >= 0.9 on routing accuracy"). Eval gates can target
+    individual objectives by ``id``; per-objective scoring breakdowns
+    will surface in the eval results table (v0.7+).
+
+    The ``judge`` field declares HOW this objective is scored. ``exact``
+    suits classifiers and structured outputs; ``llm_judge`` suits
+    free-form prose — same as the project-level judge config in
+    ``evals/judge.yaml``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description=(
+            "Stable identifier — used to gate evals on specific "
+            "objectives (``mdk eval --objective routing-accuracy``). "
+            "Lowercase, hyphen-separated."
+        ),
+    )
+    description: str = Field(
+        default="",
+        description="Human-readable explanation for reports and docs.",
+    )
+    threshold: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Pass score for this objective (0.0-1.0).",
+    )
+    judge: Literal["exact", "llm_judge"] = Field(
+        default="exact",
+        description=(
+            "Scoring method. ``exact`` for deterministic outputs "
+            "(classifiers, extractors); ``llm_judge`` for free-form "
+            "prose where a rubric judges semantic quality."
+        ),
+    )
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str) -> str:
+        if not re.match(r"^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$", v):
+            raise ValueError(
+                f"objective id {v!r} must be lowercase alphanumeric "
+                f"with hyphens or underscores"
+            )
+        return v
+
+
+class Example(BaseModel):
+    """A sample input → output pair illustrating expected behavior.
+
+    Three uses:
+      1. **Smoke test at validate-time** — ``mdk validate`` can run
+         these against the agent to catch broken wiring before any
+         eval dataset exists.
+      2. **In-context examples in prompts** — agents that opt in can
+         template these into their prompt for few-shot.
+      3. **Test-case generation seed** — scenario test generation
+         (v0.7+) uses these as anchors for derived positive / negative
+         / edge / red-team cases.
+
+    ``output`` is optional — for agents whose behavior is too varied
+    to pin a single expected output, leave it empty and use the example
+    purely as input documentation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    input: dict[str, Any] = Field(
+        ...,
+        description=(
+            "Sample input matching the agent's input schema. Validated "
+            "against ``schema/input.json`` at ``mdk validate`` time."
+        ),
+    )
+    output: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Expected output. Validated against ``schema/output.json``. "
+            "May be empty if the agent's output isn't deterministic enough "
+            "to pin."
+        ),
+    )
+    description: str = Field(
+        default="",
+        description="Human-readable context for the example.",
+    )
+
+
 class AgentRuntime(StrEnum):
     """Which execution path the agent uses to talk to the model.
 
@@ -180,6 +277,39 @@ class AgentSpec(BaseModel):
     budget: Budget = Field(default_factory=Budget)
     tags: list[str] = Field(default_factory=list)
 
+    # ---- v0.7 forward-compatible additions (Deva's strategic feedback) ----
+    # All three default to empty lists; existing agent.yaml files that
+    # omit them continue to load unchanged. Test generation, per-objective
+    # eval scoring, and in-context-example use of these fields lands
+    # in v0.7 — the fields themselves are forward-compatible additions
+    # only, no behavior change in this PR.
+
+    goals: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Aspirational outcomes the agent achieves. Free-form natural "
+            "language; rendered in `mdk show <agent>` and surfaced to "
+            "test-case generators in v0.7+. Compare with :data:`objectives` "
+            "(measurable success criteria)."
+        ),
+    )
+    objectives: list[Objective] = Field(
+        default_factory=list,
+        description=(
+            "Measurable success criteria with thresholds. Eval gates "
+            "can target individual objectives by id (v0.7+); the eval "
+            "results table will break out per-objective scores."
+        ),
+    )
+    examples: list[Example] = Field(
+        default_factory=list,
+        description=(
+            "Sample input → output pairs. Used at validate-time as "
+            "smoke tests, as in-context examples for prompts that opt in, "
+            "and as seeds for scenario test generation in v0.7+."
+        ),
+    )
+
     @field_validator("name")
     @classmethod
     def _validate_name(cls, v: str) -> str:
@@ -193,6 +323,21 @@ class AgentSpec(BaseModel):
         if not SEMVER_RE.match(v):
             raise ValueError(f"agent version {v!r} must be semver (MAJOR.MINOR.PATCH)")
         return v
+
+    @model_validator(mode="after")
+    def _validate_unique_objective_ids(self) -> AgentSpec:
+        """Objective IDs must be unique within an agent. Duplicate ids
+        would make per-objective eval gating ambiguous — which row does
+        ``--objective routing-accuracy`` target? We fail at parse time
+        so the duplicate is caught by ``mdk validate``."""
+        ids = [obj.id for obj in self.objectives]
+        if len(ids) != len(set(ids)):
+            duplicates = sorted({i for i in ids if ids.count(i) > 1})
+            raise ValueError(
+                f"duplicate objective id(s): {duplicates}. "
+                f"Each objective must have a unique id within the agent."
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_runtime_provider_shape(self) -> AgentSpec:
