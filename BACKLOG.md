@@ -164,6 +164,78 @@ shippable; nothing here is gated by anything still open.
 
 28. [ ] **HITL workflow nodes (design)** `[MED] [v1.1+] [~3-5d for ADR]` — Phase 7 from the PRD. Pauses a workflow for an external human response, resumes on a webhook / Teams card button / email reply. Coordinates with ADR 003 — Teams Adaptive Cards with action buttons are the natural first transport. Needs design before code; one concrete use-case (refund approval) walked end-to-end. **Issue [#79](https://github.com/jeremyyuAWS/movate-cli/issues/79).**
 
+### Group F — Mova iO building-block alignment (2026-05-13)
+
+> _Translated from the Mova iO Platform building-blocks slide. Each
+> block in the slide maps to: (a) shipped in MDK, (b) partially
+> shipped, (c) gap in MDK's scope to fill, or (d) explicitly NOT
+> MDK's scope (e.g. Marketplace UI, Experience Platform). This group
+> captures the MDK-scope gaps as concrete backlog items, ranked by
+> leverage. Out-of-scope items are documented in the §F-out section
+> below so the boundary is explicit._
+
+#### F-A — Tier A: ≤1d each (quick wins)
+
+29. [ ] **Agent metadata extension for the marketplace** `[HIGH] [v0.8] [≤1d]` — Extend `agent.yaml` schema with `persona`, `role`, `capabilities[]`, `tags[]`, `examples[]`, `owner` — all optional, backward-compatible. Marketplace UI (separate product) reads these as the source of truth for Agent Catalog / Profiles / Search / Reviews. `mdk show` renders the new fields; `mdk validate` checks them. **Unlocks the entire Agent Marketplace row of the slide. No GH issue yet — direct PR.**
+
+30. [ ] **`mdk models` — model catalog command** `[MED] [v0.8] [≤1d]` — `mdk models list` + `mdk models show <id>`. Surfaces pricing, context window, capabilities (tools / vision), region availability, license from the existing pricing.yaml + provider registry. Closes the slide's Model Library block at the runtime layer.
+
+31. [ ] **Open LLM + SLM templates** `[MED] [v0.8] [≤1d]` — Two new `mdk init -t` templates: `ollama-agent` (local LLM via Ollama) and `vllm-agent` (self-hosted via vLLM). Smoke test against an Ollama container in CI behind a marker. Documents the "yes we support open models / SLMs" answer with a runnable example. Closes the Open LLMs + SLMs blocks of the Model Layer.
+
+32. [ ] **Cross-agent skill — "agent-as-tool"** `[HIGH] [v0.8] [≤1d]` — New skill kind: `agent` — declare another deployed MDK agent as a tool target. Wraps `MovateClient.submit_job` + `wait_for_terminal`. Cheapest path to the slide's Agent–Agent Integrators block. Gives multi-agent orchestration without waiting on v1.1 LangGraph + conditional edges.
+
+#### F-B — Tier B: 2-3d each (foundational)
+
+33. [ ] **Intent Recognition primitive** `[HIGH] [v0.8] [~2d]` — New workflow node type: `intent-router` with a declarative `routes:` map (intent → next node). Reuses classifier-agent under the hood but elevates intent routing to a first-class IR concept. Workflows can branch on intent without conditional-edge machinery (v1.1). Closes the slide's Intent Recognition block.
+
+34. [ ] **Prompt Library** `[MED] [v0.8] [~2d]` — New `prompts/` registry dir (sibling to `skills/`) — versioned, named, importable into `agent.yaml` prompts via Jinja `{% include "kb_grounding/v3" %}`. Cross-project share via a shared-prompts package. Enables "use the company's standard customer-service tone" without copy-paste. Closes the Prompt Library block.
+
+35. [ ] **Explainability surface — `mdk explain <run-id>`** `[HIGH] [v0.8] [~2d]` — Builds on the existing replay engine: render the decision chain (which skill called when, which tool result fed which next step, why this branch). Shipped both as CLI output and as an Adaptive Card field on the Teams bot. Closes the Explainability block — turns a checkbox into a real command.
+
+36. [ ] **Reflection / self-critique workflow pattern** `[MED] [v0.8] [~2d]` — Reference workflow showing: agent A produces, agent B critiques, agent A revises (max N iterations). New eval dim: `reflection_score` measures whether the critique improved the output. Ships as a `reflective-agent` template + docs. Closes the Reflection block.
+
+37. [ ] **Prompt-injection detector** `[HIGH] [v0.8] [~2d]` — New executor-entry guardrail: heuristic regex + small-LLM judge catches prompt-injection patterns in user input. Configurable in `movate.yaml: policy.input_guardrails: [prompt_injection]`. Closes the highest-stakes Safe-AI-layer gap. **Highest customer-trust impact in this tier.**
+
+38. [ ] **Input/output PII guardrail** `[HIGH] [v0.9] [~3d]` — Filter at executor entry + exit. PII detection (emails / phones / SSNs / addresses via regex + spaCy NER). Modes: `block | redact | log-only`. `policy.io_guardrails: pii_redact`. Enterprise-table-stakes for customer-VPC deployments — pairs with the stack-defense doc.
+
+39. [ ] **Document loaders + chunking** `[HIGH] [v0.9] [~5d, gated on ADR 004]` — `mdk knowledge ingest <path>` — PDF, MD, HTML, plain text. Pluggable chunkers (fixed, semantic, by-heading). Persists chunks + metadata to the vector store declared in `knowledge.yaml`. Closes Unstructured-data + Chunking blocks. **Depends on ADR 004 landing first.**
+
+#### F-C — Tier C: larger / design-first
+
+40. [ ] **ADR 005 — Fine-tuning loop** `[MED] [v0.9-v1.1] [~3-5d for ADR]` — Dataset prep from eval cases that hit a configurable score floor; hosted-job dispatch (OpenAI / Anthropic / Bedrock / Together); model registration into MDK's model catalog (item 30); eval-vs-base comparison built in. Closes the Fine-tuned LLMs block.
+
+41. [ ] **Bias / fairness eval dims** `[MED] [v0.9] [~3d]` — Two new dim scorers: `disparate_impact` (per-group accuracy gap when dataset has a `group` field) and `consistency` (semantically-equivalent input → equivalent output). Reuses the 4-dim eval machinery from v0.6. Closes the Ethical & Responsible AI block at the eval layer.
+
+42. [ ] **Knowledge Asset Catalog (knowledge.yaml expansion)** `[HIGH] [v0.9] [~3d]` — Declare datasets / indexes / sources in `knowledge.yaml` with versioning + lineage. `mdk knowledge list | show | diff` commands. Pairs with ADR 004 and item 39. Closes the Knowledge Asset Catalog block.
+
+43. [ ] **Dataset quality checks** `[MED] [v0.9] [~2d]` — `mdk eval --quality` runs deduplication, near-duplicate flagging (embedding-similarity), label-distribution drift vs baseline. Surfaces "your test set has 12 near-duplicates and a class imbalance" before scoring. Closes the Data Quality block.
+
+44. [ ] **Slack channel adapter** `[MED] [v0.9] [~3d]` — `mdk slack-bot serve`. Reuses the teams_bot scaffolding pattern (FastAPI endpoint, signature validation, per-user identity binding, cards). Second Collaboration Channel after Teams. **Issue: TBD.**
+
+45. [ ] **Discord channel adapter** `[LOW] [post-v1] [~2d]` — Same shape as Slack. Lower priority than Slack for the enterprise audience.
+
+46. [ ] **Model-layer guardrails** `[MED] [v1.0] [~2d]` — Token-rate caps per provider, sensitive-topic filters, max-output enforcement. Distinct from Safe-AI input/output guardrails — these are model-traffic-shaping at the provider boundary. Closes the slide's Model Layer Guardrails block.
+
+#### F-D — Tier D: v1.2+ / longer-horizon design
+
+47. [ ] **ADR 006 — Ontology / domain model** `[MED] [v1.2+] [~5d for ADR]` — How agents reason over structured business concepts. Schema declaration in `knowledge.yaml`; integration with retrieval + eval (semantic correctness against the ontology). Closes the Ontology block.
+
+48. [ ] **Cross-run analytics (correlation layer)** `[MED] [v1.2] [~3d]` — BI-flavored: `mdk analytics` — cohort runs by tag / objective / tenant, regression dashboards beyond per-eval baseline diffs. Mostly delegated to Langfuse but emits the right tags upstream. Extends the Correlation & Traceability block.
+
+49. [ ] **Graph store (Apache AGE)** `[MED] [v1.2] [~1w]` — Memory tier #2 alongside pgvector. Knowledge-graph relations as a queryable substrate. Pairs with ADR 004 and the eventual ADR 006. Closes the Graph Store block.
+
+#### F-out — Mova iO blocks deliberately NOT MDK's scope
+
+MDK enables these (emits metadata / runtime hooks) but the surface
+itself is built elsewhere in the Mova iO stack. Listed for boundary
+clarity; **no MDK backlog items**:
+
+- **Agent Catalog / Agent Profiles / Agent Usage & Reviews / Agent Search** (Marketplace row) — Web UI reads MDK's `agent.yaml` (extended by item 29) + `mdk submit` telemetry. The Marketplace product owns the front-end + ratings + search.
+- **Experience Platform / Conversational AI surfaces** (Consumption row) — Frontends call the MDK runtime over HTTP. Slack/Teams/etc. are MDK-side adapters (items 44-45 + the shipped Teams bot); the consumer experience above is product-team territory.
+- **IDE** (Consumption row) — VS Code / JetBrains plugins consume MDK CLI + API. The VS Code launch configs in §10 are a thin local-dev convenience; the IDE plug-in itself sits outside MDK.
+- **AI Infrastructure** (foundation row) — Bicep (shipped) + Helm (item 22) get MDK onto ACA / EKS / AKS; the substrate (cluster, network, storage classes) is platform-team territory.
+- **Org-wide governance dashboards** (Ethical & Responsible AI policy UI) — MDK enforces via items 37-38 + the existing policy gate; the policy-editor UI is a separate product.
+
 #### Demoted / deferred
 
 These items are below the top 10 — capture so we don't lose them, but

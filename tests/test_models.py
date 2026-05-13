@@ -76,6 +76,77 @@ def test_agent_spec_rejects_invalid_name(bad: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# AgentSpec — Mova iO marketplace metadata (item 29 / Group F)
+#
+# Marketplace UI reads `persona`, `role`, `capabilities` as the source
+# of truth for Agent Profiles / Search / Catalog. All optional and
+# backward-compatible — pre-v0.8 agent.yaml files load unchanged.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_agent_spec_marketplace_metadata_all_default_empty() -> None:
+    """Bare agent.yaml — no marketplace fields — parses unchanged
+    (backward compat) and the new fields surface as their empty
+    defaults."""
+    spec = AgentSpec.model_validate(_minimal_agent_dict())
+    assert spec.persona == ""
+    assert spec.role == ""
+    assert spec.capabilities == []
+
+
+@pytest.mark.unit
+def test_agent_spec_marketplace_metadata_populated() -> None:
+    """All three fields round-trip when populated."""
+    spec = AgentSpec.model_validate(
+        _minimal_agent_dict(
+            persona="Concise and technical; 1-2 line answers.",
+            role="support-triage",
+            capabilities=["faq-lookup", "ticket-routing", "language-detection"],
+        )
+    )
+    assert spec.persona.startswith("Concise")
+    assert spec.role == "support-triage"
+    assert spec.capabilities == ["faq-lookup", "ticket-routing", "language-detection"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad",
+    ["FAQ-Lookup", "faq lookup", "faq_lookup", "-faq", "faq-", "faq.lookup"],
+)
+def test_agent_spec_rejects_invalid_capability_slug(bad: str) -> None:
+    """Capabilities are marketplace search facets — must be URL-safe
+    slugs. Free-form labels belong in `tags` (which accepts anything)."""
+    with pytest.raises(ValidationError, match="lowercase alphanumeric"):
+        AgentSpec.model_validate(_minimal_agent_dict(capabilities=[bad]))
+
+
+@pytest.mark.unit
+def test_agent_spec_capabilities_allow_well_formed_slugs() -> None:
+    """Single-word and multi-word slugs both accepted."""
+    spec = AgentSpec.model_validate(
+        _minimal_agent_dict(capabilities=["routing", "faq-lookup", "v2-classifier"])
+    )
+    assert len(spec.capabilities) == 3
+
+
+@pytest.mark.unit
+def test_agent_spec_persona_max_length() -> None:
+    """Persona caps at 512 chars — keeps the marketplace profile
+    card concise and prevents pasting an entire prompt in here."""
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate(_minimal_agent_dict(persona="x" * 513))
+
+
+@pytest.mark.unit
+def test_agent_spec_role_max_length() -> None:
+    """Role caps at 128 chars — it's a noun phrase, not a sentence."""
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate(_minimal_agent_dict(role="x" * 129))
+
+
+# ---------------------------------------------------------------------------
 # AgentSpec — runtime-aware provider validation (cross-field)
 # ---------------------------------------------------------------------------
 

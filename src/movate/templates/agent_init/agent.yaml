@@ -6,6 +6,21 @@ version: 0.1.0
 description: A new movate agent
 owner: ""
 
+# Marketplace metadata (all optional). The Mova iO Agent Marketplace UI
+# reads these as the source of truth for catalog, profiles, search.
+# Leave any field empty / unset and that row stays out of `mdk show`.
+#
+# role: short noun phrase for the job category ('support-triage',
+#   'data-analyst'). Used as a marketplace filter facet.
+# persona: one sentence on voice/tone. Used to render the agent profile
+#   and as a style anchor in prompt-authoring tooling.
+# capabilities: slug-style list of things this agent does. Each entry
+#   must be lowercase-alphanumeric-with-hyphens; consumers use these
+#   as URL-safe search facets.
+role: ""
+persona: ""
+capabilities: []
+
 # runtime selects which execution path movate uses to talk to the model.
 # Default is `litellm` (provider-portable via LiteLLM). Uncomment one of
 # the others when their adapters ship (v0.6+):

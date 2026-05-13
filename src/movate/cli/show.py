@@ -14,6 +14,7 @@ from rich.table import Table
 from movate.cli._completion import complete_agent_path
 from movate.cli._workflow_path import is_workflow_path
 from movate.core.loader import AgentLoadError, load_agent
+from movate.core.models import AgentSpec
 from movate.core.workflow import (
     WorkflowCompileError,
     WorkflowGraph,
@@ -68,6 +69,7 @@ def _show_agent(path: Path) -> None:
     table.add_row("version", spec.version)
     table.add_row("description", spec.description or "[dim]—[/dim]")
     table.add_row("owner", spec.owner or "[dim]—[/dim]")
+    _add_marketplace_metadata_rows(table, spec)
     table.add_row("", "")
     table.add_row("model.provider", spec.model.provider)
     if spec.model.params:
@@ -123,6 +125,26 @@ def _show_agent(path: Path) -> None:
 
     console.print(table)
     console.print(f"[dim]agent_dir: {bundle.agent_dir}[/dim]")
+
+
+def _add_marketplace_metadata_rows(table: Table, spec: AgentSpec) -> None:
+    """Append role / persona / capabilities rows to the agent show table.
+
+    Only adds rows the agent actually populated, so pre-v0.8 agents
+    (where these fields default to empty) keep the same compact
+    table as before the marketplace-metadata extension landed. Pulled
+    out of ``_show_agent`` to keep that function's branch count under
+    the ruff PLR0912 ceiling.
+
+    See AgentSpec.persona / role / capabilities (item 29 from
+    BACKLOG.md Group F).
+    """
+    if spec.role:
+        table.add_row("role", spec.role)
+    if spec.persona:
+        table.add_row("persona", spec.persona)
+    if spec.capabilities:
+        table.add_row("capabilities", ", ".join(spec.capabilities))
 
 
 def _render_schema_ref(ref: str | dict[str, object]) -> str:
