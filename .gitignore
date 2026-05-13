@@ -69,3 +69,4 @@ infra/azure/main.json
 infra/azure/**/*.json
 infra/azure/*.bicepparam
 !infra/azure/main.bicepparam.example
+scripts/deva-curl/.env
