@@ -466,6 +466,63 @@ The backend handles the failure modes you'd expect:
 Only `bearer-from-env:VAR` auth is supported today; basic-auth and
 arbitrary-header forms land in a follow-up PR.
 
+### MCP skills — plug in a Model Context Protocol server
+
+For skills that live behind an MCP server (Anthropic's tool-server
+protocol), use `implementation.kind: mcp`. Operators can wire up
+internal tool servers, npx-installed community servers, or
+customer-hosted bridges to legacy systems without writing Python.
+
+```yaml
+# skills/github-issue/skill.yaml
+api_version: movate/v1
+kind: Skill
+name: github-issue
+version: 0.1.0
+description: Fetch a GitHub issue via the github-mcp bridge.
+
+schema:
+  input:
+    repo: string
+    issue_number: integer
+  output:
+    title: string
+    body: string
+
+implementation:
+  kind: mcp
+  entry: npx -y @movate/github-mcp        # command to spawn the MCP server
+  tool: get_issue                         # which tool on the server to call
+```
+
+The backend spawns the server subprocess on first use, performs the
+MCP handshake (`initialize` → `notifications/initialized`), and
+reuses the running process across every subsequent tool call to the
+same server. Multiple skills pointing at the same `entry` command
+share one subprocess.
+
+Two response shapes are supported:
+
+* **`structuredContent`** (modern MCP servers) — used directly as
+  the skill's output.
+* **`content[0].text`** parsed as JSON — fallback for older servers
+  that haven't adopted the structured form.
+
+Failure modes map to the same `SkillError` taxonomy as Python + HTTP:
+
+* Subprocess fails to start / dies mid-call → `backend_error`
+* Tool name not in the server's `tools/list` → `backend_error` with
+  the available list
+* Server reports `isError: true` or returns a JSON-RPC error
+  envelope → `backend_error` with the server's message
+* Response content isn't a JSON object → `validation_failed`
+* Server hangs past the budget → `timeout`
+
+The implementation is hand-rolled (no external `mcp` SDK dep) — the
+protocol surface we use is small enough that a focused client is
+cleaner than adding a library. HTTP/SSE transport for remote MCP
+servers lands in a follow-up if real customer demand surfaces.
+
 ### Operator commands
 
 ```bash
