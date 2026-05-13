@@ -76,6 +76,37 @@ safe on the FIRST tenant to claim them on Azure.
 @maxLength(6)
 param nameSuffix string = ''
 
+@description('''
+Deploy the Teams bot Container App + Azure Bot Service registration.
+Same two-pass story as ``enableApiWorker`` — first pass without
+Teams (false), populate KV secrets (movate-teams-fleet-api-key,
+movate-teams-encryption-key, microsoft-app-password), then second
+pass flips this to true. Independent of ``enableApiWorker`` so an
+operator can run runtime-only deploys without Teams.
+
+REQUIRES ``teamsBotAppId`` to be set when true — the Bot Service
+resource needs the AAD app id at create time.
+''')
+param enableTeamsBot bool = false
+
+@description('''
+AAD application id for the Teams bot. Created OUTSIDE Bicep via:
+    az ad app create --display-name "movate-teams-bot-${env}"
+Copy the printed appId here. Required when ``enableTeamsBot`` is
+true; ignored otherwise. See docs/teams-deploy.md for the full
+ordering — Bot Service creation needs this id BEFORE its own
+resource is created.
+''')
+param teamsBotAppId string = ''
+
+@description('''
+Optional public Langfuse base URL surfaced as the "View trace"
+button on success cards. Off by default — only set when the URL
+is routable for the audience (Movate-internal channels only;
+prospects shouldn't see an internal URL).
+''')
+param teamsLangfusePublicHost string = ''
+
 // ---------------------------------------------------------------------------
 // Per-env defaults — keep in sync with docs/v1.0-azure-design §4
 // ---------------------------------------------------------------------------
@@ -122,10 +153,12 @@ var pgName = 'movate-${env}-pg${sfx}'
 var caeName = 'movate-${env}-cae'
 var apiName = 'movate-${env}-api'
 var workerName = 'movate-${env}-worker'
-// User-assigned identities for the api + worker apps. Pre-created at
-// this level (before the api/worker modules) so role assignments can be
-// granted to their principalIds BEFORE the apps exist. Avoids the
-// chicken-and-egg deadlock that system-assigned identities trip on a
+var teamsBotName = 'movate-${env}-teams-bot'
+var botServiceName = 'movate-${env}-bot'
+// User-assigned identities for the api + worker + teams-bot apps.
+// Pre-created at this level (before the app modules) so role assignments
+// can be granted to their principalIds BEFORE the apps exist. Avoids
+// the chicken-and-egg deadlock that system-assigned identities trip on a
 // cold deploy: app create waits for revision provisioning, revision
 // provisioning needs AcrPull + KV Secrets User, those roles wait for
 // the app's MI principalId, which doesn't exist until the app + its
@@ -133,6 +166,7 @@ var workerName = 'movate-${env}-worker'
 // assignments land first, and the app's first revision comes up clean.
 var apiUaiName = 'movate-${env}-api-mi'
 var workerUaiName = 'movate-${env}-worker-mi'
+var teamsBotUaiName = 'movate-${env}-teams-bot-mi'
 
 // ---------------------------------------------------------------------------
 // Modules
@@ -220,6 +254,16 @@ resource workerUai 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31'
   tags: tags
 }
 
+// Teams bot UAI. Same rationale as the api/worker UAIs: pre-create at
+// the top level so the bot's ACR-pull + KV-secrets-read role
+// assignments can land on pass 1, before the Container App tries to
+// pull the image / read KV on its first revision.
+resource teamsBotUai 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: teamsBotUaiName
+  location: location
+  tags: tags
+}
+
 // Both Container Apps are gated on ``enableApiWorker`` so a fresh
 // deployment can run "infra-only" first, the operator populates KV
 // secrets, then the second pass deploys the apps. See param doc above.
@@ -264,6 +308,59 @@ module worker 'modules/containerapp-worker.bicep' = if (enableApiWorker) {
     memory: workerMemory
     queueDepthPerReplica: workerQueueDepthPerReplica
     userAssignedIdentityId: workerUai.id
+    tags: tags
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Teams bot (slice 3.1.e) — Container App + Azure Bot Service.
+//
+// Gated on ``enableTeamsBot`` for the same first-pass / second-pass
+// reason as the API + worker. The Bot Service resource needs the
+// bot's AAD app id at create time, so operators must run
+// `az ad app create` BEFORE flipping enableTeamsBot=true.
+//
+// The Bot Service forwards Teams Activities to the Container App's
+// FQDN at /api/messages. We depend on the Container App fqdn output
+// for the Bot Service's messagingEndpoint — Bicep wires the
+// ordering automatically.
+// ---------------------------------------------------------------------------
+
+module teamsBot 'modules/containerapp-teams-bot.bicep' = if (enableTeamsBot) {
+  name: 'teams-bot-${env}'
+  params: {
+    name: teamsBotName
+    location: location
+    environmentId: cae.outputs.envId
+    acrLoginServer: acr.outputs.loginServer
+    acrResourceId: acr.outputs.registryId
+    image: image
+    keyVaultUri: kv.outputs.vaultUri
+    // The bot calls the API via the in-cluster Container Apps FQDN.
+    // External traffic flows: Teams → Bot Service → Bot's FQDN; the
+    // bot then HTTPs to api's FQDN for the actual runtime calls.
+    runtimeUrl: enableApiWorker ? 'https://${api!.outputs.fqdn}' : ''
+    microsoftAppId: teamsBotAppId
+    langfusePublicHost: teamsLangfusePublicHost
+    userAssignedIdentityId: teamsBotUai.id
+    // Default to non-strict in alpha; flip via parameters file for
+    // multi-tenant prod where attribution matters.
+    requireBinding: false
+    tags: tags
+  }
+}
+
+module botService 'modules/bot-service.bicep' = if (enableTeamsBot) {
+  name: 'bot-svc-${env}'
+  params: {
+    name: botServiceName
+    // Bot Service is a global resource; location stays 'global' regardless
+    // of the deployment's chosen region.
+    location: 'global'
+    // F0 (free, 10k msg/month) for non-prod; S1 for prod.
+    sku: isProd ? 'S1' : 'F0'
+    botAppId: teamsBotAppId
+    messagingEndpoint: enableTeamsBot ? teamsBot!.outputs.webhookUrl : ''
     tags: tags
   }
 }
@@ -349,6 +446,31 @@ resource workerKvRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
+// Teams bot role assignments (slice 3.1.e). Mirror the api + worker
+// grants — the bot needs ACR-pull + KV-secrets-read for the same
+// reasons (image pull + at-startup secret fetch). Un-gated from
+// enableTeamsBot (the UAI always exists; assignments are cheap +
+// idempotent so they can land on pass 1 before the app comes up).
+resource teamsBotAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: acrResource
+  name: guid(acrResource.id, teamsBotUaiName, acrPullRoleId)
+  properties: {
+    principalId: teamsBotUai.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
+  }
+}
+
+resource teamsBotKvRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: kvResource
+  name: guid(kvResource.id, teamsBotUaiName, kvSecretsUserRoleId)
+  properties: {
+    principalId: teamsBotUai.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsUserRoleId)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Outputs
 // ---------------------------------------------------------------------------
@@ -364,3 +486,9 @@ output keyVaultUri string = kv.outputs.vaultUri
 
 @description('Postgres FQDN (for direct admin connections / migrations).')
 output postgresFqdn string = pg.outputs.serverFqdn
+
+@description('Teams bot webhook URL (https://<fqdn>/api/messages). Empty when enableTeamsBot=false.')
+output teamsBotWebhookUrl string = enableTeamsBot ? teamsBot!.outputs.webhookUrl : ''
+
+@description('Bot Service resource id. Empty when enableTeamsBot=false. Used by Teams Admin Center when publishing.')
+output botServiceId string = enableTeamsBot ? botService!.outputs.botServiceId : ''

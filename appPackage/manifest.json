@@ -1,0 +1,85 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "0.7.0",
+  "id": "00000000-0000-0000-0000-000000000000",
+  "packageName": "com.movate.mdk.teams",
+  "developer": {
+    "name": "Movate",
+    "websiteUrl": "https://movate.com",
+    "privacyUrl": "https://movate.com/privacy",
+    "termsOfUseUrl": "https://movate.com/terms"
+  },
+  "icons": {
+    "color": "icons/color.png",
+    "outline": "icons/outline.png"
+  },
+  "name": {
+    "short": "Movate",
+    "full": "Movate Agent Runner (MDK)"
+  },
+  "description": {
+    "short": "Run + evaluate Movate agents from Teams.",
+    "full": "Submit Movate agent runs and small eval jobs from inside Teams. Backed by the same runtime the mdk CLI uses. Drag your agent.zip or dataset.jsonl into a channel to validate it; DM /movate connect <api-key> to bind your Movate identity."
+  },
+  "accentColor": "#1F2937",
+  "bots": [
+    {
+      "botId": "00000000-0000-0000-0000-000000000000",
+      "scopes": [
+        "personal",
+        "team",
+        "groupchat"
+      ],
+      "supportsFiles": true,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": [
+            "personal",
+            "team",
+            "groupchat"
+          ],
+          "commands": [
+            {
+              "title": "ping",
+              "description": "Liveness check — bot replies with 'pong'."
+            },
+            {
+              "title": "help",
+              "description": "List available commands."
+            },
+            {
+              "title": "run <agent-name> <json-input>",
+              "description": "Submit an agent run; reply renders as an Adaptive Card with cost, latency, and an optional Langfuse trace link."
+            }
+          ]
+        },
+        {
+          "scopes": [
+            "personal"
+          ],
+          "commands": [
+            {
+              "title": "connect <api-key>",
+              "description": "Bind your Movate API key to this Teams identity (DM only). All subsequent `run` calls use your key."
+            },
+            {
+              "title": "whoami",
+              "description": "Show your current Movate binding (tenant + last 4 chars of key)."
+            },
+            {
+              "title": "disconnect",
+              "description": "Remove your Movate binding from this bot."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": []
+}
