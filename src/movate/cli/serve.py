@@ -138,6 +138,11 @@ async def _run_serve(
     app = build_app(
         storage,
         agents=agents,
+        # Plumb the agents_path so POST /api/v1/agents (item 76) knows
+        # where to persist new bundles. Same path that scan_agents()
+        # already walked above, so creates land in the same registry
+        # GET /agents reads from.
+        agents_path=agents_path,
         rate_limit_per_minute=rate_limit_per_minute,
         cors_allowed_origins=parsed_origins,
     )
