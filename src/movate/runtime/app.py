@@ -19,9 +19,11 @@ and ``movate serve`` CLI binding (uvicorn integration).
 
 from __future__ import annotations
 
+import os
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import movate
@@ -44,11 +46,35 @@ from movate.runtime.schemas import (
 from movate.storage.base import StorageProvider
 
 
+def _resolve_cors_origins(explicit: list[str] | None) -> list[str]:
+    """Pick the effective CORS allow-list, in priority order:
+
+    1. ``explicit`` (passed via ``build_app(cors_allowed_origins=...)``
+       — primarily for tests).
+    2. ``MDK_CORS_ALLOWED_ORIGINS`` env var (comma-separated, e.g.
+       ``"http://localhost:4200,https://mova-io.movate.com"``).
+    3. ``MOVATE_CORS_ALLOWED_ORIGINS`` env var (legacy alias).
+    4. Empty list — no CORS middleware mounted (server-to-server or
+       same-origin only; browser clients from other hosts will fail).
+
+    A single ``"*"`` entry enables permissive CORS — fine for local
+    dev, NEVER do this in staging/prod because ``allow_credentials=True``
+    with ``*`` is rejected by browsers per the CORS spec.
+    """
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get("MDK_CORS_ALLOWED_ORIGINS") or os.environ.get(
+        "MOVATE_CORS_ALLOWED_ORIGINS", ""
+    )
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
 def build_app(
     storage: StorageProvider,
     *,
     agents: list[AgentBundle] | None = None,
     rate_limit_per_minute: int | None = 60,
+    cors_allowed_origins: list[str] | None = None,
 ) -> FastAPI:
     """Build the FastAPI app bound to ``storage`` + ``agents``.
 
@@ -75,6 +101,34 @@ def build_app(
     )
     app.state.storage = storage
     app.state.agents = agents or []
+
+    # CORS — required for browser-side callers (the Mova iO Angular
+    # app). Allow-list resolved from the explicit kwarg, then env vars,
+    # then empty (= middleware not mounted). The wildcard ``"*"`` is
+    # supported but only fully works with ``allow_credentials=False``
+    # — browsers reject ``*`` + credentials per the CORS spec. For
+    # bearer-token auth (which we use) credentials don't need to ride
+    # on cookies, so ``allow_credentials=False`` is the correct default.
+    # Operators with cookie-based session auth (future) flip credentials
+    # on AND pin the origin list to exact hosts.
+    origins = _resolve_cors_origins(cors_allowed_origins)
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+            allow_headers=["*"],
+            # X-RateLimit-* + Retry-After need to be readable by browser
+            # JS so the Angular client can show a "you'll be rate-limited
+            # in N seconds" hint. Without expose_headers, CORS strips them.
+            expose_headers=[
+                "X-RateLimit-Limit",
+                "X-RateLimit-Remaining",
+                "X-RateLimit-Reset",
+                "Retry-After",
+            ],
+        )
 
     # Build the rate limiter once at app construction so bucket state
     # persists across requests. NoOp when disabled, but the middleware
@@ -275,6 +329,38 @@ def build_app(
         if record is None:
             raise not_found("run", run_id)
         return RunView.from_record(record)
+
+    # ------------------------------------------------------------------
+    # /api/v1/* — versioned API surface for the Mova iO Angular front
+    # end (BACKLOG Group G item 52).
+    #
+    # Routing convention:
+    #   * Pre-v1 endpoints above (/healthz, /ready, /agents, /run,
+    #     /jobs/*, /runs/*) stay UNVERSIONED for back-compat — they
+    #     shipped before the versioning policy was set, and existing
+    #     `mdk submit` callers + the Teams bot depend on the URLs.
+    #   * NEW resource-oriented endpoints land here, under /api/v1.
+    #   * Breaking changes bump to /api/v2 (new router); additive
+    #     changes (new endpoints, new optional fields, new enum values
+    #     in non-discriminator positions) DON'T bump.
+    #
+    # The router is mounted unconditionally — empty for now, populated
+    # as Group G items 55-75 land. Mounting the empty router today
+    # means new endpoint PRs are pure-additive (no FastAPI wiring
+    # churn) and the OpenAPI spec already exposes the /api/v1 prefix
+    # for the Angular team's client generator.
+    # ------------------------------------------------------------------
+    v1 = APIRouter(prefix="/api/v1")
+
+    # Future endpoints land here. Example (commented out — not implemented yet):
+    #
+    #   @v1.get("/agents/{name}", response_model=AgentDetailView, tags=["agents-v1"])
+    #   async def v1_get_agent(...):
+    #       ...
+    #
+    # See BACKLOG Group G items 55-75 for the full surface.
+
+    app.include_router(v1)
 
     return app
 
