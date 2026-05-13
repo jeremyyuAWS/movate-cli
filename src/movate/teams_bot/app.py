@@ -23,22 +23,52 @@ after the optional extras have been resolved.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from movate.teams_bot.activity import Activity
-from movate.teams_bot.handler import handle_activity
+from movate.teams_bot.handler import HandlerContext, handle_activity
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
+    from movate.core.client import MovateClient
 
-def build_app() -> FastAPI:
+
+# Env-var names the bot reads at startup. Centralised here so the CLI
+# (cli/teams_bot.py) and the app share one source of truth.
+ENV_RUNTIME_URL = "MOVATE_RUNTIME_URL"
+ENV_FLEET_API_KEY = "MOVATE_TEAMS_FLEET_API_KEY"
+ENV_LANGFUSE_PUBLIC_HOST = "MOVATE_TEAMS_LANGFUSE_PUBLIC_HOST"
+
+
+def build_app(
+    *,
+    runtime_url: str | None = None,
+    fleet_api_key: str | None = None,
+    langfuse_public_host: str | None = None,
+    runtime_client: MovateClient | None = None,
+) -> FastAPI:
     """Construct the Teams-bot FastAPI app.
 
-    Importing FastAPI inline means a dev install without the
-    ``[teams]`` extra (which pulls in fastapi/uvicorn from the
-    ``[runtime]`` extra) can still import the rest of the package
-    — only this function fails.
+    Args:
+        runtime_url: Base URL of the Movate runtime to forward commands
+            to. Falls back to ``MOVATE_RUNTIME_URL`` env, else ``None``
+            (commands that need the runtime will reply with a config-
+            error card).
+        fleet_api_key: The bot's API key for the runtime. Falls back to
+            ``MOVATE_TEAMS_FLEET_API_KEY``. Required when ``runtime_url``
+            is set (otherwise reqs will 401).
+        langfuse_public_host: Optional public Langfuse base URL. When
+            set, successful run cards include a "View trace" button.
+        runtime_client: Tests inject a pre-built :class:`MovateClient`
+            (often backed by ``ASGITransport(app=<runtime FastAPI>)``)
+            to avoid spinning up a real HTTP loop. Takes precedence
+            over ``runtime_url`` + ``fleet_api_key``.
+
+    Importing FastAPI inline means a dev install without the ``[teams]``
+    extra (which pulls in fastapi/uvicorn) can still import the rest of
+    the package — only this function fails.
     """
     try:
         from fastapi import FastAPI  # noqa: PLC0415
@@ -48,11 +78,48 @@ def build_app() -> FastAPI:
             "Install with: uv add 'movate-cli[teams]'"
         ) from exc
 
+    # Resolve config from args → env → defaults. Explicit arg wins so
+    # tests can pass a fully-formed context without exporting env vars.
+    resolved_runtime_url = runtime_url or os.environ.get(ENV_RUNTIME_URL)
+    resolved_api_key = fleet_api_key or os.environ.get(ENV_FLEET_API_KEY)
+    resolved_langfuse = langfuse_public_host or os.environ.get(ENV_LANGFUSE_PUBLIC_HOST)
+
+    # Build a long-lived MovateClient if we have everything we need.
+    # The connection pool stays warm across requests — important since
+    # Teams sends one Activity per HTTP request and a cold-pool TLS
+    # handshake per request adds 100s of ms.
+    client: MovateClient | None = runtime_client
+    if client is None and resolved_runtime_url and resolved_api_key:
+        from movate.core.client import MovateClient as _MovateClient  # noqa: PLC0415
+
+        client = _MovateClient(
+            base_url=resolved_runtime_url,
+            api_key=resolved_api_key,
+        )
+
+    handler_ctx = HandlerContext(
+        runtime_client=client,
+        langfuse_public_host=resolved_langfuse,
+    )
+
     app = FastAPI(
         title="movate teams-bot",
         description="Bot Framework webhook bridging Teams to the Movate runtime.",
-        version="0.7.0a",
+        version="0.7.0b",
     )
+    # Expose state on the app so the CLI ``serve`` command (and ops
+    # tooling like ``mdk doctor``) can inspect the resolved config
+    # without re-reading env vars from another process.
+    app.state.handler_ctx = handler_ctx
+    app.state.runtime_url = resolved_runtime_url
+
+    @app.on_event("shutdown")
+    async def _shutdown() -> None:
+        """Close the runtime client pool on app shutdown. The pool
+        otherwise leaks an event-loop handle that uvicorn's reload
+        watcher complains about during dev."""
+        if handler_ctx.runtime_client is not None:
+            await handler_ctx.runtime_client.aclose()
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -66,10 +133,7 @@ def build_app() -> FastAPI:
     # Declared with ``Activity`` directly as the body parameter so
     # FastAPI runs Pydantic validation for us — malformed JSON and
     # bad Activity shape both surface as HTTP 422 with the same
-    # validation-error envelope. The two failure modes were distinct
-    # in an earlier draft (400 vs 400 with different messages); the
-    # combined-422 path is the FastAPI-idiomatic shape and is what
-    # the Bot Framework Emulator + Teams already handle.
+    # validation-error envelope.
     #
     # Pydantic accepts both the field name and the alias by default,
     # so the wire's ``"from": {...}`` matches the ``from_`` field
@@ -91,9 +155,9 @@ def build_app() -> FastAPI:
         * Handler raised → 500. Returning a 5xx tells Teams to retry,
           which is the right behaviour for transient errors. For
           deterministic failures (bad command, missing agent), the
-          handler returns a 200 with an error-text reply instead.
+          handler returns a 200 with an error card instead.
         """
-        reply = await handle_activity(activity)
+        reply = await handle_activity(activity, app.state.handler_ctx)
         if reply is None:
             # Teams accepts an empty 200 as "no reply, OK".
             return {}

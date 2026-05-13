@@ -292,22 +292,28 @@ are tracked in [BACKLOG.md](BACKLOG.md) for post-v1.0.
 ## Quickstart — Microsoft Teams bot (v0.7 alpha)
 
 Run Movate agents from inside a Teams channel — no CLI needed for the
-end user. Slice 3.1.a (this milestone) ships the skeleton: the bot
-parses `@movate` commands and replies with plain text. Live agent
-execution + Adaptive Cards arrive in 3.1.b. See
-[ADR 003](docs/adr/003-teams-integration.md) for the design.
+end user. Slices 3.1.a + 3.1.b together ship the full demo loop: the
+bot parses `@movate run <agent> <json>`, submits to the deployed
+runtime, polls until terminal, and renders the result as an Adaptive
+Card with cost, latency, and an optional trace link. See
+[ADR 003](docs/adr/003-teams-integration.md) for the full design.
 
 ```bash
 # Install the optional extra (FastAPI + uvicorn).
 uv add 'movate-cli[teams]'
 
-# Terminal 1 — Movate runtime (any agent serves):
+# Terminal 1 — Movate runtime:
 mdk serve --agents-path ./agents --port 8000
 
-# Terminal 2 — Teams bot pointed at it:
-mdk teams-bot serve --runtime-url http://127.0.0.1:8000
+# Terminal 2 — mint an API key for the bot (one-time):
+mdk auth create-key --tenant local --name teams-bot
+# copy the printed key
 
-# Terminal 3 — point the Bot Framework Emulator at:
+# Terminal 3 — Teams bot pointed at the runtime:
+MOVATE_TEAMS_FLEET_API_KEY=mvt_dev_local_... \
+  mdk teams-bot serve --runtime-url http://127.0.0.1:8000
+
+# Terminal 4 — point the Bot Framework Emulator at:
 #   http://localhost:3978/api/messages
 # No app id needed for local dev.
 ```
@@ -315,17 +321,32 @@ mdk teams-bot serve --runtime-url http://127.0.0.1:8000
 Then in the Emulator chat:
 
 ```
-@movate ping             → pong
-@movate help             → list of commands
+@movate ping             → pong (text reply)
+@movate help             → list of commands (text reply)
 @movate run faq-agent {"question": "what is movate?"}
-                         → echoes the parsed command (3.1.b wires the
-                           actual `MovateClient.submit_and_wait` call)
+                         → submits the run, polls to terminal, renders
+                           an Adaptive Card with the response, cost,
+                           latency, and an optional Langfuse trace link
 ```
 
+Five outcome variants render as four distinct cards: success, terminal
+failure, timeout (with `mdk jobs show <id>` recovery hint), and client
+failure (with category-specific hints like "set MOVATE_TEAMS_FLEET_API_KEY").
+
 The bot is a thin client of the existing v0.5 HTTP runtime — same
-`/run`, `/eval`, `/jobs` endpoints `mdk` itself talks to. Auth,
-identity binding, Adaptive Cards, and the Teams manifest land in
-follow-up slices.
+`/run`, `/eval`, `/jobs` endpoints `mdk` itself talks to. Per-user
+auth (`/movate connect` DM flow), file uploads (drag agent.yaml +
+dataset.jsonl into a channel), and the Teams manifest land in
+follow-up slices (3.1.c, 3.1.d, 3.1.e).
+
+### Optional config
+
+| Env var | Effect |
+|---|---|
+| `MOVATE_TEAMS_FLEET_API_KEY` | Bot's API key for the runtime. Required for `run` to work. |
+| `MOVATE_RUNTIME_URL` | Default runtime URL (overridden by `--runtime-url`). |
+| `MOVATE_TEAMS_LANGFUSE_PUBLIC_HOST` | When set (e.g. `https://langfuse.movate.com`), success cards include a "View trace" button. Off by default — don't show prospects an internal URL. |
+| `MOVATE_TEAMS_RUN_TIMEOUT_S` | Max seconds to wait for a job before returning a timeout card. Defaults to 25 (under Teams' channel timeout). |
 
 ## Quickstart — deploy to Azure Container Apps
 

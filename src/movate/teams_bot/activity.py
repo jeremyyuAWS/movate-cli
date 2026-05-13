@@ -150,12 +150,43 @@ class Activity(BaseModel):
     here. Other entity types (clientInfo, etc.) we ignore."""
 
 
+class Attachment(BaseModel):
+    """A single attachment on a Bot Framework Activity.
+
+    For our purposes, this is exclusively an **Adaptive Card** —
+    ``contentType="application/vnd.microsoft.card.adaptive"`` with the
+    card's JSON spec under ``content``. Teams renders the card inline
+    in the message; the optional ``text`` field on the parent activity
+    shows as fallback text in channels that don't support cards.
+
+    Other attachment types (file uploads, image cards, HeroCard, etc.)
+    are out of scope — we use Adaptive Cards exclusively because they
+    render correctly on Teams desktop, mobile, and the Bot Framework
+    Emulator without per-surface tweaking.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    content_type: str = Field(alias="contentType")
+    """For Adaptive Cards: ``application/vnd.microsoft.card.adaptive``."""
+
+    content: dict[str, Any] = Field(default_factory=dict)
+    """The card JSON spec. For Adaptive Cards, this is the object that
+    follows the schema at https://adaptivecards.io/schemas/adaptive-card.json
+    — ``{type:"AdaptiveCard", version:"1.5", body:[...], actions:[...]}``."""
+
+
 class ReplyActivity(BaseModel):
     """Shape of the JSON we return as the inline reply.
 
     A subset of the full Activity — only the fields Teams reads from
     an inline-mode reply. ``replyToId`` correlates back to the
     incoming Activity so the response threads correctly.
+
+    Replies can carry EITHER plain text (``text``) OR an Adaptive Card
+    (``attachments``) — Teams renders both when both are set, with the
+    text appearing above the card. Slice 3.1.a uses text only; 3.1.b+
+    swaps to attachments for richer rendering.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -164,6 +195,11 @@ class ReplyActivity(BaseModel):
     text: str = ""
     reply_to_id: str = Field(default="", alias="replyToId")
     conversation: ConversationAccount = Field(default_factory=ConversationAccount)
+    attachments: list[Attachment] = Field(default_factory=list)
+    """Adaptive Card attachments — empty in the 3.1.a skeleton, populated
+    by the card builders in 3.1.b. Each entry's ``contentType`` should be
+    ``application/vnd.microsoft.card.adaptive`` and ``content`` carries
+    the card JSON spec."""
 
     def to_wire(self) -> dict[str, Any]:
         """Pydantic dump using by_alias=True so the wire payload has
