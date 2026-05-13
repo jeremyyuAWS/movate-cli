@@ -1027,6 +1027,14 @@ class JobKind(StrEnum):
 
     AGENT = "agent"
     WORKFLOW = "workflow"
+    EVAL = "eval"
+    """Async eval run. JobRecord.input carries the eval config
+    (gate, runs, mock, baseline_id, ...). Worker loads the agent
+    bundle from the registry, runs EvalEngine, persists EvalRecord.
+    The job's ``result_run_id`` is left null; instead, JobRecord's
+    output payload carries ``{eval_id}`` so the caller can fetch the
+    completed EvalRecord via GET /api/v1/evals/{eval_id} (item 84).
+    See BACKLOG Group H item 83."""
 
 
 class JobRecord(BaseModel):

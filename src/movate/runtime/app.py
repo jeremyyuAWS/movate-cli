@@ -50,6 +50,10 @@ from movate.runtime.schemas import (
     AgentValidationIssue,
     AgentValidationView,
     AgentView,
+    EvalAcceptedView,
+    EvalListView,
+    EvalScorecardView,
+    EvalSubmission,
     HealthView,
     JobListView,
     JobView,
@@ -226,6 +230,34 @@ def _render_agent_validation(bundle: AgentBundle) -> AgentValidationView:
         errors=errors,
         warnings=warnings,
         cost_forecast=forecast_view,
+    )
+
+
+def _eval_record_to_view(record: object) -> EvalScorecardView:
+    """Map an :class:`EvalRecord` to the wire view. Pulled out so
+    the kickoff endpoint, retrieval endpoint, and list endpoint all
+    use the same field-mapping logic.
+
+    Takes ``object`` (not a typed EvalRecord) to keep this module's
+    import footprint small — eval module is imported lazily at
+    request time. mypy-strict elsewhere validates the actual call
+    site via attribute access.
+    """
+    return EvalScorecardView(
+        eval_id=record.eval_id,  # type: ignore[attr-defined]
+        agent=record.agent,  # type: ignore[attr-defined]
+        agent_version=record.agent_version,  # type: ignore[attr-defined]
+        dataset_hash=record.dataset_hash,  # type: ignore[attr-defined]
+        judge_method=record.judge_method.value,  # type: ignore[attr-defined]
+        judge_provider=record.judge_provider,  # type: ignore[attr-defined]
+        runs_per_case=record.runs_per_case,  # type: ignore[attr-defined]
+        gate_mode=record.gate_mode,  # type: ignore[attr-defined]
+        threshold=record.threshold,  # type: ignore[attr-defined]
+        mean_score=record.mean_score,  # type: ignore[attr-defined]
+        pass_rate=record.pass_rate,  # type: ignore[attr-defined]
+        sample_count=record.sample_count,  # type: ignore[attr-defined]
+        total_cost_usd=record.total_cost_usd,  # type: ignore[attr-defined]
+        created_at=record.created_at.isoformat(),  # type: ignore[attr-defined]
     )
 
 
@@ -1001,6 +1033,165 @@ def build_app(
             total_cost_usd=replay.total_cost_usd,
             total_latency_ms=replay.total_latency_ms,
         )
+
+    # ------------------------------------------------------------------
+    # Eval endpoints (BACKLOG Group H items 83-85)
+    # ------------------------------------------------------------------
+    @v1.post(
+        "/agents/{name}/evals",
+        response_model=EvalAcceptedView,
+        status_code=202,
+        tags=["evals-v1"],
+    )
+    async def v1_kick_off_eval(
+        name: str,
+        body: EvalSubmission,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> EvalAcceptedView:
+        """Run an eval against an agent's dataset and persist the
+        EvalRecord.
+
+        For v0.7 the eval runs synchronously inside the request
+        handler. Wire contract identical to the eventual async-worker
+        semantics (item 89 will swap the implementation): 202 response
+        carries ``{eval_id, status}``, full scorecard retrievable via
+        ``GET /api/v1/evals/{eval_id}`` (item 84).
+
+        Recommended for Friday demo: ``mock=true``. The MockProvider
+        is deterministic + fast (sub-second for a 10-case dataset);
+        real-LLM evals work but block the request for the full
+        duration (single-digit minutes for typical datasets). Full
+        async-worker path with progress reporting lands in v0.8.
+
+        Errors:
+
+        * **401** — bad bearer token
+        * **404** — agent not in the registry
+        * **422** — eval engine config / dataset error (no dataset
+          on the agent, invalid gate_mode, missing objective id, etc.)
+        """
+        # Lazy imports — eval engine has a non-trivial cost (executor,
+        # provider, judge). Hide it from cold-start latency for
+        # endpoints that don't touch evals.
+        from movate.core.eval import EvalConfigError, EvalEngine  # noqa: PLC0415
+        from movate.core.executor import Executor  # noqa: PLC0415
+        from movate.providers.litellm import LiteLLMProvider  # noqa: PLC0415
+        from movate.providers.mock import MockProvider  # noqa: PLC0415
+        from movate.providers.pricing import load_pricing  # noqa: PLC0415
+        from movate.tracing import build_tracer  # noqa: PLC0415
+
+        agents: list[AgentBundle] = request.app.state.agents
+        bundle = next((b for b in agents if b.spec.name == name), None)
+        if bundle is None:
+            raise not_found("agent", name)
+
+        store: StorageProvider = request.app.state.storage
+
+        # Pick the provider per the body's `mock` flag. Friday demo
+        # path uses mock; production-grade evals route through LiteLLM
+        # (which respects the agent's provider/params).
+        provider: object = MockProvider() if body.mock else LiteLLMProvider()
+
+        # Tenant-scoped executor with the same configuration the CLI's
+        # `mdk eval` uses. Storage + tracer are required collaborators;
+        # we re-use the runtime's storage and a stdout tracer.
+        executor = Executor(
+            provider=provider,  # type: ignore[arg-type]
+            pricing=load_pricing(),
+            storage=store,
+            tracer=build_tracer(),
+            tenant_id=ctx.tenant_id,
+        )
+
+        try:
+            engine = EvalEngine(
+                executor=executor,
+                provider=provider,  # type: ignore[arg-type]
+                runs_per_case=body.runs,
+                gate_mode=body.gate_mode,
+                objective_filter=body.objective,
+            )
+            # Synchronous: blocks the request until the eval finishes.
+            # For mock + small datasets this is sub-second. Real LLM
+            # evals block longer — Angular UI should show a spinner;
+            # async-worker path with progress reporting lands in v0.8
+            # (item 89).
+            summary = await engine.run(bundle)
+        except EvalConfigError as exc:
+            return EvalAcceptedView(
+                eval_id="",
+                status="failed",
+                message=str(exc),
+            )
+
+        # Persist the EvalRecord via the engine's canonical
+        # summary→record converter — same fields the CLI's
+        # `mdk eval` writes.
+        record = summary.to_record(tenant_id=ctx.tenant_id)
+        await store.save_eval(record)
+
+        return EvalAcceptedView(
+            eval_id=record.eval_id,
+            status="success",
+        )
+
+    @v1.get(
+        "/evals/{eval_id}",
+        response_model=EvalScorecardView,
+        tags=["evals-v1"],
+    )
+    async def v1_get_eval(
+        eval_id: str,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> EvalScorecardView:
+        """Retrieve a completed eval's scorecard.
+
+        Tenant-scoped at the storage layer (a cross-tenant id probe
+        returns 404, never 403, to avoid leaking that the id exists).
+
+        Errors:
+
+        * **401** — bad bearer token
+        * **404** — no eval record matches the id for this tenant
+        """
+        store: StorageProvider = request.app.state.storage
+        record = await store.get_eval(eval_id, tenant_id=ctx.tenant_id)
+        if record is None:
+            raise not_found("eval", eval_id)
+        return _eval_record_to_view(record)
+
+    @v1.get(
+        "/evals",
+        response_model=EvalListView,
+        tags=["evals-v1"],
+    )
+    async def v1_list_evals(
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+        agent: str | None = None,
+        limit: int = 20,
+    ) -> EvalListView:
+        """Paginated history of eval runs. Filter by ``agent=<name>``
+        to drive the agent-profile "evals over time" chart.
+
+        Same tenant scoping as every other endpoint; limit hard-
+        capped at 100.
+
+        Errors:
+
+        * **401** — bad bearer token
+        """
+        capped_limit = max(1, min(limit, 100))
+        store: StorageProvider = request.app.state.storage
+        records = await store.list_evals(
+            tenant_id=ctx.tenant_id,
+            agent=agent,
+            limit=capped_limit,
+        )
+        views = [_eval_record_to_view(r) for r in records]
+        return EvalListView(evals=views, count=len(views))
 
     app.include_router(v1)
 

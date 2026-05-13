@@ -292,6 +292,125 @@ class RunTraceView(BaseModel):
     single run's latency (agents)."""
 
 
+class EvalSubmission(BaseModel):
+    """``POST /api/v1/agents/{name}/evals`` request body.
+
+    Eval kickoff config. Mirrors the ``mdk eval`` CLI's flag set —
+    the Angular UI's "Run Eval" form translates to this shape.
+
+    Note on execution: for v0.7 the eval runs synchronously inside
+    the request handler (small datasets + mock mode = sub-second
+    response). The wire contract — ``{eval_id, status}`` reply +
+    ``GET /api/v1/evals/{eval_id}`` retrieval — is the same as the
+    eventual async-job semantics (BACKLOG item 89), so the Angular
+    client doesn't change when we move to the worker-queue path.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    gate: float = Field(0.7, ge=0.0, le=1.0)
+    """Per-case score required to pass (0.0-1.0)."""
+    gate_mode: str = Field("mean")
+    """How to aggregate N runs per case: ``mean``, ``min``, ``p10``."""
+    runs: int = Field(1, ge=1, le=10)
+    """Runs per case. Use 3+ for LLM-as-judge to defeat sampling variance."""
+    mock: bool = Field(False)
+    """Use the deterministic MockProvider (no API keys, fast).
+    Required-true for the Friday demo path; real-LLM eval mode lands
+    once we wire the async-worker path (item 89)."""
+    baseline_id: str | None = Field(None)
+    """Optional EvalRecord id to diff against; CLI exits 1 on
+    regression beyond ``regression_tolerance``. Angular UI shows a
+    regression badge."""
+    regression_tolerance: float = Field(0.0, ge=0.0, le=1.0)
+    objective: str | None = Field(None)
+    """Optional objective id to filter cases by (matches
+    agent.yaml: objectives[].id)."""
+
+
+class EvalAcceptedView(BaseModel):
+    """``POST /api/v1/agents/{name}/evals`` response.
+
+    Identifies the persisted ``EvalRecord``. Angular polls
+    ``GET /api/v1/evals/{eval_id}`` (item 84) to retrieve the
+    full scorecard.
+
+    ``status`` is ``"success"`` (sync execution succeeded) or
+    ``"failed"`` (eval engine raised; check ``message``). Future
+    async path adds ``"queued"`` / ``"running"`` for in-flight evals
+    when the wire shape is identical but execution model differs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    eval_id: str
+    status: str
+    """``success`` | ``failed`` (v0.7 sync) or ``queued`` |
+    ``running`` (future async)."""
+    message: str = ""
+    """Failure message when ``status == "failed"``; empty on success."""
+
+
+class EvalCaseView(BaseModel):
+    """One row in the eval scorecard. Matches the shape produced by
+    ``mdk eval --output json`` for per-case data."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_index: int
+    score: float
+    """0.0 - 1.0. Pass = score >= eval's gate."""
+    passed: bool
+    runs: int
+    """How many times this case ran (=runs_per_case)."""
+    objective: str | None = None
+    notes: str = ""
+    """Optional explanation — e.g. LLM judge rationale."""
+
+
+class EvalScorecardView(BaseModel):
+    """``GET /api/v1/evals/{eval_id}`` response (item 84).
+
+    The complete EvalRecord rendered as JSON + per-case rows + 4-dim
+    means (when the dataset opted into faithfulness / coverage; legacy
+    datasets stay accuracy-only).
+
+    Mirrors what ``mdk eval`` prints to terminal but as structured
+    JSON for the Angular UI to render charts + diff with baseline.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    eval_id: str
+    agent: str
+    agent_version: str
+    dataset_hash: str
+    judge_method: str
+    judge_provider: str | None
+    runs_per_case: int
+    gate_mode: str
+    threshold: float
+    mean_score: float
+    pass_rate: float
+    sample_count: int
+    total_cost_usd: float
+    created_at: str
+    """ISO-8601 timestamp."""
+
+
+class EvalListView(BaseModel):
+    """``GET /api/v1/evals?agent={name}`` response (item 85).
+
+    Paginated history of past eval runs for an agent. Powers the
+    "evals over time" chart on the Angular agent-profile page.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evals: list[EvalScorecardView]
+    count: int
+
+
 class WizardAgentSubmission(BaseModel):
     """``POST /api/v1/agents/from-wizard`` request body.
 
@@ -598,6 +717,11 @@ __all__ = [
     "AgentValidationIssue",
     "AgentValidationView",
     "AgentView",
+    "EvalAcceptedView",
+    "EvalCaseView",
+    "EvalListView",
+    "EvalScorecardView",
+    "EvalSubmission",
     "HealthView",
     "JobListView",
     "JobView",
