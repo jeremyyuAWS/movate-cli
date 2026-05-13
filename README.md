@@ -289,6 +289,44 @@ on macOS, `notify-send` on Linux, and is a no-op on Windows. Server-side
 SMS / email notifications (per-job `notify_target`, fired by the worker)
 are tracked in [BACKLOG.md](BACKLOG.md) for post-v1.0.
 
+## Quickstart — Microsoft Teams bot (v0.7 alpha)
+
+Run Movate agents from inside a Teams channel — no CLI needed for the
+end user. Slice 3.1.a (this milestone) ships the skeleton: the bot
+parses `@movate` commands and replies with plain text. Live agent
+execution + Adaptive Cards arrive in 3.1.b. See
+[ADR 003](docs/adr/003-teams-integration.md) for the design.
+
+```bash
+# Install the optional extra (FastAPI + uvicorn).
+uv add 'movate-cli[teams]'
+
+# Terminal 1 — Movate runtime (any agent serves):
+mdk serve --agents-path ./agents --port 8000
+
+# Terminal 2 — Teams bot pointed at it:
+mdk teams-bot serve --runtime-url http://127.0.0.1:8000
+
+# Terminal 3 — point the Bot Framework Emulator at:
+#   http://localhost:3978/api/messages
+# No app id needed for local dev.
+```
+
+Then in the Emulator chat:
+
+```
+@movate ping             → pong
+@movate help             → list of commands
+@movate run faq-agent {"question": "what is movate?"}
+                         → echoes the parsed command (3.1.b wires the
+                           actual `MovateClient.submit_and_wait` call)
+```
+
+The bot is a thin client of the existing v0.5 HTTP runtime — same
+`/run`, `/eval`, `/jobs` endpoints `mdk` itself talks to. Auth,
+identity binding, Adaptive Cards, and the Teams manifest land in
+follow-up slices.
+
 ## Quickstart — deploy to Azure Container Apps
 
 Once the Bicep IaC has provisioned a resource group, ACR, Container Apps
