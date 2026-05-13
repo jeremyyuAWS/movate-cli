@@ -149,31 +149,57 @@ class Activity(BaseModel):
     """Structured entities attached to the activity. Mentions live
     here. Other entity types (clientInfo, etc.) we ignore."""
 
+    attachments: list[Attachment] = Field(default_factory=list)
+    """File uploads from the user — added in 3.1.d. Bot Framework
+    Emulator puts ``contentUrl`` as a ``file://`` URL; Teams native
+    sends an HTTPS Graph URL. Forward declared after Attachment is
+    defined below — Pydantic resolves the forward ref at class build
+    time via the rebuild call at the bottom of the module."""
+
 
 class Attachment(BaseModel):
     """A single attachment on a Bot Framework Activity.
 
-    For our purposes, this is exclusively an **Adaptive Card** —
-    ``contentType="application/vnd.microsoft.card.adaptive"`` with the
-    card's JSON spec under ``content``. Teams renders the card inline
-    in the message; the optional ``text`` field on the parent activity
-    shows as fallback text in channels that don't support cards.
+    Two distinct shapes share this class:
 
-    Other attachment types (file uploads, image cards, HeroCard, etc.)
-    are out of scope — we use Adaptive Cards exclusively because they
-    render correctly on Teams desktop, mobile, and the Bot Framework
-    Emulator without per-surface tweaking.
+    * **Outbound Adaptive Card** (the bot's reply) —
+      ``contentType="application/vnd.microsoft.card.adaptive"`` with the
+      card's JSON spec under ``content``. ``content_url`` + ``name``
+      are unused on this path.
+    * **Inbound file upload** (slice 3.1.d) — ``contentType`` is the
+      file's MIME type (or ``application/octet-stream`` for unknown),
+      ``content_url`` carries the URL the bot must fetch from
+      (``file:///...`` for Bot Framework Emulator; an HTTPS URL for
+      Teams native — the latter needs MS Graph auth, deferred). The
+      ``name`` field is the filename the user uploaded (e.g.
+      ``agent.yaml``, ``dataset.jsonl``).
+
+    The two paths never overlap on the wire — Bot Framework messages
+    are either bot-replies (cards) OR user-uploads (files). Sharing a
+    single class keeps the wire schema flat at the cost of a few unused
+    fields on either side.
     """
 
     model_config = ConfigDict(extra="allow")
 
     content_type: str = Field(alias="contentType")
-    """For Adaptive Cards: ``application/vnd.microsoft.card.adaptive``."""
+    """For Adaptive Cards: ``application/vnd.microsoft.card.adaptive``.
+    For inbound files: the MIME type (``text/yaml``,
+    ``application/json``, ``application/octet-stream`` for unknown)."""
 
     content: dict[str, Any] = Field(default_factory=dict)
-    """The card JSON spec. For Adaptive Cards, this is the object that
-    follows the schema at https://adaptivecards.io/schemas/adaptive-card.json
-    — ``{type:"AdaptiveCard", version:"1.5", body:[...], actions:[...]}``."""
+    """The card JSON spec for outbound; usually empty for inbound files
+    (Teams puts the URL on ``contentUrl`` and the bytes are remote)."""
+
+    content_url: str = Field(default="", alias="contentUrl")
+    """For inbound file uploads: URL the bot fetches from. Empty for
+    outbound Adaptive Cards. Bot Framework Emulator uses ``file://``
+    URLs; Teams native uses HTTPS URLs (Microsoft Graph)."""
+
+    name: str = ""
+    """Display filename — what the user dragged in. Used to surface
+    ``"Got agent.yaml — validating..."`` in cards and to drive
+    suffix-based classification when the contentType isn't specific."""
 
 
 class ReplyActivity(BaseModel):
@@ -206,3 +232,10 @@ class ReplyActivity(BaseModel):
         ``replyToId`` not ``reply_to_id``. The FastAPI endpoint
         returns this dict directly."""
         return self.model_dump(by_alias=True, exclude_none=True)
+
+
+# Resolve forward refs — Activity.attachments references Attachment
+# which is defined below it. Pydantic needs this nudge to wire up the
+# field validator. Quiet on `extra="allow"` models where rebuild isn't
+# strictly necessary, but explicit > implicit.
+Activity.model_rebuild()

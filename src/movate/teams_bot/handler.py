@@ -40,12 +40,24 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from movate.core.auth import ApiKeyParseError, parse_api_key
 from movate.core.client import MovateClient
 from movate.teams_bot.activity import Activity, Attachment, ReplyActivity
-from movate.teams_bot.cards import build_error_card, build_run_result_card
+from movate.teams_bot.attachments import (
+    UploadKind,
+    UploadResult,
+    ingest_attachment,
+    temp_workspace,
+)
+from movate.teams_bot.cards import (
+    build_agent_upload_card,
+    build_dataset_upload_card,
+    build_error_card,
+    build_run_result_card,
+)
 from movate.teams_bot.cards._common import ADAPTIVE_CARD_CONTENT_TYPE
 from movate.teams_bot.client import RunOutcome, execute_run
 from movate.teams_bot.crypto import TeamsCryptoError
@@ -211,6 +223,13 @@ async def handle_activity(
     """
     if ctx is None:
         ctx = HandlerContext()
+
+    # Attachments path (3.1.d). When the user dragged a file in, the
+    # primary intent is "look at my file" — process the upload before
+    # the slash-command branches so an attachment with no command
+    # (just a bare drop) still gets a useful reply.
+    if activity.attachments:
+        return await _handle_upload(activity, ctx)
 
     cmd = parse_command(activity)
 
@@ -633,3 +652,179 @@ def _success_fallback_text(outcome: RunOutcome) -> str:
         return "✅ run succeeded"
     # Use a compact dump so the fallback fits in a single channel line.
     return f"✅ {json.dumps(outcome.run.output, ensure_ascii=False)}"
+
+
+# ---------------------------------------------------------------------------
+# Upload handler (slice 3.1.d)
+# ---------------------------------------------------------------------------
+
+
+async def _handle_upload(activity: Activity, ctx: HandlerContext) -> ReplyActivity:
+    """Validate the first attached file and render the matching card.
+
+    Five outcomes funnel to three card templates:
+
+    1. **Agent uploaded + loaded cleanly** → ``build_agent_upload_card``
+       showing detected name / version / runtime / model / skills.
+    2. **Dataset uploaded + parsed cleanly** → ``build_dataset_upload_card``
+       showing row count + first-row preview.
+    3. **Unknown filetype / fetch failure / validation failure** →
+       ``build_error_card`` with the upload-specific error message.
+    4. **Multiple attachments** — we process the FIRST and tell the
+       user about the others in the result card. Multi-file flows
+       land in slice 3.2 (eval-with-upload, where dataset + agent
+       arrive together).
+    5. **No attachments** — never reaches here (the dispatcher checks
+       before calling us), but defensive ``None`` reply just in case.
+
+    The whole flow is wrapped in a :func:`temp_workspace` context so
+    nothing leaks to disk past this reply. Failed ingests don't get
+    a chance to corrupt the workspace — each starts fresh.
+
+    What's deliberately NOT here (deferred to follow-ups):
+
+    * **Run-against-uploaded-agent.** Today the runtime's `/run`
+      endpoint takes an agent NAME registered with `mdk serve
+      --agents-path` — it has no inline-bundle path. Adding one is a
+      runtime API change tracked separately. For now the upload card
+      tells the user "register this via mdk first, then @movate run".
+    """
+    if not activity.attachments:
+        return _card_reply(
+            activity,
+            card=build_error_card(
+                title="No attachment",
+                message="I was called for upload but no file came along.",
+                category="no_attachment",
+            ),
+            fallback_text="no attachment",
+        )
+
+    # Process the first attachment only. Multi-file flows are 3.2.
+    primary = activity.attachments[0]
+    extra_count = len(activity.attachments) - 1
+
+    with temp_workspace() as workspace:
+        result = await ingest_attachment(primary, workspace=workspace)
+        return _render_upload_result(activity, result, extra_count=extra_count)
+
+
+def _render_upload_result(
+    activity: Activity,
+    result: UploadResult,
+    *,
+    extra_count: int,
+) -> ReplyActivity:
+    """Pick the card template for an :class:`UploadResult` variant."""
+    suffix = ""
+    if extra_count > 0:
+        suffix = (
+            f"\n\n(I also saw {extra_count} other file{'s' if extra_count > 1 else ''} "
+            "— I'm only processing the first one in this slice. Multi-file "
+            "flows land in slice 3.2 — eval-with-upload.)"
+        )
+
+    if result.error:
+        return _card_reply(
+            activity,
+            card=build_error_card(
+                title="Couldn't ingest your upload",
+                message=result.error + suffix,
+                hint=_upload_hint_for(result),
+                category="upload_failed",
+            ),
+            fallback_text=f"upload failed: {result.error}",
+        )
+
+    if result.kind == UploadKind.AGENT and result.bundle is not None:
+        return _card_reply(
+            activity,
+            card=build_agent_upload_card(
+                result.bundle,
+                filename=result.filename,
+                next_step_hint=_agent_next_step_hint(result),
+            ),
+            fallback_text=f"✅ agent loaded: {result.bundle.spec.name}",
+        )
+
+    if result.kind == UploadKind.DATASET and result.path is not None:
+        row_count, preview = _dataset_summary(result.path)
+        return _card_reply(
+            activity,
+            card=build_dataset_upload_card(
+                filename=result.filename,
+                row_count=row_count,
+                first_row_preview=preview,
+                next_step_hint=(
+                    "Eval-with-upload arrives in slice 3.2. For now, save the "
+                    "dataset locally and run `mdk eval <agent> --dataset <path>`."
+                ),
+            ),
+            fallback_text=f"✅ dataset loaded ({row_count} rows)",
+        )
+
+    # Defensive fallthrough — kind was AGENT but bundle is None, or
+    # some other inconsistency. Surface the raw error so we have
+    # something to diagnose.
+    return _card_reply(
+        activity,
+        card=build_error_card(
+            title="Upload didn't produce a usable result",
+            message=(
+                f"Kind: {result.kind.value}; filename: {result.filename}. "
+                "This shouldn't happen — please report it to the bot's operator."
+            ),
+            category="inconsistent_upload",
+        ),
+        fallback_text="upload produced no result",
+    )
+
+
+def _upload_hint_for(result: UploadResult) -> str | None:
+    """Map common upload failures to one-line operator hints."""
+    if result.kind == UploadKind.UNKNOWN:
+        return "Expected suffixes: `.yaml` / `.yml` / `.zip` (agent), `.jsonl` (dataset)."
+    if "isn't a valid zip" in result.error:
+        return "Re-zip the agent directory: `zip -r agent.zip ./my-agent/`."
+    if "invalid JSON" in result.error:
+        return (
+            "Check the offending line — each row must be a single JSON object. "
+            "Use `jq -c . < dataset.jsonl > fixed.jsonl` to normalise."
+        )
+    return None
+
+
+def _agent_next_step_hint(result: UploadResult) -> str:
+    """What the user can do after a clean agent upload.
+
+    Today: the upload validates the agent but doesn't register it
+    with the runtime. Running an uploaded agent requires a separate
+    runtime API change (tracked as a follow-up issue) — until that
+    lands, the hint points users at the local-CLI path.
+    """
+    name = result.bundle.spec.name if result.bundle is not None else "<agent>"
+    return (
+        f"Looks good. To execute, register the agent with the runtime "
+        f"(`mdk serve --agents-path` includes it on next restart), then "
+        f"`@movate run {name} {{...}}`. Inline-bundle execution is a "
+        "tracked follow-up."
+    )
+
+
+def _dataset_summary(path: Path) -> tuple[int, str]:
+    """Quick stats on a parsed dataset for the upload card.
+
+    Re-reads the file to count rows + pull the first row as a preview.
+    The validate-by-loading pass in :func:`ingest_attachment` already
+    confirmed it parses cleanly — we just need the count + preview
+    here, so a simpler line-iter is enough."""
+    row_count = 0
+    preview = ""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        row_count += 1
+        if not preview:
+            preview = s
+    return row_count, preview
