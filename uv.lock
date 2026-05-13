@@ -1658,6 +1658,10 @@ runtime = [
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
 ]
+teams = [
+    { name = "fastapi" },
+    { name = "uvicorn", extra = ["standard"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1679,6 +1683,7 @@ requires-dist = [
     { name = "asyncpg", marker = "extra == 'runtime'", specifier = ">=0.29" },
     { name = "bcrypt", marker = "extra == 'runtime'", specifier = ">=4.0" },
     { name = "fastapi", marker = "extra == 'runtime'", specifier = ">=0.110" },
+    { name = "fastapi", marker = "extra == 'teams'", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.21" },
@@ -1703,8 +1708,9 @@ requires-dist = [
     { name = "types-jsonschema", marker = "extra == 'dev'" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'runtime'", specifier = ">=0.29" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'teams'", specifier = ">=0.29" },
 ]
-provides-extras = ["runtime", "langfuse", "otel", "dev", "anthropic", "openai", "langchain"]
+provides-extras = ["runtime", "langfuse", "otel", "dev", "anthropic", "openai", "langchain", "teams"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -55,6 +55,17 @@ openai = [
 langchain = [
     "langchain-core>=0.3,<1",
 ]
+teams = [
+    # The Teams bot is a FastAPI app, so it leans on the same web deps
+    # `mdk serve` uses. Listed explicitly (rather than depending on
+    # the `runtime` extra) so an operator who runs *just* the bot pod
+    # (pointed at a remote runtime) only installs what they need.
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    # JWT validation for inbound Bot Framework requests lands in a
+    # later hardening PR; its dep slot goes here so the optional
+    # install stays single-step.
+]
 
 [dependency-groups]
 dev = [
