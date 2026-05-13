@@ -19,6 +19,36 @@ from movate.teams_bot.app import build_app
 from movate.teams_bot.handler import handle_activity
 from movate.teams_bot.parser import parse_command
 
+
+def _card_text(card: dict[str, Any]) -> str:
+    """Concatenate every TextBlock body in an Adaptive Card.
+
+    Lets a test assert on overall card content with one string match
+    rather than walking the body tree by index. Recurses into
+    Containers because our error cards wrap the message in one.
+    """
+    out: list[str] = []
+
+    def walk(items: list[Any]) -> None:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            t = item.get("type", "")
+            if t == "TextBlock":
+                out.append(str(item.get("text", "")))
+            elif t == "Container":
+                walk(item.get("items", []) or [])
+            elif t == "FactSet":
+                for f in item.get("facts", []) or []:
+                    out.append(f"{f.get('title', '')}: {f.get('value', '')}")
+
+    walk(card.get("body", []) or [])
+    for action in card.get("actions", []) or []:
+        if isinstance(action, dict):
+            out.append(f"action: {action.get('title', '')} → {action.get('url', '')}")
+    return "\n".join(out)
+
+
 # ---------------------------------------------------------------------------
 # Test fixtures — Activity builders mirroring the real Teams JSON shape
 # ---------------------------------------------------------------------------
@@ -256,29 +286,35 @@ async def test_handle_help_returns_help_body() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_run_echoes_parsed_args() -> None:
-    """Slice 3.1.a echoes the parsed run command back rather than
-    executing it. The echo must include the agent + the JSON body
-    so an alpha tester can verify the wire."""
+async def test_handle_run_without_runtime_returns_config_error_card() -> None:
+    """Slice 3.1.b: with no runtime client configured, ``run`` produces
+    an error card pointing at the env var. Previously (3.1.a) this
+    path was a plain-text echo of the parsed args."""
     activity = Activity.model_validate(
-        _activity_payload('<at>movate</at> run faq-agent {"question": "what is movate?"}')
+        _activity_payload('<at>movate</at> run faq-agent {"question": "hi"}')
     )
-    reply = await handle_activity(activity)
+    reply = await handle_activity(activity)  # no ctx → empty HandlerContext
     assert reply is not None
-    assert "faq-agent" in reply.text
-    assert "what is movate?" in reply.text
-    # The plain-text body explicitly tags itself as a skeleton so the
-    # tester doesn't think it's a real execution.
-    assert "skeleton" in reply.text.lower() or "no execution" in reply.text.lower()
+    # Card attachment carries the structured error; text is the
+    # fallback for non-card-rendering channels.
+    assert reply.attachments, "expected an Adaptive Card attachment"
+    card = reply.attachments[0].content
+    assert "No runtime configured" in _card_text(card)
+    assert "MOVATE_RUNTIME_URL" in _card_text(card)
 
 
 @pytest.mark.asyncio
-async def test_handle_run_renders_parse_error_friendly() -> None:
-    """Bad JSON → friendly error reply, NOT an exception."""
+async def test_handle_run_renders_parse_error_card() -> None:
+    """Bad JSON → friendly error card with a usage hint, NOT an exception."""
     activity = Activity.model_validate(_activity_payload("<at>movate</at> run faq-agent {bad"))
     reply = await handle_activity(activity)
     assert reply is not None
-    assert "invalid JSON" in reply.text or "couldn't parse" in reply.text
+    assert reply.attachments, "expected an Adaptive Card attachment"
+    card = reply.attachments[0].content
+    body_text = _card_text(card)
+    assert "invalid JSON" in body_text or "Couldn't parse" in body_text
+    # Hint should suggest the correct usage.
+    assert "@movate run" in body_text
 
 
 @pytest.mark.asyncio
@@ -375,41 +411,26 @@ def test_post_messages_invalid_activity_shape_returns_422(client: TestClient) ->
 
 
 @pytest.mark.unit
-def test_post_messages_run_command_echoes(client: TestClient) -> None:
-    """End-to-end echo of a run command — proves the full pipeline:
-    parse → handle → reply → serialise → JSON."""
+def test_post_messages_run_with_no_runtime_returns_card(client: TestClient) -> None:
+    """End-to-end: \`run\` against a bot started without a runtime URL
+    produces an Adaptive Card error response (full pipeline: parse →
+    handle → reply with attachment → serialise → JSON wire).
+
+    A success-path equivalent would need a fake MovateClient injected
+    into ``build_app`` — covered in test_teams_bot_handler.py."""
     payload = _activity_payload('<at>movate</at> run faq-agent {"question": "what?"}')
     resp = client.post("/api/messages", json=payload)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["text"]
-    text = body["text"]
-    assert "faq-agent" in text
-    assert "what?" in text
+    assert body["attachments"], "expected Adaptive Card attachment"
+    card = body["attachments"][0]["content"]
+    assert card["type"] == "AdaptiveCard"
+    # The "no runtime configured" card body should mention how to fix.
+    rendered = json.dumps(card)
+    assert "No runtime configured" in rendered
+    assert "MOVATE_RUNTIME_URL" in rendered
 
 
-# ---------------------------------------------------------------------------
-# JSON round-trip safety — pretty-print preserves the parsed input
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_run_echo_preserves_unicode(
-    client: TestClient,
-) -> None:
-    """JSON inputs may contain non-ASCII — the echo path must round-trip
-    them. Teams users will type emoji / non-English text in demos."""
-    payload = _activity_payload('<at>movate</at> run greet-agent {"name": "naïve résumé 🎯"}')
-    resp = client.post("/api/messages", json=payload)
-    assert resp.status_code == 200
-    body = resp.json()
-    # The echo body inlines a pretty-printed JSON dump — the unicode
-    # values must survive.
-    parsed_input_section = body["text"].split("input:", 1)[1]
-    # The pretty-print happens inside the fenced code block.
-    assert "naïve résumé 🎯" in parsed_input_section
-    # And the structure is valid JSON when extracted (sanity check —
-    # if it weren't, our echo would be lying to the user).
-    fenced = parsed_input_section.split("```", 2)
-    assert len(fenced) >= 2
-    json.loads(fenced[1])  # raises if malformed
+# JSON unicode preservation is tested in the card builders (see
+# test_teams_bot_cards.py) — the run-echo path that this test originally
+# covered no longer exists post-3.1.b.

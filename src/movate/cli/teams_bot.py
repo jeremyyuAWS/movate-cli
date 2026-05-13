@@ -5,9 +5,10 @@ Mirrors the shape of ``mdk serve`` (the runtime HTTP server) — same
 hood. Defaults to port 3978 because that's what the Bot Framework
 Emulator looks for out of the box; ``mdk serve`` keeps 8000.
 
-For 3.1.a we DON'T forward to the runtime — the bot echoes parsed
-commands back. The ``--runtime-url`` flag is plumbed through to
-prepare for 3.1.b which adds :class:`MovateClient` integration.
+Slice 3.1.b: the bot now actually calls the runtime via
+:class:`MovateClient` and renders Adaptive Cards. ``--runtime-url``
+is forwarded; ``--fleet-api-key`` (or the ``MOVATE_TEAMS_FLEET_API_KEY``
+env) is required when the runtime expects auth.
 """
 
 from __future__ import annotations
@@ -49,9 +50,32 @@ def serve(
         "--runtime-url",
         envvar="MOVATE_RUNTIME_URL",
         help=(
-            "Base URL of the Movate runtime to forward `run` / `eval` "
-            "commands to. Unused in slice 3.1.a (skeleton echoes "
-            "back); wired to MovateClient in 3.1.b."
+            "Base URL of the Movate runtime the bot forwards "
+            "`run` / `eval` commands to. Required when the bot is "
+            "expected to actually run anything (it is, in 3.1.b+)."
+        ),
+    ),
+    fleet_api_key: str = typer.Option(
+        None,
+        "--fleet-api-key",
+        envvar="MOVATE_TEAMS_FLEET_API_KEY",
+        help=(
+            "The bot's API key for the runtime. Required when "
+            "--runtime-url is set. Falls back to the "
+            "MOVATE_TEAMS_FLEET_API_KEY env var; warned (not failed) "
+            "when absent so the bot still boots for `ping` / `help` "
+            "smoke tests."
+        ),
+    ),
+    langfuse_public_host: str = typer.Option(
+        None,
+        "--langfuse-public-host",
+        envvar="MOVATE_TEAMS_LANGFUSE_PUBLIC_HOST",
+        help=(
+            "Public Langfuse base URL. When set, successful run cards "
+            "include a 'View trace' button. Off by default — only "
+            "enable when the URL is routable for the audience (don't "
+            "show prospects an internal-only URL)."
         ),
     ),
 ) -> None:
@@ -59,21 +83,24 @@ def serve(
 
     [bold]Quickstart for local dev:[/bold]
 
-    Terminal 1 — run the Movate runtime (any agent serves):
+    Terminal 1 — run the Movate runtime:
 
         $ mdk serve --agents-path ./agents --port 8000
 
-    Terminal 2 — run the Teams bot pointed at it:
+    Terminal 2 — issue an API key for the bot:
 
-        $ mdk teams-bot serve --runtime-url http://127.0.0.1:8000
+        $ mdk auth create-key --tenant local --name teams-bot
 
-    Terminal 3 — point the Bot Framework Emulator at
-    ``http://localhost:3978/api/messages`` (no app id needed for
-    local dev). You can now ``@movate ping`` in the emulator.
+    Terminal 3 — run the Teams bot pointed at the runtime:
 
-    Slice 3.1.a only echoes parsed commands; live agent execution
-    arrives in 3.1.b once the result-rendering Adaptive Card is
-    available.
+        $ MOVATE_TEAMS_FLEET_API_KEY=mvt_... \\
+            mdk teams-bot serve --runtime-url http://127.0.0.1:8000
+
+    Terminal 4 — point the Bot Framework Emulator at
+    ``http://localhost:3978/api/messages``. ``@movate ping`` confirms
+    the wire works; ``@movate run faq-agent {"question": "hi"}``
+    drives a real round-trip through the runtime and renders the
+    result as an Adaptive Card.
     """
     try:
         import uvicorn  # noqa: PLC0415
@@ -87,19 +114,32 @@ def serve(
         )
         raise typer.Exit(code=2) from exc
 
-    # ``runtime_url`` is parked here as a runtime config dict accessible
-    # via app.state — slice 3.1.b reads it when building MovateClient.
-    # We pass it eagerly so misconfiguration surfaces at boot, not on
-    # the first user message.
-    app = build_app()
-    app.state.runtime_url = runtime_url
+    # Soft-warn (not exit) when a runtime URL is set without an API
+    # key — the bot is still useful for ping/help smoke tests, and
+    # the ``run`` command surfaces a config-error card to the user
+    # rather than crashing the bot on boot. Hard failure here would
+    # break the "smoke test the bot manifest before secrets are
+    # plumbed" workflow.
+    if runtime_url and not fleet_api_key:
+        err.print(
+            "[yellow]![/yellow] --runtime-url is set but no "
+            "--fleet-api-key / MOVATE_TEAMS_FLEET_API_KEY — "
+            "`run` will return a config-error card until you set one."
+        )
+
+    app = build_app(
+        runtime_url=runtime_url,
+        fleet_api_key=fleet_api_key,
+        langfuse_public_host=langfuse_public_host,
+    )
 
     err.print(
         f"[green]✓[/green] movate teams-bot listening on "
         f"[bold]http://{host}:{port}[/bold]\n"
         f"  webhook:    POST /api/messages\n"
         f"  health:     GET  /health\n"
-        f"  runtime:    {runtime_url}\n"
-        f"  [dim]auth:       NONE (slice 3.1.a; JWT validation lands later)[/dim]"
+        f"  runtime:    {runtime_url or '(not configured)'}\n"
+        f"  langfuse:   {langfuse_public_host or '(off)'}\n"
+        f"  [dim]auth:       NONE on inbound (JWT validation lands later)[/dim]"
     )
     uvicorn.run(app, host=host, port=port, log_level=log_level)
