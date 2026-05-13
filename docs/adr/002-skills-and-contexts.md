@@ -1,7 +1,7 @@
 # ADR 002 — Skills and shared contexts as first-class agent.yaml objects
 
-**Status:** Proposed
-**Date:** 2026-05-12
+**Status:** Accepted
+**Date:** 2026-05-12 (proposed); 2026-05-13 (open questions resolved, status flipped to Accepted)
 **Deciders:** Engineering + Deva (Movate)
 **Context window:** v0.6 → v0.8 design horizon
 **Supersedes:** N/A
@@ -331,37 +331,68 @@ These are explicit consequences of the decision:
 * PR 6: Native-Anthropic / native-OpenAI tool-spec conversion.
 * PR 7: Project policy gates on skill `side_effects` annotations.
 
-## Open questions (resolve before PR 1)
+## Decisions (resolved 2026-05-13)
 
-1. **Tool-use loop ownership.** Does the loop live in `Executor` (today's
-   pattern — provider-agnostic) or inside `BaseLLMProvider.complete()`
-   (each provider owns its own loop)? Trade-off: the former keeps
-   provider implementations thin but requires translating tool-result
-   shapes; the latter risks divergence.
-   *Tentative answer: in `Executor`.* Each provider exposes
-   `to_tool_spec()` + parses tool-use responses into a normalized
-   shape; the loop lives one layer up.
+The five questions left open at proposal-time are now resolved. Each
+decision flips a tentative answer to a committed one; rationale carries
+through unchanged.
 
-2. **`SkillError` taxonomy.** What types do we surface to the model in
-   a `tool_result` content block when a skill fails? At minimum:
-   `not_found`, `validation_failed`, `backend_error`, `timeout`,
-   `budget_exceeded`. Mirrors `ErrorInfo` on RunResponse.
+### D1 — Tool-use loop ownership: **Executor**
 
-3. **Per-skill timeouts.** Inherit from agent `timeouts.call_ms`, or
-   declare on the skill (`skill.yaml: timeouts:`)? Skills like
-   `web-search` may need longer; calculator wants instant.
-   *Tentative: per-skill override, inherits from agent if absent.*
+The loop lives in `Executor.execute()`, not inside each provider. Each
+`BaseLLMProvider` exposes `to_tool_spec(skill) -> dict` for outbound
+conversion and parses tool-use responses into a normalized
+`CompletionResponse(kind="tool_use" | "final")`. The loop sits one
+layer up.
 
-4. **`tool_choice` parameter.** Some providers let you force a
-   specific tool (`tool_choice: { name: "web-search" }`) for the next
-   call. Do we surface this in our API? Probably yes, but defer to
-   PR 6 with native-SDK support.
+**Why this over per-provider loops:** the implementation cost of a
+unified loop scales O(1) with new providers; per-provider loops scale
+O(N) and accumulate drift. The risk we're accepting is "some provider's
+tool-use semantics can't be normalized through our shape." If we hit
+that, we revisit. Mid-decision pivots are cheap because the seam is
+narrow: one method per provider.
 
-5. **`mdk init` template behavior.** Should the default scaffold
-   create a `skills/` folder + a sample skill? Probably yes —
-   discoverability matters. Probably no — most simple agents don't
-   need skills. *Tentative: no skills by default, `mdk init -t with-skills`
-   gets one.*
+### D2 — `SkillError` taxonomy
+
+Five error types surface to the model in `tool_result` blocks when a
+skill fails:
+
+| `type` | When it fires |
+|---|---|
+| `not_found` | Skill name in agent.yaml doesn't resolve to a registered skill. |
+| `validation_failed` | Input doesn't conform to the skill's input schema, OR the backend returned output that doesn't conform to the output schema. |
+| `backend_error` | Backend raised an unhandled exception (Python `impl.py` raised, HTTP returned non-2xx, MCP returned error). |
+| `timeout` | The backend exceeded the skill's timeout budget. |
+| `budget_exceeded` | The cumulative skill cost for this run pushed past `policy.max_cost_per_run_usd` or the agent's `budget.max_cost_usd_per_run`. |
+
+Mirrors `ErrorInfo.type` on `RunResponse`, which keeps the surface
+consistent: an operator inspecting a failed run already knows the
+vocabulary.
+
+### D3 — Per-skill timeouts: per-skill override, inherits from agent
+
+`skill.yaml` may declare its own `timeouts: { call_ms: N }`. If absent,
+the skill inherits the agent's `timeouts.call_ms` for the duration of
+the tool call. The agent's `timeouts.total_ms` is the cap on the
+*whole* tool-use loop including all skill calls — a skill can't blow
+past the agent's total budget even if each individual call comes in
+under its own timeout.
+
+### D4 — `tool_choice` parameter: defer to PR 6
+
+We don't surface `tool_choice` on the agent or skill in PR 1. LiteLLM's
+default tool-use semantics ("model picks from the offered tools") are
+adequate for the demos this milestone is built for. When PR 6 lands
+native-SDK tool-use, we revisit and add a `tool_choice: auto | none |
+{ name: ... }` field on `agent.yaml` if real use-cases need it.
+
+### D5 — Default `mdk init` template: no skills by default
+
+`mdk init <name>` (default template) scaffolds an agent WITHOUT a
+`skills/` folder. `mdk init <name> -t with-skills` is the discoverable
+opt-in that produces a `skills/<sample-skill>/` directory with a
+working `web-search`-shaped sample. Keeps the simple case simple;
+makes the tool-use case one flag away.
 
 ## When to revisit
 
