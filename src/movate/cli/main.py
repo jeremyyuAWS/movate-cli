@@ -9,6 +9,8 @@ Shell completion: ``movate --install-completion`` (bash/zsh/fish/PowerShell).
 from __future__ import annotations
 
 import logging
+import os
+import sys
 
 import typer
 from dotenv import load_dotenv
@@ -48,16 +50,19 @@ PANEL_DEPLOY = "Deploy & operate"
 PANEL_MANAGE = "Manage"
 
 app = typer.Typer(
-    name="movate",
+    name="mdk",
     help=(
-        "[bold]movate[/bold] — declarative platform for AI agents and workflows.\n\n"
+        "[bold]mdk[/bold] — Movate Development Kit. Declarative platform for "
+        "AI agents and workflows.\n\n"
         "Common workflows:\n"
-        "  [dim]$ movate init my-agent              # scaffold[/dim]\n"
-        "  [dim]$ movate run my-agent '{...}'       # one-shot[/dim]\n"
-        "  [dim]$ movate eval my-agent              # score against dataset[/dim]\n"
-        "  [dim]$ movate bench my-agent             # multi-model comparison[/dim]\n"
-        "  [dim]$ movate doctor                     # check environment[/dim]\n\n"
-        "Run [bold]movate --install-completion[/bold] to enable shell tab-completion."
+        "  [dim]$ mdk init my-agent              # scaffold[/dim]\n"
+        "  [dim]$ mdk run my-agent '{...}'       # one-shot[/dim]\n"
+        "  [dim]$ mdk eval my-agent              # score against dataset[/dim]\n"
+        "  [dim]$ mdk bench my-agent             # multi-model comparison[/dim]\n"
+        "  [dim]$ mdk doctor                     # check environment[/dim]\n\n"
+        "[dim]Also installed as [bold]movate[/bold] (transitional alias; dropped "
+        "in a future major release).[/dim]\n\n"
+        "Run [bold]mdk --install-completion[/bold] to enable shell tab-completion."
     ),
     no_args_is_help=True,
     add_completion=True,
@@ -68,7 +73,13 @@ app = typer.Typer(
 
 def _version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"movate {__version__}")
+        # Print the brand name that matches how the user invoked us. ``mdk``
+        # is canonical; ``movate`` is the transitional alias.
+        binary = os.path.basename(sys.argv[0]) if sys.argv else "mdk"
+        # Anything not exactly "movate" is rendered as "mdk" (handles
+        # symlinks, "mdk", and the test runner's "pytest" all the same).
+        brand = "movate" if binary == "movate" else "mdk"
+        typer.echo(f"{brand} {__version__}")
         raise typer.Exit()
 
 

@@ -76,7 +76,33 @@ def test_version_flag() -> None:
 @pytest.mark.unit
 def test_no_args_shows_help() -> None:
     result = runner.invoke(app, [])
-    assert "movate" in result.stdout.lower()
+    # Either brand name is acceptable — "mdk" is canonical going forward,
+    # "movate" remains the transitional alias and still appears in the
+    # deprecation note in the help text.
+    lower = result.stdout.lower()
+    assert "mdk" in lower or "movate" in lower
+
+
+@pytest.mark.unit
+def test_mdk_binary_alias_registered() -> None:
+    """The ``mdk`` console script must be registered alongside ``movate``
+    so both binaries are first-class. Reads ``pyproject.toml`` to assert
+    the entry-point map contains both; the import doesn't go through the
+    Python package machinery so we have to inspect the metadata directly.
+    """
+    import tomllib  # noqa: PLC0415
+
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    data = tomllib.loads(pyproject_path.read_text())
+    scripts = data.get("project", {}).get("scripts", {})
+    assert scripts.get("movate") == "movate.cli.main:app", (
+        "transitional `movate` script must continue to point at the same "
+        "entry-point so existing installs keep working"
+    )
+    assert scripts.get("mdk") == "movate.cli.main:app", (
+        "canonical `mdk` script must be registered as the going-forward "
+        "binary name — see pyproject.toml [project.scripts]"
+    )
 
 
 @pytest.mark.unit

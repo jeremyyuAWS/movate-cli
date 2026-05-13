@@ -70,7 +70,15 @@ dev = [
 ]
 
 [project.scripts]
+# `movate` and `mdk` are both registered — identical entrypoints into the
+# same Typer app. `mdk` is the canonical name going forward (Movate
+# Development Kit); `movate` stays as a transitional alias so existing
+# installs, scripts, CI configs, shell aliases, and muscle memory keep
+# working. The legacy `movate` script ships through v1.0+ as a deprecated
+# alias and is dropped in a later major release after a full deprecation
+# cycle — until then both are first-class.
 movate = "movate.cli.main:app"
+mdk = "movate.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/movate"]
