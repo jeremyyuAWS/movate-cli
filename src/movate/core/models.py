@@ -538,6 +538,25 @@ class AgentSpec(BaseModel):
         ),
     )
 
+    # ---- v0.6 shared contexts (ADR 002) ----
+    # Names referencing `contexts/<name>.md` files in the project's
+    # contexts/ folder. Each named context's body is prepended to the
+    # rendered prompt at execution time, in declaration order, with a
+    # `\n\n---\n\n` separator. Solves the "stop copy-pasting the style
+    # guide into every prompt.md" pain. Pure markdown — no templating,
+    # no Python, no Jinja side effects. See docs/adr/002-skills-and-contexts.md.
+
+    contexts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of shared markdown contexts (from the project's contexts/ "
+            "folder) prepended to this agent's prompt at render time, in "
+            "declaration order. Each name must resolve to a "
+            "`contexts/<name>.md` at load time. Empty list = no contexts; "
+            "prompt renders exactly as written (v0.5 behavior)."
+        ),
+    )
+
     @field_validator("name")
     @classmethod
     def _validate_name(cls, v: str) -> str:
