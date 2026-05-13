@@ -288,6 +288,128 @@ These pay back across every phase. Don't queue them after v1.0 — interleave th
 
 ---
 
+## 9. MDK rebrand + canonical config (Deva's feedback, May 2026)
+
+Strategic direction shift: position movate-cli as **MDK — Movate Development Kit**, an enterprise SDK with knowledge graphs, multi-tenancy, and adapter architecture. Some items below are already shipped (see notes); the new work is grouped in phases v0.6 → v1.0.
+
+> **Resale-clean stack is the real constraint, not "make MDK sellable."**
+> MDK itself isn't sold. But Movate-built customer solutions embed MDK's
+> dependencies, so every dep's license must be permissive enough that the
+> customer engagement can be resold without copyleft contamination, BSL
+> service-competition clauses, or open-sourcing of proprietary work.
+>
+> Current stack is **100% permissively licensed** (MIT / Apache 2.0 / BSD) —
+> see [docs/license-posture.md](docs/license-posture.md) (TBD).
+> Future additions must clear the same bar.
+>
+> **Strategic answers from leadership (May 2026):**
+> 1. **Multi-cloud (GCP/AWS): eventual.** Stay Azure-first; new infrastructure
+>    decisions must be cloud-portable in principle. ADR captures the rule.
+> 2. **Multi-tenant: both — SaaS AND self-hosted.** Most building blocks
+>    already in place. Need Helm chart for K8s self-hosting; SaaS onboarding
+>    flow. v1.0 work.
+> 3. **Lyzr adapter: STRATEGIC + TIME-BOXED.** Most current customer agents
+>    are on Lyzr. Build a read-only adapter + `mdk import lyzr <id>` →
+>    `agent.yaml` migration tool. Bridge to migrate OFF Lyzr, not stay
+>    integrated. Bump to v0.7-v0.8 priority (not v1.0). License-check first.
+> 4. **Knowledge graph: aspirational, visualization-first.** Use Apache AGE
+>    for storage (cheap, Postgres-native). The actual value is d3.js
+>    interactive visualization of the graph + simple search/filter.
+>    Becomes the demo "wow moment" in v0.9. Not a deep-query system.
+
+### Tier 0 — Brand + naming (v0.6, ~1 week)
+
+- [ ] **Rename `movate` CLI → `mdk`** `[HIGH] [v0.6] [2-3d]` — binary, package, env var prefix (`MOVATE_*` → `MDK_*`), config dir (`~/.movate/` → `~/.mdk/`). Mechanical but breaking. Keep `movate` as transitional alias for 2 releases.
+- [ ] **Rename `movate.yaml` → `policy.yaml`** `[HIGH] [v0.6] [1d]` — loader checks both, prefers `policy.yaml`. Deprecation warning on old name.
+- [ ] **Update demo repo + docs to use `mdk`** `[HIGH] [v0.6] [1d]` — README, ask.py subprocess calls, dev-loop.md, deck source files.
+
+### Tier 1 — Canonical config files (v0.6, ~2-3 weeks)
+
+- [ ] **`policy.yaml` (renamed from movate.yaml)** `[HIGH] [v0.6] [done-after-rename]` — already implements: allowed_providers, deny_models, max_cost_per_run_usd, tenant_budgets.
+- [ ] **`runtime.yaml` — runtime + adapter selection + provider routing** `[HIGH] [v0.6] [3-5d]` — defaults for runtime kind (litellm|native_openai|native_anthropic|lyzr), per-agent overrides allowed; provider routing rules (cost/latency/region) merged here from §7.
+- [ ] **`eval.yaml` — global eval defaults** `[HIGH] [v0.6] [2d]` — gate, gate_mode, regression_tolerance, runs_per_case, default judge model. Per-agent `evals:` block in agent.yaml overrides.
+- [ ] **`knowledge.yaml` — KB sources + ingestion config** `[HIGH] [v0.6] [3d]` — vector DB pointer, KG endpoint, chunking strategy, embedding model. Per-agent `knowledge:` refs point at indices/namespaces declared here.
+- [ ] **Layered context resolution: Global → Agent → Session** `[HIGH] [v0.6] [3d]` — formalize merge precedence; expose via `mdk config show` showing the resolved config for a given agent.
+
+### Tier 2 — Agent definition expansion (v0.7, ~2 weeks)
+
+- [ ] **Input/output examples in agent.yaml** `[HIGH] [v0.7] [2d]` — `examples: [{input: ..., output: ...}]`; `mdk validate` smoke-tests against these; powers downstream synthetic data generation.
+- [ ] **Goals + objectives + KB refs as first-class agent.yaml fields** `[HIGH] [v0.7] [3d]` — structured `goals: [...]`, `objectives: [{id, threshold, judge}]`, `knowledge: [{kind, path|index|namespace}]`. Becomes the contract for test generation.
+- [ ] **Modularize agent objectives for evaluation** `[HIGH] [v0.7] [3d]` — each objective is independently scored + reported (per-objective subscore in eval table). Eval gate can target individual objectives.
+
+### Tier 3 — Multi-source onboarding + dynamic test gen (v0.7, ~3-4 weeks)
+
+- [ ] **Onboard from Agent JSON** `[MED] [v0.7] [1d]` — `mdk onboard --from-json agent.json` builds equivalent of agent.yaml on disk.
+- [ ] **Onboard from trace logs** `[MED] [v0.7] [1w]` — given recorded RunRecords, synthesize a starter agent.yaml (provider, schemas inferred from data shape).
+- [ ] **Onboard from chat UI export** `[MED] [v0.7] [1w]` — common chat export formats (OpenAI, Anthropic, Claude.ai exports) → agent.yaml seed.
+- [ ] **Black-box application testing (`mdk eval <http-url>`)** `[HIGH] [v0.7] [1w]` — hit an HTTP endpoint instead of a local agent; same eval framework, different runner.
+- [ ] **Generate scenario test cases from agent goals** `[HIGH] [v0.7] [1w]` — LLM-generates cases across categories: positive / negative / edge / red-team. Output is a *suggested* dataset for human review — never auto-merged.
+- [ ] **Synthetic test data generation** `[MED] [v0.7] [3-5d]` — opt-in via `mdk eval generate --synthetic`. Strong warning about over-reliance on synthetic data.
+- [ ] **Expected-results generation (optional)** `[LOW] [v0.7] [3d]` — LLM-generates expected output for cases that lack one. Marked `auto_generated: true` so human reviewer can flip.
+- [ ] **Test category tagging in dataset** `[MED] [v0.7] [1d]` — `tags: [positive | negative | edge | red_team | adversarial]`; eval table reports per-category pass rate.
+- [ ] **Multi-run consistency analysis** `[MED] [v0.7] [2d]` — partially shipped (`--runs N`); add stddev + p10/p90 + confidence-interval bands to the eval report.
+
+### Tier 4 — Knowledge architecture (v0.8 + v0.9, ~10-12 weeks total)
+
+- [ ] **Evaluate open-source vector DB candidates** `[HIGH] [v0.8] [3d]` — `pgvector` (recommended; already have Postgres; PostgreSQL License — permissive), `Qdrant` (Apache 2.0), `Chroma` (Apache 2.0), `Weaviate` (BSD-3), `LanceDB` (Apache 2.0). All license-clean for customer resale. Write a 1-page decision doc.
+- [ ] **Integrate pgvector (or chosen VDB)** `[HIGH] [v0.8] [1-2w]` — `MemoryProvider.vector_search()` + ingestion pipeline. `knowledge.yaml: vector_db:` config.
+- [ ] **Evaluate open-source knowledge graph candidates** `[HIGH] [v0.9] [3d]` — `Apache AGE` (**recommended**; Postgres extension; Apache 2.0). **EXCLUDE**: Neo4j Community (GPLv3 — copyleft); Memgraph (BSL — service-competition restrictions). Acceptable alternatives: Kuzu (MIT), TerminusDB (Apache 2.0). Decision doc must explicitly state license + resale safety.
+- [ ] **Integrate KG (Apache AGE)** `[HIGH] [v0.9] [1w]` — entity + relationship extraction at ingest; keep schema simple — this is a demo/visualization layer, not a deep-query system.
+- [ ] **Canonical KB ingestion pipeline** `[HIGH] [v0.9] [2w]` — `mdk knowledge ingest <path>` runs: chunking → metadata → embedding → entity extraction → graph relationships. Configurable via `knowledge.yaml`.
+- [ ] **Hybrid retrieval (vector + KG)** `[HIGH] [v0.9] [1w]` — query fans out to both; merge by score with configurable weights.
+- [ ] **`mdk knowledge graph --serve` (d3.js visualization)** `[HIGH] [v0.9] [1-2w]` — HTTP endpoint returns `{nodes, edges}`; static HTML page renders a force-directed d3.js graph. Click a node → metadata + related KB chunks. **This is the demo wow-moment per Deva.** Showcases what the agent "knows" visually.
+- [ ] **KG subgraph search + highlight** `[HIGH] [v0.9] [1w]` — search box on the d3.js page: "show me everything related to eval gates" → highlights the relevant subgraph + shows top-k KB chunks. Powered by hybrid retrieval (vector for KB chunks; graph traversal for entity neighborhoods).
+- [ ] **Avoid cloud-native proprietary services** `[MED] [v0.9] [—]` — already done at model layer (LiteLLM). Infra layer (Azure) — scope a separate Terraform/Helm pass for GCP/AWS if/when business case is clear.
+
+### Tier 5 — Memory architecture (v0.8, ~4 weeks parallel with VDB work)
+
+- [ ] **Memory provider Protocol** `[HIGH] [v0.8] [3d]` — `MemoryProvider.read(layer, key)` + `write(...)` + `search(...)`; per-layer backends.
+- [ ] **Session memory (per-run scratchpad, in-process)** `[HIGH] [v0.8] [2d]` — short-lived dict; cleared on run end.
+- [ ] **Working memory (conversation context)** `[HIGH] [v0.8] [3d]` — Redis or Postgres with TTL; keyed by `conversation_id`.
+- [ ] **Episodic memory (recent runs by tenant)** `[MED] [v0.8] [3d]` — already partially shipped (RunRecord); add retrieval helpers.
+- [ ] **Semantic memory (KB-grounded long-term)** `[HIGH] [v0.8] [—]` — backed by vector DB (above).
+- [ ] **Organizational memory (cross-tenant shared)** `[MED] [v0.9] [1w]` — separate VDB namespace + KG subgraph; opt-in per tenant.
+
+### Tier 6 — Adapter architecture (v1.0, ~4 weeks)
+
+- [ ] **Generic HTTP agent adapter** `[HIGH] [v1.0] [1w]` — POST to URL, expect JSON; black-box testing for any HTTP-served agent.
+- [ ] **Lyzr adapter (read-only, migration bridge)** `[HIGH] [v0.7] [3-5d]` — invoke a Lyzr-hosted agent from MDK for eval/bench. License-check first (confirm Lyzr SDK is Apache 2.0 / MIT). Time-boxed: this is a bridge to migrate customer agents OFF Lyzr, not stay integrated.
+- [ ] **`mdk import lyzr <agent-id>`** `[HIGH] [v0.8] [1w]` — pulls a Lyzr agent definition and synthesizes the equivalent MDK `agent.yaml`. Powers the migration story.
+- [ ] **`docs/migrate-from-lyzr.md`** `[HIGH] [v0.8] [2d]` — walks customers through importing existing Lyzr agents into MDK-native. Critical because most current customer agents live on Lyzr.
+- [ ] **Browser/Playwright adapter** `[LOW] [v1.0+] [2w]` — evaluate Web UIs. Gated on customer use case.
+- [ ] **Trace replay adapter** `[—] [done]` — already shipped as `mdk run --replay` and `mdk trace replay`.
+
+### Tier 7 — Comprehensive reporting + reconciliation (v1.0, ~3 weeks)
+
+- [ ] **Four-dimension eval reporting** `[HIGH] [v1.0] [1w]` — functionality / completeness / correctness / AI metrics. Each gets a subscore in the table.
+- [ ] **Per-objective scoring breakdown** `[HIGH] [v1.0] [3d]` — eval table shows pass/fail per `objective.id` defined on agent.yaml.
+- [ ] **Eval reconciliation across deterministic + LLM + HITL** `[HIGH] [v1.0] [1w]` — configurable precedence; "if all three disagree, fall back to HITL" pattern.
+- [ ] **HITL workflow nodes (formalize)** `[HIGH] [v1.0] [1w]` — already in v1.1 plan; specify the request/resolve API.
+- [ ] **Configurable fallback strategy chain (LLM → HITL → deterministic)** `[MED] [v1.0] [3d]` — per-eval-config; defaults to LLM-only.
+- [ ] **Persist evaluation results to datastore** `[—] [done]` — already shipped (EvalRecord); just add per-dimension subscores when v1.0 lands.
+
+### Tier 8 — Doctor + observability polish + license hygiene (v0.6+, ~1-2 weeks)
+
+- [ ] **`mdk doctor --explain`** `[HIGH] [v0.6] [3d]` — for each check, render: what it does, why it matters, what failure means, the copy-pasteable fix.
+- [ ] **Doctor output explainability doc** `[MED] [v0.6] [2d]` — `docs/doctor-explained.md` documents every line — what it tests, what's safe to ignore.
+- [ ] **License column in `mdk doctor`** `[HIGH] [v0.6] [2d]` — every dep line shows SPDX license alongside install status. Operators see resale-safety at a glance. Pre-empts the "is this stack OK to embed in a customer solution?" question.
+- [ ] **`mdk doctor --licenses` deep report** `[MED] [v0.6] [2d]` — full SPDX breakdown, per-dep license file links, separates required vs optional, flags any non-permissive entries in red.
+- [ ] **`docs/license-posture.md`** `[HIGH] [v0.6] [2d]` — explains Movate's stance: every dep in MDK is permissively licensed (MIT / Apache 2.0 / BSD) so customer engagements can embed + resell MDK-based solutions without copyleft contamination. Documents the explicit avoid-list (GPL / AGPL / SSPL / BSL with restrictive clauses). Linkable from doctor and from customer-facing solution docs.
+- [ ] **CI license check** `[HIGH] [v0.6] [3d]` — `pip-licenses` or equivalent runs on every PR; fails merge if a new dep introduces a copyleft / SSPL / BSL license. Allowlist of approved SPDX IDs in repo.
+- [ ] **License-clean gate on new deps** `[HIGH] [ongoing]` — every new optional extra (vector DB, KG, adapter) goes through license review before merge. Mark approved deps in `pyproject.toml` comments with their SPDX ID.
+
+### Tier 9 — Enterprise readiness (v1.0+, ongoing)
+
+- [ ] **Reusable enterprise policy enforcement** `[HIGH] [v1.0] [1w]` — `mdk policy export/import` so teams can share `policy.yaml` snippets. Marketplace later.
+- [ ] **Multi-tenant deployments (formalize)** `[HIGH] [v1.0] [—]` — mostly shipped; add tenant-creation API, per-tenant config overrides.
+- [ ] **Helm chart for self-hosted K8s deployment** `[HIGH] [v1.0] [1w]` — alternative to Bicep; gives customers a "self-host on your cluster" path. Works on EKS / GKE / AKS / on-prem K8s.
+- [ ] **SaaS tenant onboarding flow** `[HIGH] [v1.0] [1w]` — `mdk tenants create` API + provisioning runbook for hosted-by-Movate customers.
+- [ ] **`docs/adr/001-cloud-portability.md`** `[HIGH] [v0.6] [≤2h]` — captures the principle: stay Azure-first today, but every new infrastructure decision must be cloud-portable in principle. Lists what we won't add (Cosmos DB, Azure-only auth, etc). Cheap, prevents future lock-in regret.
+- [ ] **GCP / AWS deployment runbooks** `[MED] [v1.1+] [1w each]` — Terraform modules for AWS (ECS + RDS) and GCP (Cloud Run + CloudSQL). Deferred until a real customer asks. Architecture's already portable; just need the IaC.
+- [ ] **Enterprise governance compliance (SOC2 audit trail)** `[LOW] [v1.1+] [—]` — most building blocks shipped (audit log via failures table, RunRecord, OTel). Formal SOC2 scoping when first enterprise customer asks.
+
+---
+
 ## How to use this file
 
 1. Pick the highest item from §0 ("Top 10") that isn't blocked.
