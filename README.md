@@ -382,6 +382,56 @@ the model in `tool_result` blocks and to operators in run traces:
 See [docs/adr/002-skills-and-contexts.md](docs/adr/002-skills-and-contexts.md)
 for the design.
 
+## Contexts — shared prompt fragments
+
+Stop copy-pasting the company style guide into every `prompt.md`. Drop
+markdown files in `contexts/` at the project root, reference them by
+name from each agent, and the loader prepends them to the rendered
+prompt — in declaration order, joined by a horizontal-rule separator.
+
+```
+my-project/
+├── agents/faq-agent/agent.yaml
+└── contexts/
+    ├── style-guide.md
+    ├── glossary.md
+    └── safety-disclaimer.md
+```
+
+```yaml
+# agents/faq-agent/agent.yaml
+contexts:
+  - style-guide
+  - glossary
+```
+
+The rendered prompt becomes:
+
+```
+<style-guide.md body>
+
+---
+
+<glossary.md body>
+
+---
+
+<your agent's prompt.md, with Jinja still applied to {{ input.* }}>
+```
+
+**Pure markdown — no Jinja, no Python, no template syntax.** Contexts
+are documentary. Need dynamic prefix logic? Wrap it in a skill instead
+(the skill returns a string the model uses).
+
+Constraints (deliberate):
+
+- Flat layout only — `contexts/<name>.md`, no nested subfolders.
+- Filename basename (minus `.md`) is the reference name.
+- Stray `README.txt`, `.DS_Store`, etc. are silently ignored.
+
+`mdk show ./agents/faq-agent` lists the agent's contexts with per-file
+byte sizes so operators can spot a runaway file inflating prompt cost.
+
 ## agent.yaml — schema shorthand
 
 For agents with a handful of fields the `schema/` subfolder is overkill.

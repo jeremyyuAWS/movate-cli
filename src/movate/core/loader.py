@@ -37,6 +37,12 @@ class AgentBundle:
     ``Any`` because :class:`SkillBundle` is in a sibling module to
     avoid a circular import at module-load time; the loader populates
     it via :func:`resolve_agent_skills` (also a lazy import).
+
+    ``contexts`` holds ``(name, body)`` pairs in declaration order from
+    ``spec.contexts``. The bodies are prepended to the rendered prompt
+    at execution time, joined with a standard markdown separator. Empty
+    list = the rendered prompt is exactly the agent's own ``prompt.md``
+    (v0.5 behavior, bit-for-bit). See ADR 002.
     """
 
     spec: AgentSpec
@@ -48,19 +54,33 @@ class AgentBundle:
     input_validator: Draft202012Validator
     output_validator: Draft202012Validator
     skills: list[Any] = field(default_factory=list)
+    contexts: list[tuple[str, str]] = field(default_factory=list)
 
     def render_prompt(self, input_data: dict[str, Any]) -> str:
-        """Render the prompt template with the ``input.*`` namespace.
+        """Render the prompt template with the ``input.*`` namespace,
+        prepending shared contexts.
+
+        Contexts are pure markdown — no Jinja, no Python — so they're
+        concatenated with the standard ``\\n\\n---\\n\\n`` separator
+        before the prompt template renders. The template itself can
+        still use Jinja against ``input.*``; contexts are static
+        prose that lives "above" the templated body.
 
         No filesystem, network, or other globals are exposed to templates.
         """
+        # Local import to avoid module-load coupling; context_loader is
+        # otherwise a leaf module.
+        from movate.core.context_loader import build_context_prefix  # noqa: PLC0415
+
         env = Environment(
             autoescape=select_autoescape(disabled_extensions=("md",)),
             undefined=StrictUndefined,
             keep_trailing_newline=True,
         )
         template = env.from_string(self.prompt_template)
-        return template.render(input=input_data)
+        rendered = template.render(input=input_data)
+        prefix = build_context_prefix(self.contexts)
+        return prefix + rendered
 
 
 def load_agent(
@@ -128,6 +148,7 @@ def load_agent(
     # was loaded from outside a project (e.g. test fixtures), the
     # registry is empty and any non-empty `spec.skills` triggers a
     # clean SkillLoadError.
+    project_root = agent_dir.parent
     skills_resolved: list[Any] = []
     if spec.skills:
         # Local import to avoid module-load-time cycle.
@@ -137,12 +158,28 @@ def load_agent(
             resolve_agent_skills,
         )
 
-        project_root = agent_dir.parent
         try:
             registry = load_skill_registry(project_root)
             skills_resolved = list(resolve_agent_skills(spec.skills, registry))
         except SkillLoadError as exc:
             raise AgentLoadError(f"skills resolution failed: {exc}") from exc
+
+    # Resolve declared contexts against the project's contexts/ folder
+    # in the same project_root. Same "agent's parent dir is the project"
+    # convention as skills; same permissive-empty-registry default.
+    contexts_resolved: list[tuple[str, str]] = []
+    if spec.contexts:
+        from movate.core.context_loader import (  # noqa: PLC0415
+            ContextLoadError,
+            load_context_registry,
+            resolve_agent_contexts,
+        )
+
+        try:
+            ctx_registry = load_context_registry(project_root)
+            contexts_resolved = resolve_agent_contexts(spec.contexts, ctx_registry)
+        except ContextLoadError as exc:
+            raise AgentLoadError(f"contexts resolution failed: {exc}") from exc
 
     return AgentBundle(
         spec=spec,
@@ -154,6 +191,7 @@ def load_agent(
         input_validator=Draft202012Validator(input_schema),
         output_validator=Draft202012Validator(output_schema),
         skills=skills_resolved,
+        contexts=contexts_resolved,
     )
 
 

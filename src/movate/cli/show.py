@@ -97,6 +97,15 @@ def _show_agent(path: Path) -> None:
                 f"{skill_bundle.spec.implementation.kind.value}: "
                 f"{skill_bundle.spec.implementation.entry}{cost_str}",
             )
+    # Contexts: shared markdown fragments prepended to the prompt at
+    # render time. Show byte size per context so operators can spot a
+    # runaway context file inflating prompt cost.
+    if spec.contexts:
+        table.add_row("", "")
+        table.add_row("contexts", ", ".join(spec.contexts))
+        for ctx_name, ctx_body in bundle.contexts:
+            byte_count = len(ctx_body.encode("utf-8"))
+            table.add_row(f"  {ctx_name}", f"[dim]{byte_count:,} bytes[/dim]")
     table.add_row("", "")
     if spec.evals.dataset:
         ds_path = (bundle.agent_dir / spec.evals.dataset).resolve()
