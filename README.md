@@ -370,6 +370,36 @@ Identity commands are **DM-only** — channel posts are rejected with a
 | Strict (`--require-binding`) | Bot rejects `run` from unbound users — use for multi-tenant deployments where every run must be attributable |
 | `--no-identity` | Disables binding entirely; every user uses the fleet key. Smoke-test mode |
 
+### File uploads (slice 3.1.d)
+
+Drag an `agent.yaml`, a zipped agent directory, or a `dataset.jsonl`
+into a Teams DM/channel and the bot validates + reports back as an
+Adaptive Card. Useful for **"can the runtime even load this?"** smoke
+checks before registering an agent.
+
+| File | Treated as | What the bot reports |
+|---|---|---|
+| `<name>.zip` (containing `agent.yaml` + `prompt.md` + schemas) | agent | name, version, runtime, model, skills, objectives, contexts |
+| `<name>.yaml` / `.yml` (bare) | agent — fails | "prompt file not found" with a hint to zip the directory instead |
+| `<name>.jsonl` | dataset | row count + first-row preview |
+| anything else | unknown | "I don't recognise this file type" with the supported list |
+
+Defenses in place: 4MB upload cap (Teams' own ceiling — surfaces a
+"share via SharePoint instead" hint when exceeded); zip-slip
+rejection (paths with `..` or absolute roots refused before
+extraction); UTF-8 validation on dataset uploads; line-by-line JSON
+parse with line numbers in error messages.
+
+**Deferred to follow-ups**:
+- *Microsoft Graph auth* for Teams native attachments (Bot Framework
+  Emulator's `file://` URLs work today; Teams native HTTPS URLs need
+  the bot's AAD token).
+- *Run-the-uploaded-agent* — today the upload validates but doesn't
+  register the agent with the runtime. Register via `mdk` first, then
+  `@movate run <agent-name> {...}` in Teams. Inline-bundle execution
+  needs a separate runtime API change.
+- *Eval-with-upload* (drop dataset + agent together) — slice 3.2.
+
 ### Optional config
 
 | Env var | Effect |
