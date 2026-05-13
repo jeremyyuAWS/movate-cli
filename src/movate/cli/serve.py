@@ -54,6 +54,19 @@ def serve(
             "that limiting is OFF)."
         ),
     ),
+    cors_origins: str = typer.Option(
+        "",
+        "--cors-origins",
+        envvar=["MDK_CORS_ALLOWED_ORIGINS", "MOVATE_CORS_ALLOWED_ORIGINS"],
+        help=(
+            "Comma-separated list of allowed origins for the CORS "
+            "middleware (e.g. 'http://localhost:4200,https://mova-io.movate.com'). "
+            "Empty string (default) leaves the middleware off — fine for "
+            "server-to-server use cases; required for the Mova iO Angular "
+            "front end to call this runtime from the browser. Use '*' for "
+            "fully-permissive local dev only."
+        ),
+    ),
 ) -> None:
     """Start the movate FastAPI runtime.
 
@@ -78,6 +91,7 @@ def serve(
             agents_path=agents_path,
             log_level=log_level,
             rate_limit_per_minute=rate_limit_per_minute,
+            cors_origins=cors_origins,
         )
     )
 
@@ -89,6 +103,7 @@ async def _run_serve(
     agents_path: Path,
     log_level: str,
     rate_limit_per_minute: int,
+    cors_origins: str,
 ) -> None:
     """Async entry that owns the loop end-to-end.
 
@@ -114,16 +129,27 @@ async def _run_serve(
         for b in agents:
             err.print(f"  - {b.spec.name} v{b.spec.version}")
 
+    # Pass the cors_origins kwarg as a parsed list (or None when empty,
+    # which lets build_app's env-fallback path also kick in if the user
+    # set the env var via a wrapper script). Empty string → None.
+    parsed_origins = (
+        [o.strip() for o in cors_origins.split(",") if o.strip()] if cors_origins else None
+    )
     app = build_app(
         storage,
         agents=agents,
         rate_limit_per_minute=rate_limit_per_minute,
+        cors_allowed_origins=parsed_origins,
     )
     err.print(f"[bold]movate[/bold] serving on http://{host}:{port}")
     if rate_limit_per_minute > 0:
         hint(f"[dim]  rate limit: {rate_limit_per_minute} req/min per API key[/dim]")
     else:
         hint("[dim]  rate limit: [yellow]DISABLED[/yellow][/dim]")
+    if parsed_origins:
+        hint(f"[dim]  CORS allowed origins: {', '.join(parsed_origins)}[/dim]")
+    else:
+        hint("[dim]  CORS: [yellow]OFF[/yellow] (set --cors-origins for browser callers)[/dim]")
 
     config = uvicorn.Config(
         app,
