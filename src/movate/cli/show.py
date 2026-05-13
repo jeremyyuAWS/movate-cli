@@ -28,13 +28,19 @@ console = Console()
 def show(
     path: Path = typer.Argument(
         ...,
-        help="Path to an agent or workflow directory.",
+        help="Path to an agent, workflow, or skill directory.",
         shell_complete=complete_agent_path,
     ),
 ) -> None:
-    """Show the resolved spec for an agent or workflow."""
+    """Show the resolved spec for an agent, workflow, or skill."""
+    # Dispatch by what file the directory contains. Order matters —
+    # workflows have their own ``workflow.yaml``; skills have
+    # ``skill.yaml``; agents have ``agent.yaml``. Each is mutually
+    # exclusive in the canonical project layout.
     if is_workflow_path(path):
         _show_workflow(path)
+    elif (path / "skill.yaml").exists():
+        _show_skill(path)
     else:
         _show_agent(path)
 
@@ -78,6 +84,19 @@ def _show_agent(path: Path) -> None:
     table.add_row("output.schema", _render_schema_ref(spec.schemas.output))
     out_required = bundle.output_schema.get("required", [])
     table.add_row("  required", ", ".join(out_required) if out_required else "[dim]—[/dim]")
+    # Skills section: only render if the agent declares any. Keeps
+    # the table tight for the single-shot (no-skills) common case.
+    if spec.skills:
+        table.add_row("", "")
+        table.add_row("skills", ", ".join(spec.skills))
+        for skill_bundle in bundle.skills:
+            cost = skill_bundle.spec.cost.per_call_usd
+            cost_str = f" [dim]${cost:.4f}/call[/dim]" if cost > 0 else ""
+            table.add_row(
+                f"  {skill_bundle.spec.name}",
+                f"{skill_bundle.spec.implementation.kind.value}: "
+                f"{skill_bundle.spec.implementation.entry}{cost_str}",
+            )
     table.add_row("", "")
     if spec.evals.dataset:
         ds_path = (bundle.agent_dir / spec.evals.dataset).resolve()
@@ -108,6 +127,59 @@ def _render_schema_ref(ref: str | dict[str, object]) -> str:
     if isinstance(ref, dict):
         return "[dim]<inline>[/dim]"
     return str(ref)
+
+
+# ---------------------------------------------------------------------------
+# Skill
+# ---------------------------------------------------------------------------
+
+
+def _show_skill(path: Path) -> None:
+    """Render a skill spec as a Rich table — mirror of ``_show_agent``."""
+    # Local import to avoid pulling skill_loader into show.py's
+    # module-load path for the agent + workflow code paths that
+    # don't need it.
+    from movate.core.skill_loader import SkillLoadError, load_skill  # noqa: PLC0415
+
+    try:
+        bundle = load_skill(path)
+    except SkillLoadError as exc:
+        console.print(f"[red]✗ load failed:[/red] {exc}")
+        raise typer.Exit(code=2) from None
+
+    spec = bundle.spec
+    table = Table(
+        title=f"{spec.name} v{spec.version} [dim](skill)[/dim]",
+        show_header=False,
+        title_justify="center",
+    )
+    table.add_column("Key", style="dim")
+    table.add_column("Value", overflow="fold")
+    table.add_row("api_version", spec.api_version)
+    table.add_row("kind", spec.kind)
+    table.add_row("name", spec.name)
+    table.add_row("version", spec.version)
+    table.add_row("description", spec.description or "[dim]—[/dim]")
+    table.add_row("owner", spec.owner or "[dim]—[/dim]")
+    table.add_row("", "")
+    table.add_row("backend.kind", spec.implementation.kind.value)
+    table.add_row("backend.entry", spec.implementation.entry or "[dim]—[/dim]")
+    table.add_row("", "")
+    table.add_row("input.schema", _render_schema_ref(spec.schemas.input))
+    in_required = bundle.input_schema.get("required", [])
+    table.add_row("  required", ", ".join(in_required) if in_required else "[dim]—[/dim]")
+    table.add_row("output.schema", _render_schema_ref(spec.schemas.output))
+    out_required = bundle.output_schema.get("required", [])
+    table.add_row("  required", ", ".join(out_required) if out_required else "[dim]—[/dim]")
+    table.add_row("", "")
+    table.add_row("cost.per_call_usd", f"${spec.cost.per_call_usd:.4f}")
+    table.add_row("side_effects", spec.side_effects.value)
+    if spec.timeout_call_ms is not None:
+        table.add_row("timeout_call_ms", str(spec.timeout_call_ms))
+    if spec.tags:
+        table.add_row("tags", ", ".join(spec.tags))
+    console.print(table)
+    console.print(f"[dim]skill_dir: {bundle.skill_dir}[/dim]")
 
 
 # ---------------------------------------------------------------------------

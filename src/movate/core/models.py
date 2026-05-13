@@ -271,6 +271,189 @@ class AgentRuntime(StrEnum):
     LYZR = "lyzr"
 
 
+# ---------------------------------------------------------------------------
+# Skill spec — `kind: Skill` in skills/<name>/skill.yaml
+# ---------------------------------------------------------------------------
+#
+# Skills are reusable callables an agent can invoke during a turn. See
+# docs/adr/002-skills-and-contexts.md for the full design — input/output
+# use the same shorthand schema syntax as agent.yaml (PR #47), the
+# implementation backend is pluggable (python | http | mcp) behind a
+# common Protocol, and skill cost participates in agent budget accounting.
+#
+# v0.6 ships `python` only; http + mcp arrive in follow-up PRs. The
+# discriminator on `implementation.kind` makes those additions purely
+# additive.
+
+
+class SkillImplementationKind(StrEnum):
+    """How a skill is executed when invoked.
+
+    Three backends behind one :class:`SkillBackend` Protocol — the
+    skill.yaml contract surface stays the same regardless of which one
+    handles execution.
+    """
+
+    PYTHON = "python"
+    """Python entrypoint resolved via importlib at registration time
+    (``pkg.mod:func``). The function is called with the validated input
+    dict and a :class:`SkillExecutionContext`."""
+
+    HTTP = "http"
+    """POST to a URL; the response body (JSON) is validated against the
+    skill's output schema. Lands in a follow-up PR."""
+
+    MCP = "mcp"
+    """Route the call through a Model Context Protocol server. Lands in
+    a follow-up PR."""
+
+
+class SkillImplementation(BaseModel):
+    """Backend declaration for a skill.
+
+    Today the only required field is ``kind`` + ``entry``. As HTTP and
+    MCP backends arrive, they add backend-specific fields (e.g.
+    ``url``, ``auth``, ``server``) that are validated by the matching
+    Protocol implementation at load time. The base model keeps
+    ``extra='allow'`` so those backend-specific fields don't trip
+    validation on a forward-compatible skill.yaml that ships with a
+    future runtime.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: SkillImplementationKind = Field(
+        default=SkillImplementationKind.PYTHON,
+        description="Which backend executes this skill.",
+    )
+    entry: str = Field(
+        default="",
+        description=(
+            "Backend-specific entrypoint. For ``kind: python`` this is a "
+            "``pkg.mod:func`` reference resolved via importlib. For "
+            "``kind: http`` it's the URL. For ``kind: mcp`` it's the "
+            "server connection string. Empty string is invalid except "
+            "when forward-compatible backends extend the model."
+        ),
+    )
+
+
+class SkillCost(BaseModel):
+    """Cost accounting for a skill invocation.
+
+    Each skill call is added to the run's ``metrics.cost_usd`` so the
+    existing per-tenant budget and ``policy.max_cost_per_run_usd``
+    ceiling enforce skills without any extra plumbing. ``0.0`` is fine
+    — most read-only skills (calculator, lookup) genuinely cost
+    nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    per_call_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "USD charged each time this skill is invoked. Summed into "
+            "RunRecord.metrics.cost_usd alongside model token cost."
+        ),
+    )
+
+
+class SkillSideEffects(StrEnum):
+    """How disruptive a skill is — surfaced for operator review.
+
+    Today these are documentary only (rendered in ``mdk show <skill>``).
+    A future PR adds project-policy gates so operators can declare
+    "agents in this project may not use ``mutates-state`` skills."
+    """
+
+    READ_ONLY = "read-only"
+    NETWORK = "network"
+    FILESYSTEM = "filesystem"
+    MUTATES_STATE = "mutates-state"
+
+
+class SkillSpec(BaseModel):
+    """Parsed ``skills/<name>/skill.yaml`` (api_version: movate/v1, kind: Skill).
+
+    Mirrors :class:`AgentSpec` for the fields that overlap (name,
+    version, description, owner, schemas) so operators don't have to
+    learn a second mini-format. The differences live in
+    :class:`SkillImplementation` (backend pointer) and
+    :class:`SkillCost` (budget participation).
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    api_version: Literal["movate/v1"] = Field(..., alias="api_version")
+    kind: Literal["Skill"] = "Skill"
+
+    name: str = Field(..., min_length=1, max_length=128)
+    version: str
+    description: str = ""
+    owner: str = ""
+
+    # Input/output reuse the same shorthand-OR-path syntax as AgentSpec.
+    # See SchemaPaths (PR #47) — string => external JSON Schema file,
+    # dict => inline shorthand compiled to JSON Schema at load time.
+    schemas: SchemaPaths = Field(..., alias="schema")
+
+    implementation: SkillImplementation
+    cost: SkillCost = Field(default_factory=SkillCost)
+    side_effects: SkillSideEffects = Field(
+        default=SkillSideEffects.READ_ONLY,
+        description=(
+            "Documentary annotation rendered in ``mdk show <skill>`` and "
+            "available for project-policy enforcement in a future PR."
+        ),
+    )
+
+    tags: list[str] = Field(default_factory=list)
+
+    # Per-skill timeout override. Inherits the agent's
+    # ``timeouts.call_ms`` when absent (ADR 002 D3). The agent's
+    # ``timeouts.total_ms`` still caps the whole tool-use loop —
+    # an individual skill can't bust the per-run total budget even if
+    # its own call_ms is generous.
+    timeout_call_ms: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-call timeout in milliseconds for this skill. ``None`` "
+            "(default) inherits the calling agent's ``timeouts.call_ms``."
+        ),
+    )
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        if not re.match(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$", v):
+            raise ValueError(f"skill name {v!r} must be lowercase alphanumeric with hyphens")
+        return v
+
+    @field_validator("version")
+    @classmethod
+    def _validate_semver(cls, v: str) -> str:
+        if not SEMVER_RE.match(v):
+            raise ValueError(f"skill version {v!r} must be semver (MAJOR.MINOR.PATCH)")
+        return v
+
+    @field_validator("implementation")
+    @classmethod
+    def _validate_python_entry_shape(cls, v: SkillImplementation) -> SkillImplementation:
+        """For ``kind: python``, ``entry`` must look like ``pkg.mod:func``.
+
+        Catches typos at load time rather than at the first invocation,
+        where the error would be a less-helpful ``ImportError`` deep
+        inside the backend dispatch path."""
+        if v.kind == SkillImplementationKind.PYTHON and (not v.entry or ":" not in v.entry):
+            raise ValueError(
+                f"python skill implementation.entry must be 'pkg.mod:func'; got {v.entry!r}"
+            )
+        return v
+
+
 class AgentSpec(BaseModel):
     """Parsed ``agent.yaml`` contents (api_version: movate/v1, kind: Agent)."""
 
@@ -335,6 +518,23 @@ class AgentSpec(BaseModel):
             "Sample input → output pairs. Used at validate-time as "
             "smoke tests, as in-context examples for prompts that opt in, "
             "and as seeds for scenario test generation in v0.7+."
+        ),
+    )
+
+    # ---- v0.6 skills + tool-use (ADR 002) ----
+    # Names referencing `skills/<name>/skill.yaml` entries in the project's
+    # skill registry. The loader resolves these at agent load time; the
+    # executor enters a tool-use loop on requests that have skills wired.
+    # An agent with `skills: []` (the default) keeps the v0.5 single-shot
+    # behavior. See docs/adr/002-skills-and-contexts.md.
+
+    skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of skills (from the project's skills/ registry) this "
+            "agent may invoke during a tool-use loop. Each name must resolve "
+            "to a `skills/<name>/skill.yaml` at load time. Empty list keeps "
+            "the agent in single-shot mode (no tool-use loop)."
         ),
     )
 

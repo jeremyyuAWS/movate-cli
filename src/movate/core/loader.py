@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,15 @@ class AgentLoadError(Exception):
 
 @dataclass
 class AgentBundle:
-    """Fully-resolved agent: spec, prompt template, validated schemas, hash."""
+    """Fully-resolved agent: spec, prompt template, validated schemas, hash.
+
+    ``skills`` holds the resolved :class:`SkillBundle` list — one entry
+    per name in ``spec.skills``. Empty list means single-shot mode (the
+    executor skips the tool-use loop entirely). Field is declared with
+    ``Any`` because :class:`SkillBundle` is in a sibling module to
+    avoid a circular import at module-load time; the loader populates
+    it via :func:`resolve_agent_skills` (also a lazy import).
+    """
 
     spec: AgentSpec
     agent_dir: Path
@@ -39,6 +47,7 @@ class AgentBundle:
     output_schema: dict[str, Any]
     input_validator: Draft202012Validator
     output_validator: Draft202012Validator
+    skills: list[Any] = field(default_factory=list)
 
     def render_prompt(self, input_data: dict[str, Any]) -> str:
         """Render the prompt template with the ``input.*`` namespace.
@@ -111,6 +120,30 @@ def load_agent(
     except Exception as exc:
         raise AgentLoadError(f"invalid JSON schema: {exc}") from exc
 
+    # Resolve declared skills against the project's skills/ registry.
+    # Lazy import keeps this loader free of a circular dep with
+    # skill_loader (which imports _resolve_schema from here). The
+    # registry root is the *parent* of the agent dir — that's where
+    # `skills/` lives in the canonical project layout. If the agent
+    # was loaded from outside a project (e.g. test fixtures), the
+    # registry is empty and any non-empty `spec.skills` triggers a
+    # clean SkillLoadError.
+    skills_resolved: list[Any] = []
+    if spec.skills:
+        # Local import to avoid module-load-time cycle.
+        from movate.core.skill_loader import (  # noqa: PLC0415
+            SkillLoadError,
+            load_skill_registry,
+            resolve_agent_skills,
+        )
+
+        project_root = agent_dir.parent
+        try:
+            registry = load_skill_registry(project_root)
+            skills_resolved = list(resolve_agent_skills(spec.skills, registry))
+        except SkillLoadError as exc:
+            raise AgentLoadError(f"skills resolution failed: {exc}") from exc
+
     return AgentBundle(
         spec=spec,
         agent_dir=agent_dir,
@@ -120,6 +153,7 @@ def load_agent(
         output_schema=output_schema,
         input_validator=Draft202012Validator(input_schema),
         output_validator=Draft202012Validator(output_schema),
+        skills=skills_resolved,
     )
 
 

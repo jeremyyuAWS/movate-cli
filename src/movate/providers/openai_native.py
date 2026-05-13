@@ -88,7 +88,7 @@ class OpenAIProvider(BaseLLMProvider):
                 model=request.provider,
                 # mypy: the SDK takes ``Iterable[ChatCompletionMessageParam]``
                 # (a TypedDict); our runtime dicts satisfy the same keys.
-                messages=[m.model_dump() for m in request.messages],  # type: ignore[misc]
+                messages=[m.model_dump(exclude_none=True) for m in request.messages],  # type: ignore[misc]
                 **request.params,
             )
         except Exception as exc:
@@ -115,7 +115,7 @@ class OpenAIProvider(BaseLLMProvider):
             # since that's what runtime gives us.
             stream: Any = await self._client.chat.completions.create(
                 model=request.provider,
-                messages=[m.model_dump() for m in request.messages],  # type: ignore[misc]
+                messages=[m.model_dump(exclude_none=True) for m in request.messages],  # type: ignore[misc]
                 stream=True,
                 **params,
             )

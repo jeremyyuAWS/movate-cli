@@ -304,6 +304,81 @@ it) and `runtime:` (the gate on `AgentRuntime` values). Defaults are
 See `mdk show <agent>` to inspect the resolved values after defaults
 are applied — that's what's actually going to run.
 
+## Skills — agents that use tools
+
+An agent can invoke reusable callables ("skills") mid-turn. Declare each
+skill in its own folder under `skills/`, reference it by name from
+`agent.yaml`, and the executor runs a tool-use loop for you.
+
+```
+my-project/
+├── policy.yaml
+├── agents/calc-agent/agent.yaml         # references the skill by name
+└── skills/calculator/
+    ├── skill.yaml                       # contract
+    └── impl.py                          # Python entrypoint
+```
+
+```yaml
+# skills/calculator/skill.yaml
+api_version: movate/v1
+kind: Skill
+name: calculator
+version: 0.1.0
+description: Evaluate simple arithmetic expressions
+
+schema:
+  input:
+    expression: string
+  output:
+    result: number
+
+implementation:
+  kind: python                      # also: http, mcp (later PRs)
+  entry: skills.calculator.impl:evaluate
+
+cost:
+  per_call_usd: 0.0001              # added to RunRecord.metrics.cost_usd
+```
+
+```python
+# skills/calculator/impl.py
+def evaluate(input, ctx):
+    # Sync OR async function — both work. `ctx` carries trace_id,
+    # tenant_id, run_id, and the effective timeout in ms.
+    return {"result": eval(input["expression"], {"__builtins__": {}})}
+```
+
+```yaml
+# agents/calc-agent/agent.yaml
+skills:
+  - calculator
+```
+
+The executor handles the rest: converts each skill's schema into a
+tool spec for the model, dispatches `tool_use` responses to the
+matching backend, validates the output against the skill's output
+schema, and feeds the result back as a `tool_result` until the
+model emits a final answer. Hard cap of 10 tool turns guards against
+runaway loops.
+
+Five error types map cleanly to whatever can go wrong — visible to
+the model in `tool_result` blocks and to operators in run traces:
+
+| `type` | When it fires |
+|---|---|
+| `not_found` | Model invented a tool name not in the registry |
+| `validation_failed` | Input or output didn't match the skill's schema |
+| `backend_error` | Function raised, HTTP returned non-2xx, etc. |
+| `timeout` | Skill exceeded its `timeout_call_ms` budget |
+| `budget_exceeded` | Per-run cost cap hit during the loop |
+
+`mdk show ./skills/calculator` renders the resolved spec.
+`mdk show ./agents/calc-agent` lists the agent's skills inline.
+
+See [docs/adr/002-skills-and-contexts.md](docs/adr/002-skills-and-contexts.md)
+for the design.
+
 ## agent.yaml — schema shorthand
 
 For agents with a handful of fields the `schema/` subfolder is overkill.
