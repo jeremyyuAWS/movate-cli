@@ -6,18 +6,29 @@ features LiteLLM doesn't yet surface or surfaces lossily — prompt
 caching headers, vision, thinking blocks, MCP-server tool ecosystem,
 and the official streaming-event shape.
 
-Scope of this first cut (no tool-use yet)
------------------------------------------
-
-Tool-use, vision, and thinking blocks are intentionally deferred to
-follow-up commits because they each require schema / Message-type
-changes that compound the diff. This first cut ships:
+Scope (v0.6+)
+-------------
 
 * Text-in, text-out :meth:`complete` against ``messages.create``.
 * Token-aware :meth:`stream` against ``messages.stream``.
+* **Native tool-use loop** (PR 6, v0.6.1): :meth:`to_tool_spec` emits
+  Anthropic's flat ``{name, description, input_schema}`` shape;
+  :meth:`complete` accepts ``tools=`` in the request and surfaces
+  ``tool_use`` content blocks as ``CompletionResponse(kind="tool_use", ...)``.
+  The executor's tool-use loop is provider-agnostic — same
+  :class:`CompletionResponse` shape from LiteLLM or native Anthropic.
 * Exception translation matching :class:`LiteLLMProvider`'s taxonomy
   so the executor's retry + fallback policy treats native and
   LiteLLM failures identically.
+
+This adapter is responsible for translating the executor's
+OpenAI-style message history (``role="assistant"`` with ``tool_calls``
++ ``role="tool"`` results) into Anthropic's content-block format
+(``tool_use`` content blocks on assistant messages, ``tool_result``
+blocks on user messages). The executor never sees Anthropic's wire
+format.
+
+Vision + thinking blocks are still deferred.
 
 Optional install:
 
@@ -32,6 +43,7 @@ optional integration uses.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
@@ -49,11 +61,14 @@ from movate.providers.base import (
     BaseLLMProvider,
     CompletionRequest,
     CompletionResponse,
+    Message,
     StreamChunk,
 )
 
 if TYPE_CHECKING:
     import anthropic
+
+    from movate.core.skill_loader import SkillBundle
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -86,10 +101,17 @@ class AnthropicProvider(BaseLLMProvider):
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         try:
-            # Anthropic separates the system prompt from messages —
-            # extract any role=system content from the request and
-            # pass it via the ``system=`` kwarg.
-            system, user_messages = _split_system(request.messages)
+            # Translate the executor's OpenAI-style history into the
+            # shape the Anthropic SDK expects: system as a separate
+            # kwarg, plus messages with content-block arrays for
+            # ``tool_use`` / ``tool_result`` turns.
+            system, user_messages = _translate_messages(request.messages)
+            extra_kwargs: dict[str, Any] = {}
+            if request.tools:
+                # to_tool_spec already produced Anthropic-shaped specs
+                # (flat ``{name, description, input_schema}``). Pass
+                # through unchanged.
+                extra_kwargs["tools"] = request.tools
             # mypy: the SDK declares ``messages`` as ``Iterable[MessageParam]``
             # (a TypedDict). Our user_messages are runtime-typed dicts with
             # the same keys — the SDK accepts them but the strict type
@@ -98,6 +120,7 @@ class AnthropicProvider(BaseLLMProvider):
                 model=request.provider,
                 messages=user_messages,  # type: ignore[arg-type]
                 system=system,
+                **extra_kwargs,
                 **_translate_params(request.params),
             )
         except Exception as exc:
@@ -115,7 +138,7 @@ class AnthropicProvider(BaseLLMProvider):
         and the final usage on the closing chunk — same contract as
         :class:`LiteLLMProvider`."""
         try:
-            system, user_messages = _split_system(request.messages)
+            system, user_messages = _translate_messages(request.messages)
             async with self._client.messages.stream(
                 model=request.provider,
                 messages=user_messages,  # type: ignore[arg-type]
@@ -149,26 +172,120 @@ class AnthropicProvider(BaseLLMProvider):
             return provider
         return f"anthropic/{provider}"
 
+    def to_tool_spec(self, skill: SkillBundle) -> dict[str, Any]:
+        """Convert a skill to Anthropic's flat tool-spec shape.
+
+        Anthropic's API takes ``[{name, description, input_schema}]``
+        directly — NOT the nested ``{type: "function", function: {...}}``
+        wrapper OpenAI uses. The base provider's default emits the
+        OpenAI shape; we override here so the executor can pass the
+        ``request.tools`` straight through to ``messages.create``.
+
+        ADR 002 D1 — loop ownership lives in the executor. This method
+        is a pure shape translation.
+        """
+        return {
+            "name": skill.spec.name,
+            "description": skill.spec.description or skill.spec.name,
+            "input_schema": skill.input_schema,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _split_system(messages: list[Any]) -> tuple[str, list[dict[str, Any]]]:
-    """Split off the system message — Anthropic's API takes it as a
-    separate kwarg, not as a message with role='system'."""
+def _translate_messages(
+    messages: list[Message],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Translate the executor's OpenAI-style history to Anthropic's shape.
+
+    The executor builds messages in OpenAI's wire format:
+
+    * ``role="system"`` plain text
+    * ``role="user"`` / ``role="assistant"`` plain text
+    * ``role="assistant"`` with ``tool_calls=[{id, type:"function", function:{name, arguments}}]``
+    * ``role="tool"`` with ``content=<tool result string>`` and
+      ``tool_call_id=<id>``
+
+    Anthropic expects:
+
+    * ``system=`` separate kwarg
+    * Messages with role only ``user`` or ``assistant``
+    * Assistant tool calls as ``tool_use`` content blocks within the
+      assistant message: ``[{type:"tool_use", id, name, input}]``
+    * Tool results as ``tool_result`` content blocks within a
+      ``user`` message: ``[{type:"tool_result", tool_use_id, content}]``
+    * Consecutive tool results coalesce into a single user message
+      with multiple ``tool_result`` blocks (Anthropic rejects
+      back-to-back user messages).
+
+    Returns ``(system_text, anthropic_messages)``.
+    """
     system_parts: list[str] = []
-    user_messages: list[dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
+
     for m in messages:
         if m.role == "system":
             system_parts.append(m.content)
-        else:
-            # Anthropic only accepts roles 'user' and 'assistant' in
-            # the messages array. Pass through tool roles unchanged so
-            # a future tool-use commit can use them; the SDK validates.
-            user_messages.append({"role": m.role, "content": m.content})
-    return ("\n\n".join(system_parts) if system_parts else ""), user_messages
+            continue
+
+        if m.role == "tool":
+            # Coalesce into the trailing user message if there is one,
+            # else open a new one. The trailing message is a "user"
+            # message we built earlier for this exact purpose.
+            block = {
+                "type": "tool_result",
+                "tool_use_id": m.tool_call_id or "",
+                "content": m.content,
+            }
+            if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):
+                out[-1]["content"].append(block)
+            else:
+                out.append({"role": "user", "content": [block]})
+            continue
+
+        if m.role == "assistant" and m.tool_calls:
+            blocks: list[dict[str, Any]] = []
+            if m.content:
+                # Some models emit a short text prelude before the
+                # tool call ("Let me check..."). Preserve it as a
+                # text block so the conversation reads correctly on
+                # subsequent turns.
+                blocks.append({"type": "text", "text": m.content})
+            for call in m.tool_calls:
+                fn = call.get("function", {}) or {}
+                # ``arguments`` arrives as a JSON-encoded string in
+                # the OpenAI shape. Anthropic wants the parsed dict
+                # under ``input``. A malformed string would be a
+                # bug in the upstream generator — pass through an
+                # empty dict so the SDK validates and the model can
+                # recover, rather than crashing here.
+                try:
+                    parsed_input = json.loads(fn.get("arguments", "") or "{}")
+                except (TypeError, ValueError):
+                    parsed_input = {}
+                if not isinstance(parsed_input, dict):
+                    parsed_input = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": call.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "input": parsed_input,
+                    }
+                )
+            out.append({"role": "assistant", "content": blocks})
+            continue
+
+        # Plain user / assistant text — pass through as a single-block
+        # string content. Anthropic accepts both string and list
+        # content; we use string here to keep the wire payload
+        # minimal for the common case.
+        out.append({"role": m.role, "content": m.content})
+
+    return ("\n\n".join(system_parts) if system_parts else ""), out
 
 
 def _translate_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -183,23 +300,58 @@ def _translate_params(params: dict[str, Any]) -> dict[str, Any]:
 def _to_completion_response(resp: Any) -> CompletionResponse:
     """Convert ``messages.create`` response → :class:`CompletionResponse`.
 
-    Text comes from the first text content block; tool-use / thinking
-    blocks are intentionally ignored in this first cut (they need
-    schema changes — follow-ups)."""
-    text = ""
-    for block in getattr(resp, "content", []) or []:
-        if getattr(block, "type", "") == "text":
-            text = getattr(block, "text", "") or ""
-            break
+    Walks the response's content blocks in order. The shape we surface
+    depends on which blocks appear:
 
-    return CompletionResponse(
-        text=text,
-        tokens=_tokens_from_usage(getattr(resp, "usage", None)),
-        raw={
-            "anthropic_model": getattr(resp, "model", ""),
-            "stop_reason": getattr(resp, "stop_reason", ""),
-        },
-    )
+    * Any ``tool_use`` block → :class:`CompletionResponse` with
+      ``kind="tool_use"`` carrying the first such block's name + id +
+      input. Any text preceding the tool_use is preserved in ``.text``
+      so the executor can log the model's reasoning. Multiple parallel
+      tool_use blocks aren't supported (matches the LiteLLM PR 1
+      decision); we take the first and ignore the rest. Follow-up to
+      support parallel tool calls lands when the executor's tool-use
+      loop gains a multi-dispatch path.
+    * Otherwise → ``kind="final"`` with concatenated text from text
+      blocks (covers the rare multi-block answer case cleanly).
+
+    Thinking blocks are still deferred (separate API surface).
+    """
+    text_parts: list[str] = []
+    tool_name = ""
+    tool_id = ""
+    tool_input: dict[str, Any] = {}
+    saw_tool_use = False
+
+    for block in getattr(resp, "content", []) or []:
+        block_type = getattr(block, "type", "")
+        if block_type == "text":
+            text_parts.append(getattr(block, "text", "") or "")
+        elif block_type == "tool_use" and not saw_tool_use:
+            saw_tool_use = True
+            tool_name = getattr(block, "name", "") or ""
+            tool_id = getattr(block, "id", "") or ""
+            raw_input = getattr(block, "input", None)
+            tool_input = raw_input if isinstance(raw_input, dict) else {}
+
+    tokens = _tokens_from_usage(getattr(resp, "usage", None))
+    raw = {
+        "anthropic_model": getattr(resp, "model", ""),
+        "stop_reason": getattr(resp, "stop_reason", ""),
+    }
+    text = "".join(text_parts)
+
+    if saw_tool_use:
+        return CompletionResponse(
+            text=text,
+            tokens=tokens,
+            raw=raw,
+            kind="tool_use",
+            tool_name=tool_name,
+            tool_id=tool_id,
+            tool_input=tool_input,
+        )
+
+    return CompletionResponse(text=text, tokens=tokens, raw=raw)
 
 
 def _stream_chunk_from_event(event: Any) -> StreamChunk | None:
