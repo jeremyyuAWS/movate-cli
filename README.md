@@ -503,6 +503,38 @@ the model in `tool_result` blocks and to operators in run traces:
 `mdk show ./skills/calculator` renders the resolved spec.
 `mdk show ./agents/calc-agent` lists the agent's skills inline.
 
+### Tool-use across runtimes
+
+Skills work transparently across every runtime — the executor owns the
+loop, providers translate the wire format. Same `skills:` declaration,
+same dispatch, same five-error taxonomy:
+
+| Runtime | Tool-spec shape | Notes |
+|---|---|---|
+| `litellm` (default) | OpenAI-style nested `{type: "function", function: {...}}` | LiteLLM forwards to the upstream provider unchanged. |
+| `native_anthropic` | Flat `{name, description, input_schema}` | Native `tool_use` content blocks; preserves reasoning text before the tool call. v0.6+ |
+| `native_openai` | OpenAI-style nested (same as litellm) | Direct SDK call — bypasses LiteLLM's normalisation. v0.6+ |
+| `langchain` | Inherits from the wrapped Runnable | Tool-use defers to whatever the LangChain pipeline does. |
+
+For native_anthropic specifically, the adapter translates the executor's
+OpenAI-style message history (`role="assistant"` with `tool_calls` +
+`role="tool"` results) into Anthropic's content-block format
+(`tool_use` blocks on assistant messages, `tool_result` blocks on user
+messages, with consecutive tool_results coalesced into a single user
+message). The executor doesn't see Anthropic's wire format — it's an
+implementation detail of the provider.
+
+```yaml
+# Same agent, two ways to run it — output is identical.
+runtime: litellm
+model:
+  provider: anthropic/claude-sonnet-4-6  # LiteLLM-prefixed
+---
+runtime: native_anthropic
+model:
+  provider: claude-sonnet-4-6            # bare model id; pricing.yaml lookup auto-prefixes
+```
+
 ### HTTP skills — call any REST API as a tool
 
 For skills that hit an external service (CRM, warranty system, weather,
