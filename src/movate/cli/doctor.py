@@ -243,16 +243,18 @@ def doctor(  # noqa: PLR0912 — branch count is inherent to a multi-section dia
 # deliverables without copyleft / source-availability / competing-services
 # obligations. Match the same list in docs/license-posture.md. Keep
 # additions deliberate — a new entry here is a policy decision.
-_LICENSE_ALLOWLIST: frozenset[str] = frozenset({
-    "MIT",
-    "Apache-2.0",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "PostgreSQL",
-    "PSF-2.0",
-    "MIT OR Apache-2.0",
-})
+_LICENSE_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "MIT",
+        "Apache-2.0",
+        "BSD-2-Clause",
+        "BSD-3-Clause",
+        "ISC",
+        "PostgreSQL",
+        "PSF-2.0",
+        "MIT OR Apache-2.0",
+    }
+)
 
 
 def _render_license_report() -> None:

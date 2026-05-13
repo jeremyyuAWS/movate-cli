@@ -166,9 +166,7 @@ def tesla_json(tmp_path: Path) -> Path:
     return path
 
 
-def test_import_writes_expected_files_lyzr_runtime(
-    tmp_path: Path, tesla_json: Path
-) -> None:
+def test_import_writes_expected_files_lyzr_runtime(tmp_path: Path, tesla_json: Path) -> None:
     out = tmp_path / "agents"
     result = runner.invoke(
         app,
@@ -196,9 +194,7 @@ def test_import_writes_expected_files_lyzr_runtime(
     assert original["_id"] == TESLA_AGENT["_id"]
 
 
-def test_import_litellm_runtime_uses_openai_provider(
-    tmp_path: Path, tesla_json: Path
-) -> None:
+def test_import_litellm_runtime_uses_openai_provider(tmp_path: Path, tesla_json: Path) -> None:
     out = tmp_path / "agents"
     result = runner.invoke(
         app,
@@ -206,17 +202,13 @@ def test_import_litellm_runtime_uses_openai_provider(
     )
     assert result.exit_code == 0, result.stdout
 
-    agent_yaml = (
-        out / "tesla-customer-experience-manager" / "agent.yaml"
-    ).read_text()
+    agent_yaml = (out / "tesla-customer-experience-manager" / "agent.yaml").read_text()
     assert "runtime: litellm" in agent_yaml
     assert "openai/gpt-5" in agent_yaml
     assert "lyzr/" not in agent_yaml.split("# Imported from")[1].split("\n")[0:5][0]
 
 
-def test_import_rejects_existing_dir_without_force(
-    tmp_path: Path, tesla_json: Path
-) -> None:
+def test_import_rejects_existing_dir_without_force(tmp_path: Path, tesla_json: Path) -> None:
     out = tmp_path / "agents"
     # First import succeeds.
     first = runner.invoke(app, ["import", "lyzr", str(tesla_json), "-o", str(out)])
@@ -231,9 +223,7 @@ def test_import_rejects_existing_dir_without_force(
 def test_import_force_overwrites(tmp_path: Path, tesla_json: Path) -> None:
     out = tmp_path / "agents"
     runner.invoke(app, ["import", "lyzr", str(tesla_json), "-o", str(out)])
-    result = runner.invoke(
-        app, ["import", "lyzr", str(tesla_json), "-o", str(out), "--force"]
-    )
+    result = runner.invoke(app, ["import", "lyzr", str(tesla_json), "-o", str(out), "--force"])
     assert result.exit_code == 0, result.stdout
 
 

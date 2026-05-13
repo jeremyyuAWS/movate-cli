@@ -157,8 +157,7 @@ class Objective(BaseModel):
     def _validate_id(cls, v: str) -> str:
         if not re.match(r"^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$", v):
             raise ValueError(
-                f"objective id {v!r} must be lowercase alphanumeric "
-                f"with hyphens or underscores"
+                f"objective id {v!r} must be lowercase alphanumeric with hyphens or underscores"
             )
         return v
 
@@ -381,8 +380,7 @@ class AgentSpec(BaseModel):
             # Lyzr IDs are 24-hex Mongo ObjectIds; we accept any non-empty
             # path-suffix here and let the adapter surface a clean HTTP
             # error if the ID is wrong.
-            not provider.startswith("lyzr/")
-            or len(provider) <= len("lyzr/")
+            not provider.startswith("lyzr/") or len(provider) <= len("lyzr/")
         ):
             raise ValueError(
                 f"provider {provider!r} for runtime: lyzr must look like "
