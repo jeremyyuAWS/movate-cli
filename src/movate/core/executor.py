@@ -60,6 +60,14 @@ log = logging.getLogger(__name__)
 
 _COST_DRIFT_THRESHOLD = 0.05  # 5%
 
+# Hard cap on tool-use turns. If the model keeps emitting tool calls
+# instead of producing a final answer, the loop bails after this many
+# iterations and surfaces the last response as the result. 10 is the
+# ADR 002 default — generous for real agents (web-search + lookup
+# typically resolves in 2-3 turns) and tight enough that a runaway
+# loop fails loud rather than silently burning budget.
+_MAX_TOOL_TURNS_DEFAULT = 10
+
 
 class Executor:
     def __init__(
@@ -239,6 +247,20 @@ class Executor:
             completion: CompletionResponse | None = None
             chosen_provider = ""
             last_error: MovateError | None = None
+            # Skill cost accumulates across every successful tool call
+            # in the tool-use loop. Added to the total run cost below
+            # so existing budget enforcement covers skills without
+            # extra plumbing. ADR 002 — cost participates in budget.
+            skill_cost_usd = 0.0
+            # Pre-compute tool specs from the agent's resolved skills.
+            # Empty list = no tool-use loop, single-shot path runs
+            # identically to v0.5. The provider's to_tool_spec
+            # converts each SkillBundle into the model's native
+            # tool format (OpenAI-style by default; native-SDK
+            # adapters override).
+            tool_specs: list[dict[str, Any]] | None = None
+            if bundle.skills:
+                tool_specs = [provider_for_run.to_tool_spec(s) for s in bundle.skills]
 
             for provider_str, params in chain:
                 # Prepend conversation history (chat memory) before the
@@ -249,23 +271,22 @@ class Executor:
                     *(history or []),
                     Message(role="user", content=rendered),
                 ]
-                req = CompletionRequest(
-                    provider=provider_str,
-                    messages=conversation,
-                    params=params,
-                )
-
-                async def _invoke(req: CompletionRequest = req) -> CompletionResponse:
-                    if on_token is None:
-                        return await provider_for_run.complete(req)
-                    # Stream path. Accumulate chunks into a single
-                    # CompletionResponse so everything below this
-                    # (schema validation, cost calc, persistence) sees
-                    # the same shape regardless of streaming.
-                    return await self._invoke_streaming(provider_for_run, req, on_token)
-
                 try:
-                    completion = await run_with_retries(_invoke)
+                    (
+                        completion,
+                        skill_cost_usd,
+                    ) = await self._run_with_tool_use(
+                        provider_for_run=provider_for_run,
+                        bundle=bundle,
+                        provider_str=provider_str,
+                        params=params,
+                        initial_messages=conversation,
+                        on_token=on_token,
+                        span=span,
+                        tool_specs=tool_specs,
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                    )
                     chosen_provider = provider_str
                     break
                 except RetryExhaustedError as exc:
@@ -311,6 +332,19 @@ class Executor:
                         {"cost_skipped": True, "reason": f"no pricing for {pricing_key!r}"},
                     )
             self._check_cost_drift(span, completion, cost)
+
+            # Add the skill-cost accumulator from the tool-use loop.
+            # Skill cost is a flat per-call USD figure declared in each
+            # skill.yaml; it doesn't go through pricing-table lookup
+            # because skills can be anything (a free Python function, a
+            # paid HTTP API, an internal MCP server). Drift check above
+            # is still on the LLM cost only.
+            if skill_cost_usd > 0:
+                cost += skill_cost_usd
+                self._tracer.log_event(
+                    span,
+                    {"skill_cost_added": skill_cost_usd},
+                )
 
             # The effective ceiling is the MIN of the agent's declared
             # budget and the project policy's ceiling. Project policy
@@ -381,6 +415,203 @@ class Executor:
                 started=started,
                 err=exc.last_error,
             )
+
+    async def _run_with_tool_use(
+        self,
+        *,
+        provider_for_run: BaseLLMProvider,
+        bundle: AgentBundle,
+        provider_str: str,
+        params: dict[str, Any],
+        initial_messages: list[Message],
+        on_token: Callable[[str], None] | None,
+        span: SpanCtx,
+        tool_specs: list[dict[str, Any]] | None,
+        run_id: str,
+        tenant_id: str,
+    ) -> tuple[CompletionResponse, float]:
+        """Drive the tool-use loop for one provider in the fallback chain.
+
+        Returns ``(final_completion, accumulated_skill_cost_usd)``. The
+        final completion has ``kind == "final"`` and its ``text`` is
+        the model's answer; its ``tokens`` field is the SUM across
+        every turn the loop took, so downstream cost accounting reads
+        the full token usage without changing.
+
+        Loop body per ADR 002 D1 (loop owned by Executor):
+
+        1. Build CompletionRequest with the running message history +
+           the tool_specs.
+        2. Call ``run_with_retries(_invoke)``. The retry layer is
+           per-turn — a transient failure on turn 3 doesn't blow away
+           turns 1-2.
+        3. If response is ``kind="final"``, exit and return.
+        4. Otherwise dispatch the named skill via the backend
+           registry. On success, append the assistant's tool_use turn
+           + a ``role="tool"`` result message and loop. On
+           ``SkillError``, append the same shapes but encode the
+           error type/message in the tool result so the model can
+           recover.
+
+        Single-shot agents (``tool_specs is None``) take this path
+        too — the loop immediately exits after one ``run_with_retries``
+        call. Zero overhead vs the v0.5 inline path.
+        """
+        # Local imports keep skill_backend out of executor's hot-path
+        # module-load graph, and avoid a cycle with skill_loader.
+        from movate.core.skill_backend import (  # noqa: PLC0415
+            SkillError,
+            SkillErrorType,
+            SkillExecutionContext,
+            dispatch_skill,
+        )
+
+        # Importing python.py for its side-effect (registers the
+        # PythonSkillBackend). Done here rather than at module load so
+        # this import doesn't run for agents without skills.
+        from movate.core.skill_backend import python as _python_backend  # noqa: F401, PLC0415
+
+        # Build a name → SkillBundle map for quick lookup inside the loop.
+        skill_index: dict[str, Any] = {s.spec.name: s for s in bundle.skills}
+
+        messages: list[Message] = list(initial_messages)
+        accumulated_tokens = TokenUsage()
+        accumulated_raw: dict[str, Any] = {}
+        accumulated_skill_cost = 0.0
+        turns_taken = 0
+        agent_call_ms = bundle.spec.timeouts.call_ms
+
+        while True:
+            req = CompletionRequest(
+                provider=provider_str,
+                messages=messages,
+                params=params,
+                tools=tool_specs,
+            )
+
+            async def _invoke(req: CompletionRequest = req) -> CompletionResponse:
+                if on_token is None:
+                    return await provider_for_run.complete(req)
+                return await self._invoke_streaming(provider_for_run, req, on_token)
+
+            completion = await run_with_retries(_invoke)
+            # Aggregate tokens + raw so the post-loop cost path sees
+            # the full picture even when multiple turns happened.
+            accumulated_tokens = TokenUsage(
+                input=accumulated_tokens.input + completion.tokens.input,
+                output=accumulated_tokens.output + completion.tokens.output,
+                cached_input=accumulated_tokens.cached_input + completion.tokens.cached_input,
+            )
+            if completion.raw:
+                accumulated_raw.update(completion.raw)
+
+            if completion.kind == "final":
+                # Inject the accumulated tokens + raw into the final
+                # response so the downstream cost calc reads the
+                # full-loop total, not just the last turn.
+                return (
+                    completion.model_copy(
+                        update={"tokens": accumulated_tokens, "raw": accumulated_raw},
+                    ),
+                    accumulated_skill_cost,
+                )
+
+            # Tool-use turn. Resolve, dispatch, append to history.
+            turns_taken += 1
+            if turns_taken > _MAX_TOOL_TURNS_DEFAULT:
+                # Hard cap. Don't try to invoke the skill again — the
+                # last completion's text (if any) becomes our final
+                # answer, and the loop terminates so we don't burn
+                # cost forever. Operator-facing event is logged so
+                # this is visible in traces.
+                self._tracer.log_event(
+                    span,
+                    {
+                        "tool_use_max_turns_hit": True,
+                        "max_turns": _MAX_TOOL_TURNS_DEFAULT,
+                    },
+                )
+                final = completion.model_copy(
+                    update={
+                        "kind": "final",
+                        "tokens": accumulated_tokens,
+                        "raw": accumulated_raw,
+                    },
+                )
+                return final, accumulated_skill_cost
+
+            tool_name = completion.tool_name
+            tool_id = completion.tool_id
+            tool_input = completion.tool_input
+
+            skill = skill_index.get(tool_name)
+            if skill is None:
+                # The model invented a tool name. Emit a NOT_FOUND
+                # tool_result and let the model recover.
+                err = SkillError(
+                    type=SkillErrorType.NOT_FOUND,
+                    message=(f"unknown tool {tool_name!r}; available: {sorted(skill_index)}"),
+                )
+                tool_result_content = json.dumps({"error": err.type.value, "message": err.message})
+            else:
+                # Effective per-call budget is skill override OR agent
+                # inheritance (ADR 002 D3).
+                call_ms = skill.spec.timeout_call_ms or agent_call_ms
+                ctx = SkillExecutionContext(
+                    trace_id=span.trace_id,
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    call_ms_budget=call_ms,
+                )
+                try:
+                    output = await dispatch_skill(skill, tool_input, ctx)
+                    tool_result_content = json.dumps(output)
+                    # Add this skill's cost to the run total.
+                    accumulated_skill_cost += skill.spec.cost.per_call_usd
+                    self._tracer.log_event(
+                        span,
+                        {
+                            "skill_invoked": tool_name,
+                            "skill_cost_usd": skill.spec.cost.per_call_usd,
+                            "turn": turns_taken,
+                        },
+                    )
+                except SkillError as exc:
+                    tool_result_content = json.dumps(
+                        {"error": exc.type.value, "message": exc.message}
+                    )
+                    self._tracer.log_event(
+                        span,
+                        {
+                            "skill_error": tool_name,
+                            "skill_error_type": exc.type.value,
+                            "turn": turns_taken,
+                        },
+                    )
+
+            # Append assistant's tool_use turn + the matching tool
+            # result. The assistant turn carries the original tool_call
+            # so the model sees its own action when we re-prompt.
+            assistant_turn = Message(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": tool_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": json.dumps(tool_input),
+                        },
+                    }
+                ],
+            )
+            tool_turn = Message(
+                role="tool",
+                content=tool_result_content,
+                tool_call_id=tool_id,
+            )
+            messages.extend([assistant_turn, tool_turn])
 
     async def _invoke_streaming(
         self,

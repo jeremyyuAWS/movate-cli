@@ -8,11 +8,14 @@ local table (see :mod:`movate.providers.pricing`).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from movate.core.models import TokenUsage
+
+if TYPE_CHECKING:
+    from movate.core.skill_loader import SkillBundle
 
 
 class Message(BaseModel):
@@ -20,6 +23,20 @@ class Message(BaseModel):
 
     role: Literal["system", "user", "assistant", "tool"]
     content: str
+
+    # Tool-use fields. Only populated during a tool-use loop:
+    #
+    # * On an ``assistant`` turn that emits a tool call,
+    #   ``tool_calls`` carries the call list in OpenAI's wire format.
+    # * On a ``tool`` turn carrying the tool's result, ``tool_call_id``
+    #   echoes the assistant turn's call id so the model can correlate
+    #   results to calls.
+    #
+    # Both default to ``None`` so existing single-shot Messages serialize
+    # identically. The LiteLLM provider dumps messages with
+    # ``exclude_none=True`` so ``null`` fields never leave the wire.
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
 
 
 class CompletionRequest(BaseModel):
@@ -30,6 +47,13 @@ class CompletionRequest(BaseModel):
 
     messages: list[Message]
     params: dict[str, Any] = Field(default_factory=dict)
+    tools: list[dict[str, Any]] | None = None
+    """Tool specs the model may invoke during this completion. Each
+    entry is in the OpenAI-style function-call format
+    (``{"type": "function", "function": {"name": ..., "parameters": ...}}``).
+    ``None`` (the default) keeps the request in single-shot mode — no
+    tool-use loop. Built by :meth:`BaseLLMProvider.to_tool_spec` from
+    the agent's resolved :class:`SkillBundle` list."""
 
 
 class CompletionResponse(BaseModel):
@@ -38,6 +62,25 @@ class CompletionResponse(BaseModel):
     text: str
     tokens: TokenUsage = Field(default_factory=TokenUsage)
     raw: dict[str, Any] = Field(default_factory=dict)
+
+    # Tool-use fields. Populated when the model emits a tool_use turn
+    # instead of a final response. Default values keep existing
+    # single-shot callers untouched — ``kind="final"`` is the v0.5
+    # behavior. ADR 002 D1 (loop ownership lives in Executor).
+    kind: Literal["final", "tool_use"] = "final"
+    """``final`` = model gave its final answer; ``tool_use`` = model
+    wants the executor to invoke a tool and feed the result back."""
+    tool_name: str = ""
+    """Name of the skill the model wants invoked (matches
+    ``SkillSpec.name``). Empty unless ``kind == "tool_use"``."""
+    tool_id: str = ""
+    """Provider-assigned identifier for this tool call. The executor
+    must echo it back in the matching ``tool_result`` so the model can
+    correlate. Empty unless ``kind == "tool_use"``."""
+    tool_input: dict[str, Any] = Field(default_factory=dict)
+    """The arguments the model wants the tool called with. Validated
+    by :func:`dispatch_skill` against the skill's input schema before
+    the backend is invoked. Empty unless ``kind == "tool_use"``."""
 
 
 class StreamChunk(BaseModel):
@@ -111,3 +154,26 @@ class BaseLLMProvider(Protocol):
         a translation override.
         """
         return provider
+
+    def to_tool_spec(self, skill: SkillBundle) -> dict[str, Any]:
+        """Convert a :class:`SkillBundle` into the provider's native tool format.
+
+        Default implementation produces the OpenAI-style function-call
+        schema (``{"type": "function", "function": {...}}``), which
+        LiteLLM passes through to most upstream providers unchanged.
+        Native-SDK adapters (Anthropic native, etc.) override this in
+        PR 6 to emit their own shape.
+
+        ADR 002 D1 — loop ownership is in :class:`Executor`, so this
+        method is a pure conversion. The skill's input schema becomes
+        the tool's ``parameters`` field; the skill's name + description
+        flow through verbatim.
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": skill.spec.name,
+                "description": skill.spec.description or skill.spec.name,
+                "parameters": skill.input_schema,
+            },
+        }

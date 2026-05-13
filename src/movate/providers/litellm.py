@@ -49,11 +49,21 @@ class LiteLLMProvider(BaseLLMProvider):
     version = "0.0.1"
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        # Build the kwargs first; only include ``tools`` when the agent
+        # has skills wired. LiteLLM accepts ``tools=None`` cleanly, but
+        # being explicit keeps the request payload minimal in the
+        # single-shot case and avoids upstream providers that mishandle
+        # an empty tools array.
+        extra_kwargs: dict[str, Any] = {}
+        if request.tools:
+            extra_kwargs["tools"] = request.tools
+
         try:
             resp = await litellm.acompletion(
                 model=request.provider,
-                messages=[m.model_dump() for m in request.messages],
+                messages=[m.model_dump(exclude_none=True) for m in request.messages],
                 num_retries=0,  # movate owns retries
+                **extra_kwargs,
                 **request.params,
             )
         except lle.AuthenticationError as exc:
@@ -101,7 +111,7 @@ class LiteLLMProvider(BaseLLMProvider):
         try:
             resp = await litellm.acompletion(
                 model=request.provider,
-                messages=[m.model_dump() for m in request.messages],
+                messages=[m.model_dump(exclude_none=True) for m in request.messages],
                 stream=True,
                 num_retries=0,  # movate owns retries
                 **params,
@@ -156,13 +166,22 @@ def _to_completion_response(resp: Any) -> CompletionResponse:
     Token usage is pulled from ``resp.usage``; LiteLLM's reported cost is
     placed in ``raw['litellm_cost_usd']`` for drift checks against the
     canonical pricing table — never used by the executor for billing.
+
+    Tool-use: if the model emitted a tool call instead of a final
+    answer, ``choices[0].message.tool_calls`` is non-empty. We return
+    a ``CompletionResponse(kind="tool_use", ...)`` carrying the first
+    tool call's name + id + parsed JSON arguments. Multiple parallel
+    tool calls in a single turn aren't supported in PR 1 — we take
+    the first and ignore the rest (rare in practice; deferred to PR 6).
     """
     choices = getattr(resp, "choices", None) or []
     text = ""
+    tool_calls: list[Any] = []
     if choices:
         msg = getattr(choices[0], "message", None)
         if msg is not None:
             text = getattr(msg, "content", "") or ""
+            tool_calls = list(getattr(msg, "tool_calls", None) or [])
 
     usage = getattr(resp, "usage", None)
     tokens = TokenUsage(
@@ -179,6 +198,44 @@ def _to_completion_response(resp: Any) -> CompletionResponse:
         cost = hidden.get("response_cost")
         if cost is not None:
             raw["litellm_cost_usd"] = float(cost)
+
+    if tool_calls:
+        first = tool_calls[0]
+        # LiteLLM normalizes upstream shapes to the OpenAI structure:
+        # ``{id, type: "function", function: {name, arguments: str}}``.
+        # In practice we see both attribute-access and dict-key access
+        # depending on LiteLLM version — handle both. ``arguments`` is
+        # a JSON-encoded string; parse it. A malformed JSON argument is
+        # the provider's bug — we surface it as an empty dict so the
+        # executor's input-schema validator catches the issue with a
+        # readable error rather than crashing here.
+        function = getattr(first, "function", None)
+        if function is None and isinstance(first, dict):
+            function = first.get("function") or {}
+        if function is None:
+            function = {}
+        tool_name = _func_field(function, "name")
+        args_raw = _func_field(function, "arguments")
+        tool_id = getattr(first, "id", "") or (
+            first.get("id", "") if isinstance(first, dict) else ""
+        )
+        try:
+            import json  # noqa: PLC0415
+
+            tool_input = json.loads(args_raw) if args_raw else {}
+        except (TypeError, ValueError):
+            tool_input = {}
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        return CompletionResponse(
+            text=text,
+            tokens=tokens,
+            raw=raw,
+            kind="tool_use",
+            tool_name=tool_name,
+            tool_id=tool_id,
+            tool_input=tool_input,
+        )
 
     return CompletionResponse(text=text, tokens=tokens, raw=raw)
 
@@ -213,6 +270,21 @@ def _stream_chunk_from_litellm(chunk: Any) -> StreamChunk:
         )
 
     return StreamChunk(text=text, tokens=tokens)
+
+
+def _func_field(function: Any, name: str) -> str:
+    """Pull a tool-call function field whether ``function`` is an
+    attribute-style object or a plain dict.
+
+    LiteLLM versions differ on this; both shapes appear in upstream
+    test fixtures. Returning ``""`` on missing is fine — downstream
+    code treats an empty name as "no tool call we can dispatch."
+    """
+    if isinstance(function, dict):
+        v = function.get(name, "")
+        return str(v) if v is not None else ""
+    v = getattr(function, name, "")
+    return str(v) if v is not None else ""
 
 
 def _cached_input_tokens(usage: Any) -> int:
