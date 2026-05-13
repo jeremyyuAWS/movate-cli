@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 
 import movate
 from movate.core.loader import AgentBundle
-from movate.core.models import JobRecord, JobStatus
+from movate.core.models import JobKind, JobRecord, JobStatus
 from movate.core.rate_limit import InProcessRateLimiter, NoOpRateLimiter, RateLimiter
 from movate.runtime.agent_creation import (
     AgentCreationError,
@@ -44,6 +44,7 @@ from movate.runtime.schemas import (
     AgentDatasetInfo,
     AgentDetailView,
     AgentListView,
+    AgentRunSubmission,
     AgentValidationCostForecast,
     AgentValidationIssue,
     AgentValidationView,
@@ -765,6 +766,59 @@ def build_app(
         if bundle is None:
             raise not_found("agent", name)
         return _render_agent_validation(bundle)
+
+    @v1.post(
+        "/agents/{name}/runs",
+        response_model=RunAccepted,
+        status_code=202,
+        tags=["agents-v1"],
+    )
+    async def v1_agent_run(
+        name: str,
+        body: AgentRunSubmission,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> RunAccepted:
+        """Queue an agent run.
+
+        URL-anchored variant of ``POST /run`` — the agent name comes
+        from the path, ``kind=AGENT`` is implicit, the body only
+        carries the input payload + optional notify_email. REST-clean
+        for Angular's resource-oriented mental model (``POST /agents/
+        faq-bot/runs`` reads as "create a run under faq-bot").
+
+        Returns ``202 Accepted`` + ``{job_id, status: queued}``. The
+        Angular client then polls ``GET /jobs/{job_id}`` (today's
+        endpoint) or — once item 75 (SSE) lands — streams events on
+        ``GET /api/v1/jobs/{job_id}/events``.
+
+        Sync mode (``?wait=true``) is deferred; the Angular client's
+        BFF can implement the wait pattern client-side if needed.
+
+        Errors:
+
+        * **401** — missing / bad bearer token
+        * **404** — agent not in the registry
+        * **422** — body shape failure (FastAPI handles this for us)
+        """
+        agents: list[AgentBundle] = request.app.state.agents
+        bundle = next((b for b in agents if b.spec.name == name), None)
+        if bundle is None:
+            raise not_found("agent", name)
+
+        job = JobRecord(
+            job_id=str(uuid4()),
+            tenant_id=ctx.tenant_id,
+            kind=JobKind.AGENT,
+            target=name,
+            status=JobStatus.QUEUED,
+            input=body.input,
+            api_key_id=ctx.api_key_id,
+            notify_email=body.notify_email,
+        )
+        store: StorageProvider = request.app.state.storage
+        await store.save_job(job)
+        return RunAccepted(job_id=job.job_id, status=job.status)
 
     app.include_router(v1)
 
