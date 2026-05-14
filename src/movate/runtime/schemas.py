@@ -534,6 +534,76 @@ class AgentPublishSubmission(BaseModel):
     ``commit_author_email`` config."""
 
 
+class AgentCommitView(BaseModel):
+    """One row in the agent's commit history (item 79).
+
+    Flat wire shape matching :class:`movate.integrations.github.CommitInfo`.
+    The Mova iO UI's version-history panel renders one card per entry,
+    typically with ``message`` as the heading, ``author_name``+``timestamp``
+    underneath, and the SHA + html_url as a "View on GitHub" link."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sha: str
+    """Full 40-char Git SHA. Use this for the next call's ``?since=<sha>``
+    cursor when only-newer-than fetching ships in v0.8."""
+
+    message: str
+    """Commit message body. May span multiple lines — the Angular
+    client typically renders only the first line in the list view
+    and expands on click."""
+
+    author_name: str
+    """Display name from the commit's author block. Empty string when
+    GitHub returns an anonymous commit (rare; mostly happens for
+    machine-generated mirror commits)."""
+
+    author_email: str
+
+    timestamp: str
+    """ISO-8601 UTC timestamp from GitHub. The Angular client can pass
+    this directly to ``new Date(...)`` without timezone-conversion
+    work — GitHub always emits UTC."""
+
+    html_url: str
+    """``https://github.com/<repo>/commit/<sha>`` — same URL shape as
+    :class:`AgentPublishedView.commit_url`. Surface as 'View on GitHub'."""
+
+
+class AgentHistoryView(BaseModel):
+    """``GET /api/v1/agents/{name}/history`` response.
+
+    Paginated wrapper around :class:`AgentCommitView` rows. The UI
+    fetches page 1 by default; pages 2+ via ``?page=N``. ``has_more``
+    is a heuristic — true when the runtime got back a full page,
+    suggesting the next page MAY have more rows. False guarantees
+    no more rows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str
+    """Echoes the URL path parameter so callers can correlate the
+    response without re-parsing the path. Same convention as
+    :class:`AgentPublishedView`."""
+
+    commits: list[AgentCommitView]
+    """Sorted by GitHub's default (newest first — most recent commit
+    at index 0). Empty list when the agent has no published commits
+    yet (created via wizard but never published) OR when ``page`` is
+    past the last page."""
+
+    page: int
+    """1-indexed page number. Echoes the request's ``?page=N``."""
+
+    limit: int
+    """Page size. Echoes the request's ``?limit=N`` (clamped to
+    GitHub's max of 100 at the integration layer)."""
+
+    has_more: bool
+    """Heuristic: true iff ``len(commits) == limit``. The Angular
+    client uses this to decide whether to show a "Load more" button."""
+
+
 class AgentPublishedView(BaseModel):
     """``POST /api/v1/agents/{name}/publish`` response.
 
@@ -800,10 +870,12 @@ class AgentDetailView(BaseModel):
 
 
 __all__ = [
+    "AgentCommitView",
     "AgentCreatedView",
     "AgentDatasetInfo",
     "AgentDeletedView",
     "AgentDetailView",
+    "AgentHistoryView",
     "AgentListView",
     "AgentPublishSubmission",
     "AgentPublishedView",

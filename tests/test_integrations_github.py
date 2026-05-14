@@ -40,6 +40,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from movate.integrations.github import (
+    CommitInfo,
     GitHubClient,
     GitHubConfig,
     GitHubError,
@@ -497,3 +498,223 @@ async def test_publish_bundle_upstream_failure_502(config: GitHubConfig, bundle_
             await client.publish_bundle(bundle_dir, target_dir="faq-bot", message="x")
         assert excinfo.value.status_code == 502
         assert excinfo.value.upstream_status == 500
+
+
+# ---------------------------------------------------------------------------
+# list_history (item 79)
+# ---------------------------------------------------------------------------
+
+
+def _two_commit_response() -> httpx.Response:
+    """Canned GitHub commits-list response with two rows in the
+    real shape the API returns. Used by the happy-path test +
+    pagination test."""
+    return httpx.Response(
+        200,
+        json=[
+            {
+                "sha": "abc123" + "0" * 34,
+                "html_url": (
+                    "https://github.com/acme-org/mova-io-agents-acme/commit/abc123" + "0" * 34
+                ),
+                "commit": {
+                    "message": "Tighten the system prompt",
+                    "author": {
+                        "name": "Deva",
+                        "email": "deva@movate.com",
+                        "date": "2026-05-14T09:00:00Z",
+                    },
+                },
+            },
+            {
+                "sha": "def456" + "0" * 34,
+                "html_url": (
+                    "https://github.com/acme-org/mova-io-agents-acme/commit/def456" + "0" * 34
+                ),
+                "commit": {
+                    "message": "Initial publish",
+                    "author": {
+                        "name": "Mova iO",
+                        "email": "noreply@mova-io.movate.com",
+                        "date": "2026-05-13T18:00:00Z",
+                    },
+                },
+            },
+        ],
+    )
+
+
+async def test_list_history_happy_path(config: GitHubConfig) -> None:
+    """Two commits → two CommitInfo rows with the fields flattened
+    out of GitHub's nested response shape."""
+    handler = RecordingHandler(
+        {
+            ("POST", "/app/installations/67890/access_tokens"): httpx.Response(
+                201,
+                json={"token": "ghs_t", "expires_at": "2099-01-01T00:00:00Z"},
+            ),
+            ("GET", "/repos/acme-org/mova-io-agents-acme/commits"): _two_commit_response(),
+        }
+    )
+
+    async with _mock_client(handler) as http:
+        client = GitHubClient(config, http=http)
+        rows = await client.list_history(target_dir="faq-bot", limit=50, page=1)
+
+    assert len(rows) == 2
+    assert all(isinstance(r, CommitInfo) for r in rows)
+    assert rows[0].sha.startswith("abc123")
+    assert rows[0].message == "Tighten the system prompt"
+    assert rows[0].author_name == "Deva"
+    assert rows[0].author_email == "deva@movate.com"
+    assert rows[0].timestamp == "2026-05-14T09:00:00Z"
+    assert rows[0].html_url.endswith(rows[0].sha)
+
+
+async def test_list_history_sends_path_filter_and_pagination(config: GitHubConfig) -> None:
+    """The commits endpoint must be called with ?path=<dir>&per_page&page
+    so GitHub filters by agent directory + paginates correctly. Without
+    the path filter we'd get every commit in the repo across every agent."""
+    handler = RecordingHandler(
+        {
+            ("POST", "/app/installations/67890/access_tokens"): httpx.Response(
+                201,
+                json={"token": "ghs_t", "expires_at": "2099-01-01T00:00:00Z"},
+            ),
+            ("GET", "/repos/acme-org/mova-io-agents-acme/commits"): _two_commit_response(),
+        }
+    )
+
+    async with _mock_client(handler) as http:
+        client = GitHubClient(config, http=http)
+        await client.list_history(target_dir="faq-bot/", limit=25, page=3)
+
+    commits_req = next(r for r in handler.requests if r.url.path.endswith("/commits"))
+    qs = dict(commits_req.url.params)
+    assert qs["path"] == "faq-bot"  # trailing slash stripped
+    assert qs["per_page"] == "25"
+    assert qs["page"] == "3"
+
+
+async def test_list_history_clamps_limit_to_100(config: GitHubConfig) -> None:
+    """GitHub rejects per_page > 100. We clamp client-side so a UI
+    that asks for 500 still gets a 200 response (with the first 100)."""
+    handler = RecordingHandler(
+        {
+            ("POST", "/app/installations/67890/access_tokens"): httpx.Response(
+                201,
+                json={"token": "ghs_t", "expires_at": "2099-01-01T00:00:00Z"},
+            ),
+            ("GET", "/repos/acme-org/mova-io-agents-acme/commits"): httpx.Response(200, json=[]),
+        }
+    )
+
+    async with _mock_client(handler) as http:
+        client = GitHubClient(config, http=http)
+        await client.list_history(target_dir="x", limit=500, page=1)
+
+    commits_req = next(r for r in handler.requests if r.url.path.endswith("/commits"))
+    qs = dict(commits_req.url.params)
+    assert qs["per_page"] == "100"  # clamped down from 500
+
+
+async def test_list_history_empty_returns_empty_list(config: GitHubConfig) -> None:
+    """An agent that's never been published returns 200 with []. We
+    surface that as an empty list, NOT a 404 — 'no commits' is a valid
+    state for a freshly-created bundle."""
+    handler = RecordingHandler(
+        {
+            ("POST", "/app/installations/67890/access_tokens"): httpx.Response(
+                201,
+                json={"token": "ghs_t", "expires_at": "2099-01-01T00:00:00Z"},
+            ),
+            ("GET", "/repos/acme-org/mova-io-agents-acme/commits"): httpx.Response(200, json=[]),
+        }
+    )
+
+    async with _mock_client(handler) as http:
+        client = GitHubClient(config, http=http)
+        rows = await client.list_history(target_dir="never-published")
+    assert rows == []
+
+
+async def test_list_history_tolerates_missing_fields(config: GitHubConfig) -> None:
+    """Real-world GitHub responses sometimes lack author email (anonymous
+    commits, mirror imports). We fall back to empty strings instead of
+    crashing the response."""
+    handler = RecordingHandler(
+        {
+            ("POST", "/app/installations/67890/access_tokens"): httpx.Response(
+                201,
+                json={"token": "ghs_t", "expires_at": "2099-01-01T00:00:00Z"},
+            ),
+            ("GET", "/repos/acme-org/mova-io-agents-acme/commits"): httpx.Response(
+                200,
+                json=[
+                    {
+                        "sha": "abc",
+                        # No html_url, no commit.author block
+                        "commit": {"message": "anonymous commit"},
+                    }
+                ],
+            ),
+        }
+    )
+
+    async with _mock_client(handler) as http:
+        client = GitHubClient(config, http=http)
+        rows = await client.list_history(target_dir="x")
+
+    assert len(rows) == 1
+    assert rows[0].sha == "abc"
+    assert rows[0].message == "anonymous commit"
+    assert rows[0].author_name == ""
+    assert rows[0].author_email == ""
+    assert rows[0].timestamp == ""
+    assert rows[0].html_url == ""
+
+
+async def test_list_history_upstream_502(config: GitHubConfig) -> None:
+    """GitHub returns 500 on the commits call → we surface a 502
+    GitHubError with the upstream status preserved."""
+    handler = RecordingHandler(
+        {
+            ("POST", "/app/installations/67890/access_tokens"): httpx.Response(
+                201,
+                json={"token": "ghs_t", "expires_at": "2099-01-01T00:00:00Z"},
+            ),
+            ("GET", "/repos/acme-org/mova-io-agents-acme/commits"): httpx.Response(
+                500, text="boom"
+            ),
+        }
+    )
+
+    async with _mock_client(handler) as http:
+        client = GitHubClient(config, http=http)
+        with pytest.raises(GitHubError) as excinfo:
+            await client.list_history(target_dir="faq-bot")
+        assert excinfo.value.status_code == 502
+        assert excinfo.value.upstream_status == 500
+
+
+async def test_list_history_non_array_response_is_502(config: GitHubConfig) -> None:
+    """If GitHub ever returns a dict instead of an array (shouldn't happen
+    but we defend), we surface a 502 instead of crashing the response
+    handler with a TypeError."""
+    handler = RecordingHandler(
+        {
+            ("POST", "/app/installations/67890/access_tokens"): httpx.Response(
+                201,
+                json={"token": "ghs_t", "expires_at": "2099-01-01T00:00:00Z"},
+            ),
+            ("GET", "/repos/acme-org/mova-io-agents-acme/commits"): httpx.Response(
+                200, json={"unexpected": "object"}
+            ),
+        }
+    )
+
+    async with _mock_client(handler) as http:
+        client = GitHubClient(config, http=http)
+        with pytest.raises(GitHubError) as excinfo:
+            await client.list_history(target_dir="x")
+        assert excinfo.value.status_code == 502
