@@ -27,7 +27,6 @@ Coverage:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -108,7 +107,8 @@ def test_minimal_payload_creates_agent_with_defaults(
     client: TestClient, agents_path: Path, auth_header: dict[str, str]
 ) -> None:
     """Wizard sends only the 3 required fields → canonical layout
-    persists with default schemas + empty marketplace metadata."""
+    persists with default inline-shorthand schemas + empty marketplace
+    metadata."""
     r = client.post(
         "/api/v1/agents/from-wizard",
         json=_minimal_payload(),
@@ -118,19 +118,24 @@ def test_minimal_payload_creates_agent_with_defaults(
     body = r.json()
     assert body["name"] == "code-analyzer"
     assert body["version"] == "0.1.0"
+    # Wizard agents now emit 2 files instead of 4 — schemas live inline
+    # in agent.yaml as shorthand. Matches the mdk init template
+    # direction; loader compiles to identical JSON Schema dicts
+    # downstream.
     assert sorted(body["files_persisted"]) == [
         "agent.yaml",
         "prompt.md",
-        "schema/input.json",
-        "schema/output.json",
     ]
 
-    # Default schemas land on disk
-    bundle_dir = agents_path / "code-analyzer"
-    input_schema = json.loads((bundle_dir / "schema/input.json").read_text())
-    assert input_schema["required"] == ["input"]
-    output_schema = json.loads((bundle_dir / "schema/output.json").read_text())
-    assert output_schema["required"] == ["output"]
+    # Default inline schemas survived the round-trip. Verify by loading
+    # the bundle through the canonical loader — that exercises the
+    # shorthand compiler + asserts the post-compile required fields
+    # match what we expect on the wire (input / output).
+    from movate.core.loader import load_agent  # noqa: PLC0415
+
+    bundle = load_agent(agents_path / "code-analyzer")
+    assert bundle.input_schema["required"] == ["input"]
+    assert bundle.output_schema["required"] == ["output"]
 
 
 def test_full_payload_round_trips_every_field(
