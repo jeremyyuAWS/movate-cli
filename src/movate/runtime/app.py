@@ -47,6 +47,8 @@ from movate.runtime.schemas import (
     AgentDeletedView,
     AgentDetailView,
     AgentListView,
+    AgentPublishedView,
+    AgentPublishSubmission,
     AgentRunSubmission,
     AgentValidationCostForecast,
     AgentValidationIssue,
@@ -67,6 +69,17 @@ from movate.runtime.schemas import (
     WizardAgentSubmission,
 )
 from movate.storage.base import StorageProvider
+
+
+def _github_is_enabled() -> bool:
+    """Whether the GitHub integration is turned on.
+
+    Mirrors :func:`movate.integrations.github.is_enabled` — duplicated
+    here so ``build_app`` doesn't import the integrations subpackage
+    just to read an env var (the integrations module's lazy-import
+    contract is "no import unless you actually want the client")."""
+    raw = os.environ.get("MDK_GITHUB_ENABLED", "").strip().lower()
+    return raw in ("1", "true", "yes")
 
 
 def _resolve_cors_origins(explicit: list[str] | None) -> list[str]:
@@ -160,8 +173,10 @@ def _agent_creation_error_code(status_code: int) -> str:
     """
     return {
         400: "bad_request",
+        404: "not_found",
         409: "already_exists",
         422: "invalid_bundle",
+        502: "upstream_unavailable",
         503: "agent_persistence_unavailable",
     }.get(status_code, "internal_error")
 
@@ -347,6 +362,7 @@ def build_app(
     agents_path: Path | None = None,
     rate_limit_per_minute: int | None = 60,
     cors_allowed_origins: list[str] | None = None,
+    github_client: object | None = None,
 ) -> FastAPI:
     """Build the FastAPI app bound to ``storage`` + ``agents``.
 
@@ -378,6 +394,30 @@ def build_app(
     # without an agents_path and can't persist. mdk serve always
     # passes its --agents-path here; tests pass tmp_path.
     app.state.agents_path = agents_path
+    # GitHub integration (item 78 / ADR 007). Built lazily when
+    # ``MDK_GITHUB_ENABLED=1`` so the typical runtime (no GitHub) pays
+    # no cost. Tests pass a pre-built mock through ``github_client``.
+    # ``None`` means the endpoint returns 503.
+    if github_client is not None:
+        app.state.github_client = github_client
+    elif _github_is_enabled():
+        try:
+            from movate.integrations.github import (  # noqa: PLC0415
+                GitHubClient,
+                GitHubConfig,
+            )
+
+            app.state.github_client = GitHubClient(GitHubConfig.from_env())
+        except Exception as exc:
+            # A bad config shouldn't take the whole runtime down —
+            # surface as "not configured" at the endpoint. Logged loud
+            # so operators see what broke at boot.
+            import logging  # noqa: PLC0415
+
+            logging.getLogger(__name__).warning("github_integration_init_failed reason=%s", exc)
+            app.state.github_client = None
+    else:
+        app.state.github_client = None
 
     # CORS — required for browser-side callers (the Mova iO Angular
     # app). Allow-list resolved from the explicit kwarg, then env vars,
@@ -941,6 +981,107 @@ def build_app(
         return AgentDeletedView(
             name=result.name,
             deleted_dir=result.deleted_dir.name,
+        )
+
+    @v1.post(
+        "/agents/{name}/publish",
+        response_model=AgentPublishedView,
+        tags=["agents-v1"],
+    )
+    async def v1_publish_agent(
+        name: str,
+        body: AgentPublishSubmission,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> AgentPublishedView:
+        """Push the agent's canonical bundle to GitHub as one commit
+        (item 78, ADR 007 decisions 1-4).
+
+        Reads the on-disk bundle from the runtime's ``agents_path``,
+        sends every file through the Git Data API in a single commit
+        on the configured default branch, and returns the resulting
+        commit SHA + URL.
+
+        Behavior is gated on ``MDK_GITHUB_ENABLED=1`` + a valid
+        GitHubConfig pulled from env (``MDK_GITHUB_APP_ID``,
+        ``MDK_GITHUB_INSTALLATION_ID``, ``MDK_GITHUB_PRIVATE_KEY``,
+        ``MDK_GITHUB_REPO``). When the flag is off the endpoint
+        returns 503 — the runtime advertises the route in
+        ``/openapi.json`` regardless so the Angular client can
+        generate against it before the integration goes live.
+
+        Tenant attribution: today's runtime trusts the env-supplied
+        installation_id (one tenant per runtime). Multi-tenant
+        installation lookup ships with item 81 (``mdk github
+        bootstrap``).
+
+        Errors:
+
+        * **401** — missing / bad bearer token
+        * **404** — agent doesn't exist at the runtime's
+          agents_path
+        * **422** — bundle directory empty / GitHub config malformed
+        * **502** — upstream GitHub call failed (token exchange,
+          tree write, ref update)
+        * **503** — integration disabled or runtime built without an
+          agents_path
+        """
+        # Lazy-import the integrations module so the dispatcher path
+        # (which never publishes) doesn't trigger cryptography's
+        # heavy lift at import time. Only ``GitHubError`` is needed
+        # here — the client type comes from app.state regardless.
+        from movate.integrations.github import GitHubError  # noqa: PLC0415
+
+        agents_path: Path | None = request.app.state.agents_path
+        if agents_path is None:
+            raise AgentCreationError(
+                "runtime was built without an agents_path; "
+                "POST /api/v1/agents/{name}/publish is unavailable",
+                status_code=503,
+            )
+
+        client = getattr(request.app.state, "github_client", None)
+        if client is None:
+            raise AgentCreationError(
+                "github integration is disabled; set MDK_GITHUB_ENABLED=1 "
+                "and configure MDK_GITHUB_APP_ID / INSTALLATION_ID / "
+                "PRIVATE_KEY / REPO to enable POST /api/v1/agents/{name}/publish",
+                status_code=503,
+            )
+        # ``client`` is either a real GitHubClient (production) or a
+        # duck-typed test double exposing ``publish_bundle`` — no
+        # isinstance check needed; the call below fails loud either
+        # way if the method is missing.
+        _ = ctx.tenant_id  # future per-tenant audit log entry
+
+        bundle_dir = agents_path / name
+        if not bundle_dir.exists() or not bundle_dir.is_dir():
+            raise not_found("agent", name)
+
+        message = body.commit_message or f"Update {name}"
+        try:
+            result = await client.publish_bundle(
+                bundle_dir,
+                target_dir=name,
+                message=message,
+                author_name=body.author_name,
+                author_email=body.author_email,
+            )
+        except GitHubError as exc:
+            # Translate the integration error onto the right HTTP
+            # response. The integration sets ``status_code`` per case
+            # (422 config, 502 upstream, 503 disabled).
+            raise AgentCreationError(
+                str(exc),
+                status_code=exc.status_code,
+            ) from exc
+
+        return AgentPublishedView(
+            agent=name,
+            commit_sha=result.commit_sha,
+            commit_url=result.commit_url,
+            branch=result.branch,
+            files_changed=result.files_changed,
         )
 
     @v1.post(
