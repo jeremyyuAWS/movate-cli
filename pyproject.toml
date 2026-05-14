@@ -77,6 +77,15 @@ teams = [
     # later hardening PR; its dep slot goes here so the optional
     # install stays single-step.
 ]
+github = [
+    # GitHub App auth (RS256-signed JWTs) needs the cryptography library
+    # to load the App's RSA private key + sign installation-token
+    # requests. ``cryptography`` is already in the teams extra; listing
+    # it here too keeps the github extra self-contained — operators
+    # running JUST the runtime + github integration (no Teams) only
+    # install what they need.
+    "cryptography>=42",
+]
 
 [dependency-groups]
 dev = [

@@ -1690,6 +1690,9 @@ dev = [
     { name = "types-jsonschema" },
     { name = "types-pyyaml" },
 ]
+github = [
+    { name = "cryptography" },
+]
 langchain = [
     { name = "langchain-core" },
 ]
@@ -1736,6 +1739,7 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40,<1" },
     { name = "asyncpg", marker = "extra == 'runtime'", specifier = ">=0.29" },
     { name = "bcrypt", marker = "extra == 'runtime'", specifier = ">=4.0" },
+    { name = "cryptography", marker = "extra == 'github'", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'teams'", specifier = ">=42" },
     { name = "fastapi", marker = "extra == 'runtime'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'teams'", specifier = ">=0.110" },
@@ -1766,7 +1770,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'runtime'", specifier = ">=0.29" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'teams'", specifier = ">=0.29" },
 ]
-provides-extras = ["runtime", "langfuse", "otel", "dev", "anthropic", "openai", "langchain", "teams"]
+provides-extras = ["runtime", "langfuse", "otel", "dev", "anthropic", "openai", "langchain", "teams", "github"]
 
 [package.metadata.requires-dev]
 dev = [

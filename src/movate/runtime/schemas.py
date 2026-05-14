@@ -504,6 +504,69 @@ class WizardAgentSubmission(BaseModel):
     ``foundation-<slug>`` tag."""
 
 
+class AgentPublishSubmission(BaseModel):
+    """``POST /api/v1/agents/{name}/publish`` request body.
+
+    Pushes the agent's canonical bundle to the per-tenant GitHub repo
+    as a single commit on the configured default branch. See ADR 007
+    decisions 1-4 for repo strategy, auth, cadence, and push semantics.
+
+    All fields optional — defaults are applied at the integration
+    layer (``GitHubConfig.commit_author_*``). The Angular UI's
+    "Publish" dialog typically supplies a custom ``commit_message``
+    summarizing what changed; the author defaults match the GitHub
+    App's bot identity so unattributed publishes still have a sensible
+    commit footer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commit_message: str | None = None
+    """Free-form commit message. Defaults to ``Update <agent-name>``
+    when omitted. Conventional-commits format is welcome but not
+    enforced (ADR 007 open question 4)."""
+
+    author_name: str | None = None
+    """Display name for the commit author. Defaults to the runtime's
+    ``commit_author_name`` config (``Mova iO`` out of the box)."""
+
+    author_email: str | None = None
+    """Email for the commit author. Defaults to the runtime's
+    ``commit_author_email`` config."""
+
+
+class AgentPublishedView(BaseModel):
+    """``POST /api/v1/agents/{name}/publish`` response.
+
+    Returned on a successful publish. ``commit_sha`` + ``commit_url``
+    are what the Angular UI shows in the "Published" toast + history
+    list. ``files_changed`` is the per-publish set of repo-relative
+    paths the runtime wrote — handy for a "files in this commit"
+    panel without a second GitHub API call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str
+    """Name of the agent that was published. Echoes the URL path
+    parameter so callers can correlate without re-parsing the path."""
+
+    commit_sha: str
+    """Full 40-char Git SHA of the new commit on the default branch."""
+
+    commit_url: str
+    """``https://github.com/<repo>/commit/<sha>`` — direct link the UI
+    surfaces as 'View on GitHub'."""
+
+    branch: str
+    """Branch the commit landed on. ``main`` in v0.7 (ADR 007
+    decision 4 reserves branch routing for the protected-paths
+    flow shipping in v0.8)."""
+
+    files_changed: list[str]
+    """Repo-relative paths included in this commit (sorted). Includes
+    the ``<agent-name>/`` prefix that lives under the tenant repo
+    root, e.g. ``faq-bot/agent.yaml``."""
+
+
 class AgentDeletedView(BaseModel):
     """``DELETE /api/v1/agents/{name}`` response.
 
@@ -742,6 +805,8 @@ __all__ = [
     "AgentDeletedView",
     "AgentDetailView",
     "AgentListView",
+    "AgentPublishSubmission",
+    "AgentPublishedView",
     "AgentRunSubmission",
     "AgentValidationCostForecast",
     "AgentValidationIssue",
