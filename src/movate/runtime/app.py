@@ -34,6 +34,7 @@ from movate.core.rate_limit import InProcessRateLimiter, NoOpRateLimiter, RateLi
 from movate.runtime.agent_creation import (
     AgentCreationError,
     persist_bundle,
+    soft_delete_agent,
     unzip_bundle,
     wizard_to_bundle_files,
 )
@@ -43,6 +44,7 @@ from movate.runtime.registry import scan_agents
 from movate.runtime.schemas import (
     AgentCreatedView,
     AgentDatasetInfo,
+    AgentDeletedView,
     AgentDetailView,
     AgentListView,
     AgentRunSubmission,
@@ -871,6 +873,58 @@ def build_app(
         if bundle is None:
             raise not_found("agent", name)
         return _render_agent_validation(bundle)
+
+    @v1.delete(
+        "/agents/{name}",
+        response_model=AgentDeletedView,
+        tags=["agents-v1"],
+    )
+    async def v1_delete_agent(
+        name: str,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+    ) -> AgentDeletedView:
+        """Soft-delete an agent (item 117 / Tier I-U).
+
+        Moves the canonical bundle to a sibling
+        ``.deleted-<name>-<timestamp>/`` directory under the runtime's
+        agents_path. Recoverable out-of-band by the operator until a
+        future cron sweep removes it (7-day retention window planned).
+
+        Refreshes the in-memory agents registry so the very next
+        ``GET /agents`` no longer surfaces the deleted agent.
+
+        Tenant attribution is logged via ``ctx.tenant_id`` (future
+        per-tenant filesystem isolation reads this back); today's
+        runtime is single-tenant per agents_path.
+
+        Errors:
+
+        * **401** — missing / bad bearer token
+        * **404** — agent dir doesn't exist at the runtime's
+          agents_path
+        * **500** — filesystem error (permissions, mount issues)
+        * **503** — runtime built without an ``agents_path``
+        """
+        agents_path: Path | None = request.app.state.agents_path
+        if agents_path is None:
+            raise AgentCreationError(
+                "runtime was built without an agents_path; "
+                "DELETE /api/v1/agents/{name} is unavailable",
+                status_code=503,
+            )
+
+        _ = ctx.tenant_id  # future per-tenant audit log entry
+
+        result = soft_delete_agent(name, agents_path=agents_path)
+        # Refresh registry so GET /agents reflects reality on the
+        # next request — agent disappears immediately from the catalog.
+        request.app.state.agents = scan_agents(agents_path)
+
+        return AgentDeletedView(
+            name=result.name,
+            deleted_dir=result.deleted_dir.name,
+        )
 
     @v1.post(
         "/agents/{name}/runs",

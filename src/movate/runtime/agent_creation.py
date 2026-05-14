@@ -504,3 +504,63 @@ def wizard_to_bundle_files(submission: WizardAgentSubmission) -> dict[str, bytes
         "schema/input.json": json.dumps(_DEFAULT_INPUT_SCHEMA, indent=2).encode("utf-8"),
         "schema/output.json": json.dumps(_DEFAULT_OUTPUT_SCHEMA, indent=2).encode("utf-8"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Agent deletion — soft-delete with recovery window
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeleteResult:
+    """What :func:`soft_delete_agent` returns on success.
+
+    ``deleted_dir`` is the sibling path the agent's bundle now lives
+    at (``<agents_path>/.deleted-<name>-<timestamp>/``). Used in the
+    response so operators can find + restore the bundle within the
+    recovery window before a future cron sweep removes it.
+    """
+
+    name: str
+    deleted_dir: Path
+
+
+def soft_delete_agent(name: str, *, agents_path: Path) -> DeleteResult:
+    """Move an agent's canonical bundle to a sibling
+    ``.deleted-<name>-<timestamp>/`` directory.
+
+    Soft delete (vs. ``rmtree``) so a botched delete is recoverable
+    out-of-band — operator can mv the sibling back to its original
+    name within the recovery window. A future cron sweep removes
+    `.deleted-*` dirs older than 7 days; that sweep isn't in this PR
+    (BACKLOG follow-up).
+
+    Raises :class:`AgentCreationError`:
+
+    * **404** — no agent dir exists at ``<agents_path>/<name>``
+    * **500** — unexpected filesystem error (permissions, etc.)
+    """
+    import time  # noqa: PLC0415
+
+    target = agents_path / name
+    if not target.exists() or not target.is_dir():
+        raise AgentCreationError(
+            f"agent {name!r} not found at {target}",
+            status_code=404,
+        )
+
+    # Timestamp lets us soft-delete the SAME name multiple times
+    # without a collision (e.g. create → delete → create → delete).
+    # Unix epoch seconds is enough granularity for human ops + sorts
+    # naturally for the future cron sweep.
+    timestamp = int(time.time())
+    stale = target.with_name(f".deleted-{name}-{timestamp}")
+    try:
+        target.rename(stale)
+    except Exception as exc:
+        raise AgentCreationError(
+            f"could not soft-delete {name!r}: {exc}",
+            status_code=500,
+        ) from exc
+
+    return DeleteResult(name=name, deleted_dir=stale)
