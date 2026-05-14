@@ -185,6 +185,27 @@ class PublishResult:
     files_changed: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CommitInfo:
+    """One row from ``GET /agents/{name}/history`` (item 79).
+
+    Captures the per-commit fields the Mova iO UI's version-history
+    panel needs to render. Mirrors GitHub's ``GET /repos/.../commits``
+    response shape but flattens it — the wire-side ``CommitView``
+    Pydantic model has the same fields.
+
+    ``timestamp`` is ISO-8601 UTC (the GitHub-native format); the
+    Angular client can parse it via ``new Date(...)`` without a
+    timezone-conversion dance."""
+
+    sha: str
+    message: str
+    author_name: str
+    author_email: str
+    timestamp: str
+    html_url: str
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -368,20 +389,21 @@ class GitHubClient:
 
     # -- Authenticated REST helper ---------------------------------------
 
-    async def _api(
+    async def _request(
         self,
         method: str,
         path: str,
         *,
         json_body: dict[str, Any] | None = None,
+        params: dict[str, str | int] | None = None,
         expected_status: tuple[int, ...] = (200, 201),
-    ) -> dict[str, Any]:
-        """Issue an authenticated API call against the configured repo.
+    ) -> Any:
+        """Issue an authenticated API call and return the parsed JSON.
 
-        ``path`` is the resource path relative to ``/repos/{repo}/``
-        (e.g. ``"git/blobs"``, ``"git/refs/heads/main"``). Returns the
-        parsed JSON body; raises :class:`GitHubError` on a status not
-        in ``expected_status``.
+        Type-erased to ``Any`` because GitHub's REST endpoints return
+        either an object (write paths) or an array (list paths). The
+        :meth:`_api_object` / :meth:`_api_list` wrappers below narrow
+        the type at the call site so callers don't isinstance-check.
         """
         token = await self._get_installation_token()
         url = f"{self.config.api_base}/repos/{self.config.repo}/{path}"
@@ -394,6 +416,7 @@ class GitHubClient:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
             json=json_body,
+            params=params,
         )
         if resp.status_code not in expected_status:
             raise GitHubError(
@@ -401,10 +424,62 @@ class GitHubClient:
                 status_code=502,
                 upstream_status=resp.status_code,
             )
-        data = resp.json() if resp.content else {}
+        if not resp.content:
+            return {}
+        return resp.json()
+
+    async def _api(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, str | int] | None = None,
+        expected_status: tuple[int, ...] = (200, 201),
+    ) -> dict[str, Any]:
+        """Object-shaped variant of :meth:`_request`.
+
+        ``path`` is the resource path relative to ``/repos/{repo}/``
+        (e.g. ``"git/blobs"``, ``"git/refs/heads/main"``). Returns the
+        parsed JSON body; raises :class:`GitHubError` on a status not
+        in ``expected_status`` or a non-object response.
+        """
+        data = await self._request(
+            method,
+            path,
+            json_body=json_body,
+            params=params,
+            expected_status=expected_status,
+        )
         if not isinstance(data, dict):
             raise GitHubError(
                 f"github {method} {path} returned non-object ({type(data).__name__})",
+                status_code=502,
+            )
+        return data
+
+    async def _api_list(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str | int] | None = None,
+        expected_status: tuple[int, ...] = (200,),
+    ) -> list[Any]:
+        """List-shaped variant of :meth:`_request`.
+
+        Used for paginated index endpoints (``/commits``, ``/refs``).
+        Raises :class:`GitHubError` on a non-array response so callers
+        don't have to defend against the type."""
+        data = await self._request(
+            method,
+            path,
+            params=params,
+            expected_status=expected_status,
+        )
+        if not isinstance(data, list):
+            raise GitHubError(
+                f"github {method} {path} returned non-array ({type(data).__name__})",
                 status_code=502,
             )
         return data
@@ -532,6 +607,72 @@ class GitHubClient:
             files_changed=[entry["path"] for entry in tree_entries],
         )
 
+    async def list_history(
+        self,
+        *,
+        target_dir: str,
+        limit: int = 50,
+        page: int = 1,
+    ) -> list[CommitInfo]:
+        """Return commit history filtered to a single agent's directory
+        (item 79).
+
+        Uses GitHub's ``GET /repos/.../commits?path=<dir>&per_page=N``
+        endpoint. The ``path`` filter narrows to commits that touched
+        files under ``target_dir/`` — exactly the slice the Mova iO
+        UI's version-history panel renders.
+
+        ``limit`` is clamped to GitHub's per-page maximum of 100 to
+        keep one call = one page. For deeper history, the caller
+        pages via ``page`` (1-indexed, matches GitHub's convention).
+
+        Returns an empty list when the agent has no commits yet
+        (newly-created bundle that hasn't been published). 404 from
+        GitHub bubbles up as :class:`GitHubError(status_code=502)`
+        — distinguishable from the empty case by exception vs
+        empty list.
+
+        ``?since=<sha>`` (only-newer-than-X) is deferred to a v0.8
+        follow-up — it requires multi-page fetch + truncation logic
+        that doesn't justify the v0.7 scope.
+        """
+        # GitHub's per_page cap is 100. Above that the API returns 422.
+        per_page = max(1, min(limit, 100))
+        # 1-indexed; default first page.
+        page_number = max(1, page)
+
+        payload = await self._api_list(
+            "GET",
+            "commits",
+            params={
+                "path": target_dir.rstrip("/"),
+                "per_page": per_page,
+                "page": page_number,
+            },
+        )
+
+        # Defensive: GitHub returns the full commit-object shape;
+        # we extract the flat subset the UI needs. Missing fields
+        # (e.g. anonymous commits with no author email) fall back
+        # to empty strings rather than crashing the response.
+        commits: list[CommitInfo] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            commit_meta = entry.get("commit") or {}
+            author_block = commit_meta.get("author") or {}
+            commits.append(
+                CommitInfo(
+                    sha=str(entry.get("sha") or ""),
+                    message=str(commit_meta.get("message") or ""),
+                    author_name=str(author_block.get("name") or ""),
+                    author_email=str(author_block.get("email") or ""),
+                    timestamp=str(author_block.get("date") or ""),
+                    html_url=str(entry.get("html_url") or ""),
+                )
+            )
+        return commits
+
     async def aclose(self) -> None:
         """Close the underlying HTTP client. Call when shutting down."""
         await self._http.aclose()
@@ -566,6 +707,7 @@ def _collect_bundle_files(
 
 
 __all__ = [
+    "CommitInfo",
     "GitHubClient",
     "GitHubConfig",
     "GitHubError",

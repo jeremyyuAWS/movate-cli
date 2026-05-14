@@ -42,10 +42,12 @@ from movate.runtime.errors import auth_required, not_found
 from movate.runtime.middleware import AuthContext, make_auth_dependency
 from movate.runtime.registry import scan_agents
 from movate.runtime.schemas import (
+    AgentCommitView,
     AgentCreatedView,
     AgentDatasetInfo,
     AgentDeletedView,
     AgentDetailView,
+    AgentHistoryView,
     AgentListView,
     AgentPublishedView,
     AgentPublishSubmission,
@@ -1082,6 +1084,111 @@ def build_app(
             commit_url=result.commit_url,
             branch=result.branch,
             files_changed=result.files_changed,
+        )
+
+    @v1.get(
+        "/agents/{name}/history",
+        response_model=AgentHistoryView,
+        tags=["agents-v1"],
+    )
+    async def v1_agent_history(
+        name: str,
+        request: Request,
+        ctx: AuthContext = Depends(auth_dep),
+        limit: int = 50,
+        page: int = 1,
+    ) -> AgentHistoryView:
+        """Return the agent's commit history from GitHub (item 79,
+        ADR 007).
+
+        Drives the Mova iO version-history panel — one row per commit
+        with sha / message / author / timestamp / html_url. Sorted
+        newest-first. Empty list when the agent has no published
+        commits yet (created via wizard, never published).
+
+        Same feature-flag pattern as ``POST /publish``: returns 503
+        with the ``agent_persistence_unavailable`` code when
+        ``MDK_GITHUB_ENABLED`` is unset. The route advertises in
+        ``/openapi.json`` regardless so client-gen tooling generates
+        the typed method now.
+
+        Tenant attribution: today's runtime trusts the env-supplied
+        installation_id (one tenant per runtime). Multi-tenant
+        installation lookup arrives with item 81.
+
+        Query params:
+
+        * ``limit`` — page size, default 50, clamped to 100 at the
+          integration layer (GitHub's per_page max).
+        * ``page`` — 1-indexed page number, default 1.
+
+        Errors:
+
+        * **401** — missing / bad bearer token
+        * **404** — agent doesn't exist on disk (we check before
+          calling GitHub so a typo doesn't burn API budget)
+        * **502** — upstream GitHub call failed
+        * **503** — integration disabled or runtime built without an
+          agents_path
+        """
+        # Lazy import — same convention as the publish endpoint.
+        from movate.integrations.github import GitHubError  # noqa: PLC0415
+
+        agents_path: Path | None = request.app.state.agents_path
+        if agents_path is None:
+            raise AgentCreationError(
+                "runtime was built without an agents_path; "
+                "GET /api/v1/agents/{name}/history is unavailable",
+                status_code=503,
+            )
+
+        client = getattr(request.app.state, "github_client", None)
+        if client is None:
+            raise AgentCreationError(
+                "github integration is disabled; set MDK_GITHUB_ENABLED=1 "
+                "and configure MDK_GITHUB_APP_ID / INSTALLATION_ID / "
+                "PRIVATE_KEY / REPO to enable GET /api/v1/agents/{name}/history",
+                status_code=503,
+            )
+
+        _ = ctx.tenant_id  # future per-tenant audit log entry
+
+        bundle_dir = agents_path / name
+        if not bundle_dir.exists() or not bundle_dir.is_dir():
+            raise not_found("agent", name)
+
+        try:
+            commits = await client.list_history(
+                target_dir=name,
+                limit=limit,
+                page=page,
+            )
+        except GitHubError as exc:
+            raise AgentCreationError(
+                str(exc),
+                status_code=exc.status_code,
+            ) from exc
+
+        commit_views = [
+            AgentCommitView(
+                sha=c.sha,
+                message=c.message,
+                author_name=c.author_name,
+                author_email=c.author_email,
+                timestamp=c.timestamp,
+                html_url=c.html_url,
+            )
+            for c in commits
+        ]
+        # has_more heuristic: full page returned → there might be
+        # more. Doesn't guarantee — the next fetch could come back
+        # empty. The UI uses this as a "show Load More button" hint.
+        return AgentHistoryView(
+            agent=name,
+            commits=commit_views,
+            page=page,
+            limit=limit,
+            has_more=len(commit_views) == limit,
         )
 
     @v1.post(
