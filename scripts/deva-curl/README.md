@@ -19,19 +19,54 @@ auto-sources it.
 ## The flow
 
 ```bash
-./01-health.sh                                       # confirm runtime is alive
-./02-create-agent.sh "Hello Bot"                     # create from wizard JSON
-./03-list-agents.sh                                  # see it in the registry
-./04-get-agent.sh hello-bot                          # full profile
-./05-validate-agent.sh hello-bot                     # shippability gate
-./06-run-agent.sh hello-bot '{"input": "ping"}'      # queue a run → get job_id
-./07-job-status.sh <job_id>                          # poll until terminal
-./08-list-jobs.sh hello-bot                          # recent runs
-./09-run-eval.sh hello-bot                           # kick off mock eval
-./10-eval-scorecard.sh <eval_id>                     # scorecard
-./11-eval-history.sh hello-bot                       # eval list
-./12-trace.sh <run_id>                               # observability timeline
+./01-health.sh                                              # runtime alive (no auth)
+./02-create-agent.sh "Hello Bot"                            # create from wizard JSON
+./03-list-agents.sh                                         # see it in the registry
+./04-get-agent.sh hello-bot                                 # full profile
+./05-validate-agent.sh hello-bot                            # shippability gate
+./06-run-agent.sh hello-bot '{"input": "ping"}'             # async run → job_id
+./06-run-agent.sh hello-bot '{"input": "ping"}' wait        # inline → full RunView
+./06-run-agent.sh hello-bot '{"input": "ping"}' wait mock   # inline + deterministic
+./07-job-status.sh <job_id>                                 # poll async until done
+./08-list-jobs.sh hello-bot                                 # recent runs
+./09-run-eval.sh hello-bot                                  # kick off mock eval
+./10-eval-scorecard.sh <eval_id>                            # scorecard
+./11-eval-history.sh hello-bot                              # eval list
+./12-trace.sh <run_id>                                      # observability timeline
 ```
+
+## Picking the right run mode
+
+`06-run-agent.sh` ships with two modes — both are real, pick based on the UX you're building:
+
+| Mode | Args | Returns | When to use |
+|---|---|---|---|
+| **Async** (default) | `./06-run-agent.sh NAME INPUT_JSON` | 202 + `{job_id}` (poll with `07-job-status.sh`) | Production UX where the client doesn't block waiting; matches the worker queue path |
+| **Inline** | `./06-run-agent.sh NAME INPUT_JSON wait` | 200 + full RunView in one response | Wizard demo flow — wizard-created agents work end-to-end (the worker pod doesn't have those bundles yet; see BACKLOG item 109) |
+| **Inline + mock** | `./06-run-agent.sh NAME INPUT_JSON wait mock` | 200 + RunView, deterministic | Tests + dev mode without API keys |
+
+For the Friday demo: **use inline mode for the wizard→run verb.** The wizard creates the agent on the API pod; inline mode runs it on the API pod; everything Just Works.
+
+For the eventual production rollout: **switch to async** once item 109 (cross-pod filesystem) lands. Wire contract stays identical — your Angular code doesn't change.
+
+## Suggested 5-minute first-day exercise
+
+Run this exact sequence to confirm every endpoint works on your wire:
+
+```bash
+cd scripts/deva-curl
+./01-health.sh                                       # version: 0.7.0 ✓
+./02-create-agent.sh "My First Bot"                  # 201 ✓
+./04-get-agent.sh my-first-bot                       # full profile ✓
+./05-validate-agent.sh my-first-bot                  # passed: true ✓
+./06-run-agent.sh my-first-bot '{"input": "hello"}' wait mock   # 200 + RunView ✓
+./03-list-agents.sh                                  # my-first-bot in the list ✓
+./09-run-eval.sh faq-agent                           # 202 + eval_id (faq-agent has dataset baked in) ✓
+./10-eval-scorecard.sh <eval_id>                     # full scorecard ✓
+./12-trace.sh <run_id-from-06>                       # timeline JSON ✓
+```
+
+If any step doesn't return what's annotated above, ping Jeremy with the script name + response.
 
 ## Mapping to your wizard's four verbs
 
