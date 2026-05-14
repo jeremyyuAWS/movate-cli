@@ -10,7 +10,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 
-readonly RUN_ID="${1:?missing run_id — get it from a successful job's result_run_id}"
+readonly RUN_ID="${1:?missing run_id; pass the result_run_id from a successful job (see 07-job-status.sh)}"
 
 echo "→ GET ${MDK_BASE}/api/v1/runs/${RUN_ID}/trace"
 mdk_curl_json GET "/api/v1/runs/${RUN_ID}/trace" | python3 -m json.tool
