@@ -84,6 +84,20 @@ _OPTIONAL_FILES: frozenset[str] = frozenset(
 )
 _ALLOWED_FILES: frozenset[str] = _REQUIRED_FILES | _OPTIONAL_FILES
 
+# Directory prefixes whose entire subtree is allowed in an uploaded
+# bundle. Used in addition to the exact-path allow-list in
+# `_ALLOWED_FILES` for content that has a flexible internal layout
+# (every skill ships its own subdir name + per-skill files).
+_ALLOWED_PREFIXES: tuple[str, ...] = (
+    # Reference-pattern skill folder shipped by `mdk init`. The MDK
+    # skill loader reads skills from <project>/skills/, NOT from
+    # inside an agent dir — so any `skills/**` files in the bundle
+    # are pure documentation. Permitted in the upload contract so the
+    # init-template scaffold round-trips cleanly through the canonical
+    # POST /api/v1/agents path.
+    "skills/",
+)
+
 
 class AgentCreationError(Exception):
     """Raised on any failure that should surface as a non-2xx HTTP
@@ -263,11 +277,14 @@ def unzip_bundle(zip_bytes: bytes) -> dict[str, bytes]:
                         f"bundle entry {original!r} has an unsafe path (must be relative, no '..')",
                         status_code=422,
                     )
-                if canonical not in _ALLOWED_FILES:
+                if canonical not in _ALLOWED_FILES and not any(
+                    canonical.startswith(prefix) for prefix in _ALLOWED_PREFIXES
+                ):
                     raise AgentCreationError(
                         f"bundle entry {canonical!r} is not part of the "
                         f"canonical layout. Allowed: "
-                        f"{sorted(_ALLOWED_FILES)}",
+                        f"{sorted(_ALLOWED_FILES)} or under any of: "
+                        f"{list(_ALLOWED_PREFIXES)}",
                         status_code=422,
                     )
                 files[canonical] = zf.read(original)
@@ -322,11 +339,19 @@ def _validate_layout(files: dict[str, bytes]) -> None:
             f"Required: {sorted(_REQUIRED_FILES)}",
             status_code=422,
         )
-    extras = keys - _ALLOWED_FILES
+    # Filter extras through the prefix allow-list so legitimate
+    # reference-folder content (skills/**, future contexts/**, etc.)
+    # passes; only files with no canonical home land in `extras`.
+    extras = {
+        k
+        for k in keys - _ALLOWED_FILES
+        if not any(k.startswith(prefix) for prefix in _ALLOWED_PREFIXES)
+    }
     if extras:
         raise AgentCreationError(
             f"bundle contains files outside the canonical layout: "
-            f"{sorted(extras)}. Allowed: {sorted(_ALLOWED_FILES)}",
+            f"{sorted(extras)}. Allowed: {sorted(_ALLOWED_FILES)} "
+            f"or under any of: {list(_ALLOWED_PREFIXES)}",
             status_code=422,
         )
 

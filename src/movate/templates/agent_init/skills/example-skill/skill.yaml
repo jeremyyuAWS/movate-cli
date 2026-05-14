@@ -1,0 +1,105 @@
+api_version: movate/v1
+kind: Skill
+
+# ---------------------------------------------------------------------------
+# Example skill — what a skill.yaml looks like.
+#
+# This file ships inside the agent template purely as a reference. To
+# ACTUALLY use it with an agent:
+#
+#   1. Move this folder up to your project's skills/ directory:
+#        mv skills/example-skill ../skills/example-skill
+#      (the canonical layout puts `skills/` at the project root,
+#      sibling to `agents/`. The skill loader reads from that
+#      project-root location; copies inside an agent dir aren't
+#      auto-discovered.)
+#
+#   2. Implement the Python function the `implementation.entry` points
+#      at (or change to a different `kind` — http / mcp).
+#
+#   3. List the skill name in your agent.yaml's `skills:` field:
+#        skills:
+#          - example-skill
+#
+#   4. Validate + run:
+#        mdk validate <your-agent>
+#        mdk run <your-agent> '{"text": "test"}'
+# ---------------------------------------------------------------------------
+
+# Skill identity. Same naming rules as agents:
+# lowercase, alphanumeric + hyphens, no leading or trailing hyphen.
+name: example-skill
+version: 0.1.0
+description: Returns the current UTC timestamp in ISO-8601 format.
+owner: ""
+
+# ---------------------------------------------------------------------------
+# I/O schemas (inline shorthand — same syntax as agent.yaml).
+# ---------------------------------------------------------------------------
+schema:
+  # This skill takes no input. The shorthand for "any empty object" is
+  # an empty dict; compiles to a JSON Schema with `properties: {}` and
+  # `required: []`. The agent invokes the skill without arguments.
+  input: {}
+  output:
+    # ISO-8601 UTC string the model can splice into a response.
+    iso: string
+    # Unix epoch seconds for cases where the consumer wants integer math.
+    epoch_seconds: integer
+
+# ---------------------------------------------------------------------------
+# Implementation — how the skill executes when invoked.
+# ---------------------------------------------------------------------------
+implementation:
+  # kind: python | http | mcp
+  #
+  # python — entry is a `pkg.mod:func` reference resolved via
+  #   importlib. The function receives the validated input dict and a
+  #   SkillExecutionContext; returns a dict matching `schema.output`.
+  #
+  # http — entry is a URL (https://...). Input is sent as a JSON body
+  #   (POST default); response body is parsed + validated against
+  #   `schema.output`. Auth via `auth: bearer-from-env:VAR_NAME`.
+  #
+  # mcp — entry names the MCP server subprocess; `tool:` names the
+  #   specific tool exposed by that server.
+  kind: python
+
+  # Point this at your real Python function. The placeholder below
+  # won't import — replace with your project's actual module path.
+  # Example wiring (you'd write this in your project):
+  #
+  #   # myproject/skills/time.py
+  #   from datetime import datetime, timezone
+  #   def get_current_time(input_payload: dict, ctx) -> dict:
+  #       now = datetime.now(timezone.utc)
+  #       return {"iso": now.isoformat(), "epoch_seconds": int(now.timestamp())}
+  entry: "myproject.skills.time:get_current_time"
+
+# ---------------------------------------------------------------------------
+# Cost — added to the agent's per-run cost budget when the skill fires.
+# Free for read-only utilities like this one.
+# ---------------------------------------------------------------------------
+cost:
+  per_call_usd: 0.0
+
+# ---------------------------------------------------------------------------
+# Side effects — documentary annotation for operator review. Options:
+#   read-only       — pure function, no side effects (this skill)
+#   network         — makes outbound HTTP calls
+#   filesystem      — reads / writes local files
+#   mutates-state   — changes persistent state (DB writes, payments, etc.)
+# ---------------------------------------------------------------------------
+side_effects: read-only
+
+# Free-form tags surfaced in `mdk show` and used by future marketplace
+# search facets. Slug-style: lowercase, alphanumeric, hyphens.
+tags:
+  - time
+  - utility
+
+# Optional per-call timeout override (milliseconds). Unset =
+# inherits the calling agent's `timeouts.call_ms`. Set explicitly when
+# the skill's external dependency is slower or faster than the agent's
+# default budget.
+# timeout_call_ms: 5000

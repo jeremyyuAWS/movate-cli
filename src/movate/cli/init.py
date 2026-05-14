@@ -60,3 +60,12 @@ def init(
     console.print("\nNext steps:")
     console.print(f"  movate validate {dest}")
     console.print(f"  movate run {dest} --mock '{{}}'   # provide input matching schema/input.json")
+    if (dest / "skills" / "example-skill").is_dir():
+        # The default template ships a reference skill folder. Surface it
+        # here so users know it exists + know where to look for the
+        # pattern. Other templates may not include it; the dir-exists
+        # check keeps the hint accurate.
+        console.print(
+            f"\n[dim]see [bold]{dest / 'skills' / 'example-skill' / 'README.md'}[/bold] "
+            f"for the skill pattern (Python / HTTP / MCP backends).[/dim]"
+        )

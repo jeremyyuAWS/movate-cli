@@ -71,6 +71,18 @@ schema:
     # template's "Output Schema" section.
     message: string
 
+# Skills — declare here to give the model access to callable tools at
+# inference time (Python functions, HTTP endpoints, MCP tools). The
+# init template ships an example pattern under `./skills/example-skill/`
+# — open its README.md to see how a skill.yaml is structured + how to
+# move it to the project-level `skills/` folder where the loader
+# actually discovers it. Uncomment + name your skills here once
+# you've moved them up:
+#
+# skills:
+#   - example-skill
+skills: []
+
 evals:
   dataset: ./evals/dataset.jsonl
 
