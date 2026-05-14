@@ -19,13 +19,15 @@ readonly GATE="${2:-0.0}"
 readonly RUNS="${3:-1}"
 readonly MOCK="${4:-true}"
 
+# Coerce the bash 'true'/'false' string into a proper JSON bool.
+mock_bool=$([[ "${MOCK}" == "true" ]] && echo "True" || echo "False")
 body=$(python3 -c "
 import json
 print(json.dumps({
     'gate': ${GATE},
     'gate_mode': 'mean',
     'runs': ${RUNS},
-    'mock': ${MOCK}
+    'mock': ${mock_bool}
 }))
 ")
 

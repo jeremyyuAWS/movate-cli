@@ -874,43 +874,117 @@ def build_app(
 
     @v1.post(
         "/agents/{name}/runs",
-        response_model=RunAccepted,
-        status_code=202,
+        # Union response: 202 + RunAccepted in async mode (default);
+        # 200 + RunView when ?wait=true. FastAPI auto-generates a
+        # oneOf in OpenAPI so the Angular client can branch.
+        response_model=RunAccepted | RunView,
         tags=["agents-v1"],
     )
     async def v1_agent_run(
         name: str,
         body: AgentRunSubmission,
         request: Request,
+        response: Response,
         ctx: AuthContext = Depends(auth_dep),
-    ) -> RunAccepted:
-        """Queue an agent run.
+        wait: bool = False,
+    ) -> RunAccepted | RunView:
+        """Run an agent. Two modes:
+
+        * **Default (?wait=false):** queue a job for the worker pool
+          to claim. Returns 202 + ``{job_id, status: queued}``. Angular
+          polls ``GET /jobs/{job_id}`` until terminal.
+
+        * **Inline mode (?wait=true):** execute synchronously inside
+          the API request and return the resulting ``RunView`` (200).
+          Same Executor + provider stack the worker uses, but the run
+          happens in-process so wizard-created agents (which don't
+          ship to the worker pod yet — see BACKLOG item 109) work
+          end-to-end. Trade-off: the request blocks for the full
+          agent duration (typically a few seconds for one LLM call;
+          can be longer with tool-use loops).
 
         URL-anchored variant of ``POST /run`` — the agent name comes
-        from the path, ``kind=AGENT`` is implicit, the body only
-        carries the input payload + optional notify_email. REST-clean
-        for Angular's resource-oriented mental model (``POST /agents/
+        from the path, ``kind=AGENT`` is implicit. REST-clean for
+        Angular's resource-oriented mental model (``POST /agents/
         faq-bot/runs`` reads as "create a run under faq-bot").
 
-        Returns ``202 Accepted`` + ``{job_id, status: queued}``. The
-        Angular client then polls ``GET /jobs/{job_id}`` (today's
-        endpoint) or — once item 75 (SSE) lands — streams events on
-        ``GET /api/v1/jobs/{job_id}/events``.
+        Friday-demo path uses ``wait=true`` for the wizard→run
+        verb so wizard-created agents respond. Worker-queue path
+        (default) is for production load where the client polls.
 
-        Sync mode (``?wait=true``) is deferred; the Angular client's
-        BFF can implement the wait pattern client-side if needed.
-
-        Errors:
+        Errors (both modes):
 
         * **401** — missing / bad bearer token
         * **404** — agent not in the registry
         * **422** — body shape failure (FastAPI handles this for us)
+        * **500** — (inline mode only) execution failure surfaces
+          here; the RunView's ``error`` field carries the typed info
         """
         agents: list[AgentBundle] = request.app.state.agents
         bundle = next((b for b in agents if b.spec.name == name), None)
         if bundle is None:
             raise not_found("agent", name)
 
+        store: StorageProvider = request.app.state.storage
+
+        if wait:
+            # Inline mode — same Executor stack the worker uses.
+            # Lazy imports keep cold-start light for the async path.
+            from movate.core.executor import Executor  # noqa: PLC0415
+            from movate.core.models import RunRequest as _RunRequest  # noqa: PLC0415
+            from movate.providers.litellm import LiteLLMProvider  # noqa: PLC0415
+            from movate.providers.mock import MockProvider  # noqa: PLC0415
+            from movate.providers.pricing import load_pricing  # noqa: PLC0415
+            from movate.tracing import build_tracer  # noqa: PLC0415
+
+            # mock=true → deterministic MockProvider (sub-second, no
+            # API keys). Default uses the agent's declared model via
+            # LiteLLM. Same pattern the eval endpoint uses.
+            provider: object = MockProvider() if body.mock else LiteLLMProvider()
+
+            executor = Executor(
+                provider=provider,  # type: ignore[arg-type]
+                pricing=load_pricing(),
+                storage=store,
+                tracer=build_tracer(),
+                tenant_id=ctx.tenant_id,
+            )
+            run_request = _RunRequest(agent=name, input=body.input)
+            run_response = await executor.execute(bundle, run_request)
+            # Try to fetch the persisted RunRecord. On success the
+            # executor always persists; on error it persists a
+            # FailureRecord instead (no RunRecord). We handle both:
+            # success → return the canonical RunView from storage;
+            # error → synthesize a RunView shape from the RunResponse
+            # + ErrorInfo so the wire contract is consistent.
+            run_record = await store.get_run(run_response.run_id, tenant_id=ctx.tenant_id)
+            response.status_code = 200
+            if run_record is not None:
+                return RunView.from_record(run_record)
+            # Error path — build a minimal RunView. Status / error /
+            # metrics come from the RunResponse; identifiers reflect
+            # what the executor stamped during the failed attempt.
+            from datetime import UTC  # noqa: PLC0415
+            from datetime import datetime as _datetime  # noqa: PLC0415
+
+            return RunView(
+                run_id=run_response.run_id,
+                job_id="",
+                agent=bundle.spec.name,
+                agent_version=bundle.spec.version,
+                prompt_hash=bundle.prompt_hash,
+                provider=bundle.spec.model.provider,
+                provider_version="",
+                pricing_version="",
+                status=JobStatus.ERROR if run_response.status == "error" else JobStatus.SUCCESS,
+                input=body.input,
+                output=None,
+                metrics=run_response.metrics,
+                error=run_response.error,
+                created_at=_datetime.now(UTC),
+            )
+
+        # Default async path — same as before.
         job = JobRecord(
             job_id=str(uuid4()),
             tenant_id=ctx.tenant_id,
@@ -921,8 +995,8 @@ def build_app(
             api_key_id=ctx.api_key_id,
             notify_email=body.notify_email,
         )
-        store: StorageProvider = request.app.state.storage
         await store.save_job(job)
+        response.status_code = 202
         return RunAccepted(job_id=job.job_id, status=job.status)
 
     @v1.get(

@@ -526,6 +526,17 @@ class AgentRunSubmission(BaseModel):
             "address when the run reaches a terminal status."
         ),
     )
+    mock: bool = Field(
+        default=False,
+        description=(
+            "Only meaningful with ``?wait=true`` (inline mode). When "
+            "true, runs the agent against the deterministic MockProvider "
+            "instead of LiteLLM — no API keys needed, sub-second output. "
+            "Default false uses the agent's declared model. Ignored in "
+            "async/worker mode (the worker has its own provider "
+            "configuration)."
+        ),
+    )
 
 
 class AgentValidationIssue(BaseModel):

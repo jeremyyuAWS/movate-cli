@@ -19,6 +19,16 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
+      # Catches pyproject.toml ↔ uv.lock drift. If you bump a dep in
+      # pyproject.toml without re-running `uv lock`, the Docker build's
+      # `uv sync --frozen` installs the OLD lockfile contents — which
+      # bit us on 2026-05-13 (python-multipart added to runtime extra
+      # but not in uv.lock → ACA container crash-looped on startup).
+      # Cheap CI step that prevents a class of "works locally, breaks
+      # the deploy" failures.
+      - name: Lockfile freshness
+        run: uv lock --check
+
       - name: Sync deps
         run: uv sync --all-extras --dev
 
