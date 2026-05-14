@@ -53,6 +53,13 @@ def scan_agents(root: Path) -> list[AgentBundle]:
     for entry in sorted(root.iterdir()):
         if not entry.is_dir():
             continue
+        # Skip dot-prefixed dirs (.git, .staging-*, .deleted-*, etc).
+        # The runtime's POST + DELETE endpoints use .staging-* for
+        # tmpdir staging during create + .deleted-* for soft-deleted
+        # bundles awaiting recovery; both have valid agent.yaml files
+        # inside but MUST NOT show up in the live registry.
+        if entry.name.startswith("."):
+            continue
         if not (entry / "agent.yaml").exists():
             # Not every subdirectory is an agent — skip silently.
             # Could be a `.git`, an `evals/` shared dataset, etc.

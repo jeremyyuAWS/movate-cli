@@ -504,6 +504,24 @@ class WizardAgentSubmission(BaseModel):
     ``foundation-<slug>`` tag."""
 
 
+class AgentDeletedView(BaseModel):
+    """``DELETE /api/v1/agents/{name}`` response.
+
+    Soft-delete result. The agent's bundle has been moved to a
+    sibling ``.deleted-<name>-<timestamp>/`` directory under the
+    runtime's agents_path — recoverable out-of-band by the operator
+    until a future cron sweep removes it (7-day window TBD).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    deleted_dir: str
+    """Path-relative-to-agents-root where the bundle now lives.
+    E.g. ``.deleted-faq-bot-1747178400``. Operators looking to
+    restore can ``mv`` it back to the original name."""
+
+
 class AgentRunSubmission(BaseModel):
     """``POST /api/v1/agents/{name}/runs`` request body.
 
@@ -721,6 +739,7 @@ class AgentDetailView(BaseModel):
 __all__ = [
     "AgentCreatedView",
     "AgentDatasetInfo",
+    "AgentDeletedView",
     "AgentDetailView",
     "AgentListView",
     "AgentRunSubmission",
