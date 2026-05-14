@@ -20,6 +20,14 @@
 #   ./06-run-agent.sh my-agent '{"input": "foo"}'          # custom, async
 #   ./06-run-agent.sh my-agent '{"input": "foo"}' wait     # inline + real LLM
 #   ./06-run-agent.sh my-agent '{"input": "foo"}' wait mock # inline + mock provider
+#
+# Input field name (the inner key inside the JSON):
+#   * Wizard-created agents (POST /api/v1/agents/from-wizard): {"input": "..."}
+#   * `mdk init` template agents: {"text": "..."}
+#   * Any other agent: whatever its input schema declares (see
+#     ./04-get-agent.sh <name> for the schema). Default below assumes
+#     the wizard shape since 02-create-agent.sh uses the wizard
+#     endpoint.
 
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 

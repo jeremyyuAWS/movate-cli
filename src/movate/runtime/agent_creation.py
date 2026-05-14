@@ -40,7 +40,6 @@ testable without spinning up FastAPI.
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import tempfile
@@ -62,16 +61,42 @@ if TYPE_CHECKING:
 # silently would mean writing files we don't know how to render in
 # ``mdk show`` yet; rejecting them with a clear "deferred to v0.8"
 # error keeps the contract honest.
+# Minimum a bundle must ship — every agent needs the spec + a prompt.
+# Schemas can live INLINE in agent.yaml (shorthand) or as path-form
+# JSON files; either way works downstream, so neither file is
+# universally required at the layout level. The loader catches any
+# real mismatch (e.g. agent.yaml references ./schema/input.json but
+# the file's missing) at load time with a clear error.
 _REQUIRED_FILES: frozenset[str] = frozenset(
     {
         "agent.yaml",
         "prompt.md",
-        "schema/input.json",
-        "schema/output.json",
     }
 )
-_OPTIONAL_FILES: frozenset[str] = frozenset({"evals/dataset.jsonl"})
+_OPTIONAL_FILES: frozenset[str] = frozenset(
+    {
+        # Used by path-form agents. Wizard agents (inline shorthand)
+        # don't ship these.
+        "schema/input.json",
+        "schema/output.json",
+        "evals/dataset.jsonl",
+    }
+)
 _ALLOWED_FILES: frozenset[str] = _REQUIRED_FILES | _OPTIONAL_FILES
+
+# Directory prefixes whose entire subtree is allowed in an uploaded
+# bundle. Used in addition to the exact-path allow-list in
+# `_ALLOWED_FILES` for content that has a flexible internal layout
+# (every skill ships its own subdir name + per-skill files).
+_ALLOWED_PREFIXES: tuple[str, ...] = (
+    # Reference-pattern skill folder shipped by `mdk init`. The MDK
+    # skill loader reads skills from <project>/skills/, NOT from
+    # inside an agent dir — so any `skills/**` files in the bundle
+    # are pure documentation. Permitted in the upload contract so the
+    # init-template scaffold round-trips cleanly through the canonical
+    # POST /api/v1/agents path.
+    "skills/",
+)
 
 
 class AgentCreationError(Exception):
@@ -252,11 +277,14 @@ def unzip_bundle(zip_bytes: bytes) -> dict[str, bytes]:
                         f"bundle entry {original!r} has an unsafe path (must be relative, no '..')",
                         status_code=422,
                     )
-                if canonical not in _ALLOWED_FILES:
+                if canonical not in _ALLOWED_FILES and not any(
+                    canonical.startswith(prefix) for prefix in _ALLOWED_PREFIXES
+                ):
                     raise AgentCreationError(
                         f"bundle entry {canonical!r} is not part of the "
                         f"canonical layout. Allowed: "
-                        f"{sorted(_ALLOWED_FILES)}",
+                        f"{sorted(_ALLOWED_FILES)} or under any of: "
+                        f"{list(_ALLOWED_PREFIXES)}",
                         status_code=422,
                     )
                 files[canonical] = zf.read(original)
@@ -311,11 +339,19 @@ def _validate_layout(files: dict[str, bytes]) -> None:
             f"Required: {sorted(_REQUIRED_FILES)}",
             status_code=422,
         )
-    extras = keys - _ALLOWED_FILES
+    # Filter extras through the prefix allow-list so legitimate
+    # reference-folder content (skills/**, future contexts/**, etc.)
+    # passes; only files with no canonical home land in `extras`.
+    extras = {
+        k
+        for k in keys - _ALLOWED_FILES
+        if not any(k.startswith(prefix) for prefix in _ALLOWED_PREFIXES)
+    }
     if extras:
         raise AgentCreationError(
             f"bundle contains files outside the canonical layout: "
-            f"{sorted(extras)}. Allowed: {sorted(_ALLOWED_FILES)}",
+            f"{sorted(extras)}. Allowed: {sorted(_ALLOWED_FILES)} "
+            f"or under any of: {list(_ALLOWED_PREFIXES)}",
             status_code=422,
         )
 
@@ -358,35 +394,6 @@ def _write_files(staging: Path, files: dict[str, bytes]) -> None:
 # ---------------------------------------------------------------------------
 # Mova iO wizard adapter — JSON submission → canonical bundle bytes
 # ---------------------------------------------------------------------------
-
-
-# Default I/O schemas applied when the wizard omits them. Free-form
-# single-field shapes the Mova iO UI can render with generic
-# textareas. Agents whose I/O needs richer structure can still POST
-# the multipart variant with explicit schemas.
-_DEFAULT_INPUT_SCHEMA = {
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "type": "object",
-    "properties": {
-        "input": {
-            "type": "string",
-            "description": "Free-form input text the agent should respond to.",
-        }
-    },
-    "required": ["input"],
-}
-
-_DEFAULT_OUTPUT_SCHEMA = {
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "type": "object",
-    "properties": {
-        "output": {
-            "type": "string",
-            "description": "The agent's free-form text response.",
-        }
-    },
-    "required": ["output"],
-}
 
 
 def _slugify(value: str) -> str:
@@ -458,6 +465,11 @@ def wizard_to_bundle_files(submission: WizardAgentSubmission) -> dict[str, bytes
     # without manual sanitization.
     import yaml  # noqa: PLC0415
 
+    # Inline-shorthand schemas (no separate JSON files). Same direction
+    # as the `mdk init` template — fewer files per agent, YAML comments
+    # supported, compiles to identical JSON Schema dicts downstream. The
+    # field names (`input` / `output`) stay the same to preserve the
+    # wire contract Mova iO already integrates against.
     agent_yaml_data: dict[str, object] = {
         "api_version": "movate/v1",
         "kind": "Agent",
@@ -467,8 +479,8 @@ def wizard_to_bundle_files(submission: WizardAgentSubmission) -> dict[str, bytes
         "model": {"provider": submission.ai_model},
         "prompt": "./prompt.md",
         "schema": {
-            "input": "./schema/input.json",
-            "output": "./schema/output.json",
+            "input": {"input": "string"},
+            "output": {"output": "string"},
         },
     }
 
@@ -498,11 +510,13 @@ def wizard_to_bundle_files(submission: WizardAgentSubmission) -> dict[str, bytes
 
     agent_yaml_bytes = yaml.safe_dump(agent_yaml_data, sort_keys=False).encode("utf-8")
 
+    # Only 2 files now — schemas live inline in agent.yaml (see the
+    # `schema:` block built above). The bundle layout is intentionally
+    # smaller than the multipart-create endpoint's 4-file canonical
+    # form; the loader handles both shapes transparently.
     return {
         "agent.yaml": agent_yaml_bytes,
         "prompt.md": submission.agent_prompt.encode("utf-8"),
-        "schema/input.json": json.dumps(_DEFAULT_INPUT_SCHEMA, indent=2).encode("utf-8"),
-        "schema/output.json": json.dumps(_DEFAULT_OUTPUT_SCHEMA, indent=2).encode("utf-8"),
     }
 
 

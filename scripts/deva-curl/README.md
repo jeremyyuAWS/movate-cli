@@ -68,6 +68,23 @@ cd scripts/deva-curl
 
 If any step doesn't return what's annotated above, ping Jeremy with the script name + response.
 
+## Heads-up — run input field names vary by agent type
+
+The inner JSON key inside `06-run-agent.sh`'s payload depends on how
+the agent was created:
+
+| Agent created via | Run payload shape |
+|---|---|
+| `02-create-agent.sh` (POST `/api/v1/agents/from-wizard`) | `{"input": "..."}` |
+| `mdk init` template (CLI) | `{"text": "..."}` |
+| Multipart POST with custom schemas | whatever your schema declares |
+
+If you're not sure which shape an agent wants, call
+`./04-get-agent.sh <name>` first — the `input_schema.required` array
+lists the field name(s) the runtime will accept. The 06-run-agent
+default body assumes the wizard shape (`{"input": "hello world"}`)
+because the canonical demo path uses 02-create-agent.
+
 ## Mapping to your wizard's four verbs
 
 | Verb | Script(s) |

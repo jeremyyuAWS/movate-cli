@@ -87,9 +87,26 @@ def test_load_missing_prompt(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_load_invalid_input_schema(tmp_path: Path) -> None:
-    agent_dir = _scaffold_agent(tmp_path / "demo")
+    # The init template uses inline-shorthand schemas now, so to test
+    # the path-form's JSON Schema validation we build the agent.yaml
+    # explicitly with file paths + drop a malformed input.json in.
+    agent_dir = _write_agent(
+        tmp_path / "demo",
+        schema_block=("schema:\n  input: ./schema/input.json\n  output: ./schema/output.json\n"),
+    )
+    (agent_dir / "schema").mkdir()
     (agent_dir / "schema" / "input.json").write_text(
         json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "potato"})
+    )
+    (agent_dir / "schema" / "output.json").write_text(
+        json.dumps(
+            {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+                "additionalProperties": False,
+            }
+        )
     )
     with pytest.raises(AgentLoadError, match="invalid JSON schema"):
         load_agent(agent_dir)

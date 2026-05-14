@@ -39,16 +39,20 @@ runner = CliRunner(mix_stderr=False)
 
 @pytest.mark.unit
 def test_watched_paths_includes_yaml_prompt_and_schemas(tmp_path: Path) -> None:
-    """The default scaffold has agent.yaml + prompt + 2 schemas +
-    dataset; the watcher must include all of them."""
+    """The default scaffold has agent.yaml + prompt + dataset (schemas
+    are inline in agent.yaml as shorthand — no separate JSON files
+    in the default template). The watcher must include all of them."""
     agent_dir = scaffold_agent(tmp_path / "demo", name="demo")
     watched = _compute_watched_paths(agent_dir)
     names = {p.name for p in watched.paths}
     assert "agent.yaml" in names
     assert "prompt.md" in names
-    assert "input.json" in names
-    assert "output.json" in names
     assert "dataset.jsonl" in names
+    # Schemas live inline in the default template's agent.yaml; when
+    # they change the watcher picks up the agent.yaml edit and reloads.
+    # The path-form variant (schema/*.json files) is still supported;
+    # it's tested elsewhere via _scaffold_with_schemas in
+    # test_prompt_linter.py.
 
 
 @pytest.mark.unit

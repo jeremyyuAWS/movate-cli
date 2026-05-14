@@ -259,6 +259,36 @@ def test_create_zip_bundle_with_top_level_dir_strips_prefix(
     assert (agents_path / "demo" / "agent.yaml").exists()
 
 
+def test_create_zip_bundle_with_skills_subdir_round_trips(
+    client: TestClient, agents_path: Path, auth_header: dict[str, str]
+) -> None:
+    """Bundles that ship a reference ``skills/<name>/`` folder
+    (what `mdk init` produces) must upload cleanly. The skill files
+    are documentary inside the agent dir — they're not registered as
+    live skills — but the layout validation has to permit them so
+    init-template bundles round-trip through the canonical create
+    endpoint."""
+    zip_bytes = _zipped_bundle(
+        extra_entries={
+            "skills/example-skill/skill.yaml": (
+                b"api_version: movate/v1\nkind: Skill\nname: example\n"
+            ),
+            "skills/example-skill/README.md": b"# example\n",
+        },
+    )
+    r = client.post(
+        "/api/v1/agents",
+        files={"bundle": ("demo.zip", zip_bytes, "application/zip")},
+        headers=auth_header,
+    )
+    assert r.status_code == 201, r.text
+    # Confirm the skills/ files landed on disk alongside the agent
+    # (they ride along with the bundle; the operator copies them up
+    # to <project>/skills/ when ready to wire as real skills).
+    assert (agents_path / "demo" / "skills" / "example-skill" / "skill.yaml").exists()
+    assert (agents_path / "demo" / "skills" / "example-skill" / "README.md").exists()
+
+
 # ---------------------------------------------------------------------------
 # Two-mode contract — 400 errors
 # ---------------------------------------------------------------------------
