@@ -211,3 +211,92 @@ def test_run_extra_fields_rejected(client: TestClient, auth_setup) -> None:
         headers=auth_header,
     )
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# ?wait=true inline mode (item 110)
+# ---------------------------------------------------------------------------
+
+
+def test_run_wait_true_with_mock_returns_200_and_runview(client: TestClient, auth_setup) -> None:
+    """``?wait=true`` + ``mock=true`` executes inline at the endpoint
+    using the deterministic MockProvider and returns the RunView
+    directly. Same Executor stack the worker uses; same persisted
+    RunRecord; just a different transport (HTTP response body vs.
+    polling)."""
+    auth_header, _ = auth_setup
+    _create_agent(client, auth_header)
+
+    r = client.post(
+        "/api/v1/agents/runs-demo/runs?wait=true",
+        json={"input": {"text": "hello world"}, "mock": True},
+        headers=auth_header,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # RunView shape — note these fields are NOT in RunAccepted.
+    assert "run_id" in body
+    assert "output" in body
+    assert "metrics" in body
+    assert body["agent"] == "runs-demo"
+    assert body["status"] in {"success", "error"}
+    # MockProvider returns deterministic output; we just confirm
+    # something landed rather than asserting exact text (the
+    # MockProvider's response shape can evolve).
+    assert body["output"] is not None or body["error"] is not None
+
+
+def test_run_wait_false_default_returns_202_and_runaccepted(client: TestClient, auth_setup) -> None:
+    """Default behavior (?wait omitted or false) is unchanged from
+    item 59 — queue a job, return 202 + ``{job_id, status: queued}``.
+    Regression guard against the new query param changing the
+    async path."""
+    auth_header, _ = auth_setup
+    _create_agent(client, auth_header)
+
+    r = client.post(
+        "/api/v1/agents/runs-demo/runs",
+        json={"input": {"text": "hi"}},
+        headers=auth_header,
+    )
+    assert r.status_code == 202, r.text
+    body = r.json()
+    # RunAccepted shape — NOT a RunView.
+    assert body["status"] == "queued"
+    assert "job_id" in body
+    assert "run_id" not in body  # async mode has no run_id yet
+    assert "output" not in body
+
+
+def test_run_wait_false_explicit_returns_202(client: TestClient, auth_setup) -> None:
+    """Same as the default test but with ``?wait=false`` explicit
+    in the URL. Confirms the param parses correctly."""
+    auth_header, _ = auth_setup
+    _create_agent(client, auth_header)
+    r = client.post(
+        "/api/v1/agents/runs-demo/runs?wait=false",
+        json={"input": {"text": "hi"}},
+        headers=auth_header,
+    )
+    assert r.status_code == 202
+    assert r.json()["status"] == "queued"
+
+
+def test_run_wait_true_unknown_agent_returns_404(client: TestClient, auth_setup) -> None:
+    """Same 404 surface in inline mode as in async mode — agent
+    lookup happens before the executor builds."""
+    auth_header, _ = auth_setup
+    r = client.post(
+        "/api/v1/agents/never-existed/runs?wait=true",
+        json={"input": {"text": "hi"}, "mock": True},
+        headers=auth_header,
+    )
+    assert r.status_code == 404
+
+
+def test_run_wait_true_without_auth_returns_401(client: TestClient) -> None:
+    r = client.post(
+        "/api/v1/agents/runs-demo/runs?wait=true",
+        json={"input": {"text": "hi"}, "mock": True},
+    )
+    assert r.status_code == 401
