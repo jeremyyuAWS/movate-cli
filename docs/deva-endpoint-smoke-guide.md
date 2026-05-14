@@ -15,44 +15,41 @@ same shape:
 3. **Expected response** — what you should see
 4. **Angular notes** — common gotchas when wiring it into a typed client
 
-Run the steps in order. Section 0 sets up the env vars every other
-section uses.
+Run the steps in order. Every curl uses `${MDK_BASE}` and `${MDK_TOKEN}`
+shell variables — Section 0 sets them once, then everything else
+runs paste-as-is.
 
 ---
 
-## Section 0 — Setup
+## Section 0 — Setup (once per shell session)
 
-### 0.1 — Get the runtime URL and bearer token
+### 0.1 — Find your connection info
 
-You should have received these from the MDK team in your onboarding
-message. They look like this:
+The MDK team sends you four values out-of-band (Teams DM, email, or
+your password manager). They look like:
 
 ```
 Runtime URL:    https://movate-dev-api.<hash>.eastus2.azurecontainerapps.io
-Bearer:         mvt_live_<tenant>_<keyid>_<secret>
+Bearer token:   mvt_live_<tenant>_<keyid>_<secret>
 Tenant ID:      <uuid>
+CORS allow:     http://localhost:4200 (your prod Mova iO origin gets
+                added by the MDK team when you send us the hostname)
 ```
 
-If you don't have them yet, ping the MDK team. They mint a bearer for
-your tenant via a one-line internal command — takes ~30 seconds for
-them to send you a fresh one. You should never need to generate this
-yourself.
-
-> **If your bearer ever stops working** (returns 401 on requests that
-> used to work): it's been revoked or rotated. Don't try to debug it
-> client-side — ping the team and they'll mint you a new one.
+If you don't have them yet, ping the MDK team. They mint a bearer
+for your tenant via a one-line internal command — takes ~30 seconds
+for them to send you a fresh one. You should never need to generate
+this yourself.
 
 ### 0.2 — Export them in your shell
 
-Open a terminal and run:
+Paste this with the real values from the onboarding message
+substituted in:
 
 ```bash
 export MDK_BASE="https://movate-dev-api.<hash>.eastus2.azurecontainerapps.io"
 export MDK_TOKEN="mvt_live_<your-bearer>"
 ```
-
-(Replace the placeholders with the real values from the onboarding
-message.)
 
 Verify both are set:
 
@@ -61,18 +58,21 @@ echo "${MDK_BASE}"
 echo "${MDK_TOKEN}" | head -c 20 && echo "..."
 ```
 
-> **Don't put the bearer in a file that gets committed to git.** A
-> common pattern is to put these exports in a local `.env` file
-> outside the repo (or in a gitignored file like
-> `frontend/.env.local` if it's an Angular project) and source it
-> when you start work.
+### 0.3 — Treat the bearer like a password
 
-### 0.3 — Install one helper (optional but recommended)
+- **Don't commit it** to git. If you use a `.env` file in your
+  Angular project, gitignore it.
+- **Don't paste it in tickets, chat, or screenshots.**
+- **If it ever stops working** (every previously-good request
+  starts returning 401): it's been revoked or rotated. Ping the
+  MDK team — they'll mint you a new one in ~30 seconds.
 
-Most of the smoke commands pipe responses through `python3 -m
-json.tool` for pretty-printing. Python 3 is pre-installed on macOS
-and Linux. If you prefer `jq`, that works too — `brew install jq` on
-macOS.
+### 0.4 — One helper you'll want — JSON pretty-printing
+
+Every smoke command below pipes through `python3 -m json.tool` so
+the response renders readably. Python 3 is pre-installed on macOS
+and Linux. If you prefer `jq`, that works too — `brew install jq`
+on macOS.
 
 You're set. Run through Sections 1-8 in order.
 
