@@ -70,3 +70,5 @@ infra/azure/**/*.json
 infra/azure/*.bicepparam
 !infra/azure/main.bicepparam.example
 scripts/deva-curl/.env
+my-sandisk-agent/
+openai-feedback.md
