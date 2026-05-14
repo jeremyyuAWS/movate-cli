@@ -288,8 +288,7 @@ class GitHubClient:
 
         if not isinstance(private_key, RSAPrivateKey):  # pragma: no cover
             raise GitHubError(
-                "MDK_GITHUB_PRIVATE_KEY is not an RSA private key "
-                "(GitHub Apps require RSA)",
+                "MDK_GITHUB_PRIVATE_KEY is not an RSA private key (GitHub Apps require RSA)",
                 status_code=422,
             )
 
