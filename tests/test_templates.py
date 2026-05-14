@@ -71,13 +71,36 @@ def test_template_registry_exposes_all_known() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize("name", list(TEMPLATES.keys()))
 def test_template_dir_is_present_and_complete(name: str) -> None:
-    """Every template ships with the four files a loader expects."""
+    """Every template ships with the files a loader expects.
+
+    Schemas may live in two forms:
+
+    * **External files** — ``schema/input.json`` + ``schema/output.json``.
+      The classic shape for templates with complex contracts.
+    * **Inline shorthand** — schemas defined in-place in
+      ``agent.yaml`` under the ``schema:`` key. The default init
+      template uses this form (more human-readable; no separate
+      JSON files to maintain for tiny contracts).
+
+    We accept either shape — what matters is the template loads
+    successfully end-to-end, which is the test below this one.
+    """
     path = get_template_path(name)
     assert (path / "agent.yaml").is_file()
     assert (path / "prompt.md").is_file()
-    assert (path / "schema" / "input.json").is_file()
-    assert (path / "schema" / "output.json").is_file()
     assert (path / "evals" / "dataset.jsonl").is_file()
+
+    yaml_text = (path / "agent.yaml").read_text()
+    has_inline_schemas = "schema:\n  input:\n" in yaml_text or (
+        "schema:" in yaml_text
+        and "./schema/input.json" not in yaml_text
+        and "./schema/output.json" not in yaml_text
+    )
+    if not has_inline_schemas:
+        # Path-form templates must ship the JSON Schema files they
+        # reference; inline-form templates skip the schema/ subdir.
+        assert (path / "schema" / "input.json").is_file()
+        assert (path / "schema" / "output.json").is_file()
 
 
 @pytest.mark.unit

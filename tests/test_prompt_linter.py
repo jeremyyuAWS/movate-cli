@@ -42,12 +42,75 @@ def _scaffold_with_schemas(
 ) -> Path:
     """Scaffold + overwrite prompt + (optionally) schemas. Used by the
     undeclared-input-ref / no-output-schema-reference tests where we
-    need control over the schema shape."""
+    need control over the schema shape.
+
+    The init template uses inline-shorthand schemas in agent.yaml. When
+    a test overrides one of the schemas via this helper we rewrite the
+    `schema:` block to reference the file path AND ensure the
+    `schema/` subdirectory exists — otherwise the inline-shorthand
+    block in agent.yaml takes precedence and the override is silently
+    ignored.
+    """
     agent_dir = _scaffold_with_prompt(tmp_path, prompt)
-    if input_schema is not None:
-        (agent_dir / "schema" / "input.json").write_text(json.dumps(input_schema))
-    if output_schema is not None:
-        (agent_dir / "schema" / "output.json").write_text(json.dumps(output_schema))
+    if input_schema is None and output_schema is None:
+        return agent_dir
+    schema_dir = agent_dir / "schema"
+    schema_dir.mkdir(exist_ok=True)
+
+    # Default-fill the side the caller didn't override so the loader
+    # has something valid for both. Mirrors the init template's
+    # inline shorthand compiled to JSON Schema.
+    if input_schema is None:
+        input_schema = {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+            "additionalProperties": False,
+        }
+    if output_schema is None:
+        output_schema = {
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
+            "additionalProperties": False,
+        }
+    (schema_dir / "input.json").write_text(json.dumps(input_schema))
+    (schema_dir / "output.json").write_text(json.dumps(output_schema))
+
+    # Rewrite agent.yaml's schema block to point at the JSON files
+    # instead of the default inline shorthand.
+    yaml_path = agent_dir / "agent.yaml"
+    raw = yaml_path.read_text()
+    # Find the schema: block (multi-line) and replace it with the
+    # path form. The init template's schema block spans from
+    # "schema:" through the next top-level key ("evals:"), so we
+    # match conservatively on the dedented `schema:` line + every
+    # indented line that follows until the next dedented line.
+    lines = raw.splitlines()
+    out_lines: list[str] = []
+    inside_schema = False
+    for line in lines:
+        if line.startswith("schema:"):
+            inside_schema = True
+            out_lines.append("schema:")
+            out_lines.append("  input: ./schema/input.json")
+            out_lines.append("  output: ./schema/output.json")
+            continue
+        if inside_schema:
+            # Skip subsequent lines that belong to the schema block —
+            # they are either comments (start with '#' after
+            # whitespace) or indented mapping entries (start with at
+            # least one space). The next dedented line ends the block.
+            stripped = line.lstrip()
+            indented = line.startswith((" ", "\t"))
+            is_comment = stripped.startswith("#")
+            if line == "" or indented or is_comment:
+                continue
+            inside_schema = False
+            out_lines.append(line)
+            continue
+        out_lines.append(line)
+    yaml_path.write_text("\n".join(out_lines) + "\n")
     return agent_dir
 
 
